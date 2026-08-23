@@ -17,15 +17,11 @@ pub fn resolve_and_validate_path(
 
     let raw = Path::new(path);
 
-    // Absolute paths: normalize and allow directly
-    if raw.is_absolute() {
-        let normalized = normalize_path(raw);
-        return Ok(normalized);
-    }
-
-    // Relative paths: resolve against cwd, then check boundaries
-    let absolute = cwd.join(raw);
-    let normalized = normalize_path(&absolute);
+    let normalized = if raw.is_absolute() {
+        normalize_path(raw)
+    } else {
+        normalize_path(&cwd.join(raw))
+    };
 
     if !is_within_boundaries(&normalized, cwd, additional_dirs) {
         return Err(format!(
@@ -101,12 +97,11 @@ mod tests {
     }
 
     #[test]
-    fn test_allow_absolute_path_outside_cwd() {
-        // Absolute paths are now allowed unconditionally
+    fn test_reject_absolute_path_outside_cwd() {
         let cwd = Path::new("/home/user/project");
         let result = resolve_and_validate_path("/etc/passwd", cwd, &[]);
-        assert!(result.is_ok());
-        assert_eq!(result.unwrap(), PathBuf::from("/etc/passwd"));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("outside the allowed working directories"));
     }
 
     #[test]
@@ -118,13 +113,12 @@ mod tests {
     }
 
     #[test]
-    fn test_allow_absolute_path_outside_additional_dirs() {
-        // Absolute paths are now allowed regardless of additional_dirs
+    fn test_reject_absolute_path_outside_additional_dirs() {
         let cwd = Path::new("/home/user/project");
         let additional = vec![PathBuf::from("/opt/shared")];
         let result = resolve_and_validate_path("/opt/other/data.txt", cwd, &additional);
-        assert!(result.is_ok());
-        assert_eq!(result.unwrap(), PathBuf::from("/opt/other/data.txt"));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("outside the allowed working directories"));
     }
 
     #[test]
