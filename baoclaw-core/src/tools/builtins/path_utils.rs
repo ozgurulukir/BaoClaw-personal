@@ -3,9 +3,9 @@ use std::path::{Path, PathBuf};
 /// Resolve and validate a file path, preventing path traversal attacks.
 /// Returns the normalized path.
 ///
-/// - Absolute paths are allowed unconditionally (the caller has full control).
-/// - Relative paths are resolved against `cwd` and must stay within the
-///   working directory boundaries (cwd + additional_dirs) to prevent `..` escapes.
+/// - Both absolute and relative paths must stay within the allowed
+///   working directory boundaries (cwd + additional_dirs) to prevent `..` escapes
+///   and unauthorized filesystem traversal.
 pub fn resolve_and_validate_path(
     path: &str,
     cwd: &Path,
