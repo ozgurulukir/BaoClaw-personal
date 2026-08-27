@@ -387,6 +387,7 @@ async fn handle_shared_client(
                                     "session busy: another client is currently submitting a message".into()).await;
                                 continue;
                             }
+                            session.touch_active().await;
 
                             let prompt_str = match prompt.as_str() {
                                 Some(s) => s.to_string(),
@@ -2703,6 +2704,8 @@ async fn handle_shared_client(
                             let engine = session.engine_read().await;
                             let msg_count = engine.get_messages().len();
                             let client_count = session.client_count().await;
+                            let created_at = session.created_at().to_string();
+                            let last_active = session.last_active().await;
 
                             let result = serde_json::json!({
                                 "session_id": session_id,
@@ -2710,6 +2713,8 @@ async fn handle_shared_client(
                                 "message_count": msg_count,
                                 "client_count": client_count,
                                 "model": shared.baoclaw_config.model,
+                                "created_at": created_at,
+                                "last_active": last_active,
                             });
                             let mut conn_guard = conn.lock().await;
                             let _ = conn_guard.send_response(id, result).await;

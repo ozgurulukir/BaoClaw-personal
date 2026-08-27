@@ -5346,27 +5346,46 @@ async function main() {
       return;
     }
 
-    // ── /session — session 元数据 ──
+    // ── /session — Session Metadata ──
     if (input === "/session") {
       try {
         const result = await client.request<any>("session.info", {});
+        const formatDate = (iso?: string) => {
+          if (!iso) return "Just now";
+          try {
+            const d = new Date(iso);
+            return isNaN(d.getTime())
+              ? iso
+              : d
+                  .toISOString()
+                  .replace("T", " ")
+                  .replace(/\.\d+Z$/, "");
+          } catch {
+            return iso;
+          }
+        };
         console.log(`\n${FG_ORANGE}${BOLD}🔧 Session Info${RESET}`);
         console.log(`  ${FG_GRAY}─────────────────────────────────${RESET}`);
         console.log(
-          `  ${FG_WHITE}ID:${RESET}           ${FG_CYAN}${result.session_id ?? "?"}${RESET}`,
-        );
-        console.log(`  ${FG_WHITE}工作目录:${RESET}     ${result.cwd ?? "?"}`);
-        console.log(
-          `  ${FG_WHITE}客户端数:${RESET}     ${result.client_count ?? 0}`,
+          `  ${FG_WHITE}ID:${RESET}                 ${FG_CYAN}${result.session_id ?? "?"}${RESET}`,
         );
         console.log(
-          `  ${FG_WHITE}对话轮次:${RESET}     ${result.message_count ?? 0}`,
+          `  ${FG_WHITE}Working Dir:${RESET}        ${result.cwd ?? "?"}`,
         );
         console.log(
-          `  ${FG_WHITE}创建时间:${RESET}     ${result.created_at ?? "?"}`,
+          `  ${FG_WHITE}Active Clients:${RESET}     ${result.client_count ?? 0}`,
         );
         console.log(
-          `  ${FG_WHITE}最后活跃:${RESET}     ${result.last_active ?? "?"}\n`,
+          `  ${FG_WHITE}Message Turns:${RESET}      ${result.message_count ?? 0}`,
+        );
+        console.log(
+          `  ${FG_WHITE}Model:${RESET}              ${FG_CYAN}${result.model ?? "?"}${RESET}`,
+        );
+        console.log(
+          `  ${FG_WHITE}Created At:${RESET}         ${formatDate(result.created_at)}`,
+        );
+        console.log(
+          `  ${FG_WHITE}Last Active:${RESET}        ${formatDate(result.last_active)}\n`,
         );
       } catch (err) {
         console.error(`${FG_RED}Failed to get session info: ${err}${RESET}\n`);

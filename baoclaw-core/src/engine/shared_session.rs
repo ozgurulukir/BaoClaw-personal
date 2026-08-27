@@ -27,11 +27,26 @@ pub struct SharedSession {
     connected_clients: Mutex<HashSet<ClientId>>,
     /// Monotonic counter for generating unique client IDs.
     next_client_id: AtomicU64,
+    /// Session creation timestamp (ISO 8601 / RFC 3339)
+    created_at: String,
+    /// Session last active timestamp (ISO 8601 / RFC 3339)
+    last_active: Mutex<String>,
 }
 
 impl SharedSession {
     /// Create a new SharedSession wrapping the given QueryEngine.
     pub fn new(engine: QueryEngine, broadcast_capacity: usize) -> Self {
+        let now = Utc::now().to_rfc3339();
+        Self::with_created_at(engine, broadcast_capacity, now)
+    }
+
+    /// Create a SharedSession with an explicit creation timestamp.
+    pub fn with_created_at(
+        engine: QueryEngine,
+        broadcast_capacity: usize,
+        created_at: String,
+    ) -> Self {
+        let now = Utc::now().to_rfc3339();
         let (event_tx, _) = broadcast::channel(broadcast_capacity);
         Self {
             engine: Arc::new(RwLock::new(engine)),
@@ -39,7 +54,25 @@ impl SharedSession {
             event_tx,
             connected_clients: Mutex::new(HashSet::new()),
             next_client_id: AtomicU64::new(1),
+            created_at,
+            last_active: Mutex::new(now),
         }
+    }
+
+    /// Return creation timestamp.
+    pub fn created_at(&self) -> &str {
+        &self.created_at
+    }
+
+    /// Return last active timestamp.
+    pub async fn last_active(&self) -> String {
+        self.last_active.lock().await.clone()
+    }
+
+    /// Touch last active timestamp.
+    pub async fn touch_active(&self) {
+        let mut la = self.last_active.lock().await;
+        *la = Utc::now().to_rfc3339();
     }
 
     /// Register a new client. Returns the assigned ClientId and a broadcast receiver.
@@ -168,7 +201,16 @@ impl SessionRegistry {
             (Arc::clone(existing), false)
         } else {
             let engine = config_factory();
-            let session = Arc::new(SharedSession::new(engine, 256));
+            let registry = session_persistence::load_registry(&self.persistence_dir);
+            let created_at = registry
+                .sessions
+                .iter()
+                .find(|e| e.session_id == session_id)
+                .map(|e| e.created_at.clone());
+            let session = match created_at {
+                Some(created) => Arc::new(SharedSession::with_created_at(engine, 256, created)),
+                None => Arc::new(SharedSession::new(engine, 256)),
+            };
             sessions.insert(session_id.to_string(), Arc::clone(&session));
             (session, true)
         }
