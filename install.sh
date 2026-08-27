@@ -33,7 +33,9 @@ done
 mkdir -p "$INSTALL_DIR/bin" "$BIN_DIR"
 
 # 4. Copy Rust binary
+rm -f "$INSTALL_DIR/bin/baoclaw-core"
 cp "$SCRIPT_DIR/baoclaw-core/target/release/baoclaw-core" "$INSTALL_DIR/bin/baoclaw-core"
+chmod +x "$INSTALL_DIR/bin/baoclaw-core"
 echo "✓ Rust binary → $INSTALL_DIR/bin/"
 
 # 5. Copy each gateway source

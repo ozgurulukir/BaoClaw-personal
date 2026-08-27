@@ -334,17 +334,36 @@ pub fn parse_client_method(request: &JsonRpcRequest) -> Result<ClientMethod, Rou
         "params": request.params,
     });
 
-    serde_json::from_value::<ClientMethod>(tagged).map_err(|e| {
-        // Distinguish between unknown method and bad params.
-        // If the method string doesn't match any variant, serde reports a
-        // "no variant" / "unknown variant" error.
-        let err_msg = e.to_string();
-        if err_msg.contains("unknown variant") || err_msg.contains("no variant") {
-            RouterError::UnknownMethod(request.method.clone())
-        } else {
-            RouterError::InvalidParams(err_msg)
+    match serde_json::from_value::<ClientMethod>(tagged) {
+        Ok(method) => Ok(method),
+        Err(e) => {
+            // In JSON-RPC 2.0, clients often pass `{}` (empty map) or `[]` (empty array)
+            // for zero-argument methods. Since Serde unit variants expect `params: null`,
+            // retry with `params: null` if params was empty.
+            if request.params.is_null()
+                || (request.params.is_object()
+                    && request.params.as_object().map_or(false, |o| o.is_empty()))
+                || (request.params.is_array()
+                    && request.params.as_array().map_or(false, |a| a.is_empty()))
+            {
+                let tagged_null = serde_json::json!({
+                    "method": request.method,
+                    "params": null,
+                });
+                if let Ok(method) = serde_json::from_value::<ClientMethod>(tagged_null) {
+                    return Ok(method);
+                }
+            }
+
+            // Distinguish between unknown method and bad params.
+            let err_msg = e.to_string();
+            if err_msg.contains("unknown variant") || err_msg.contains("no variant") {
+                Err(RouterError::UnknownMethod(request.method.clone()))
+            } else {
+                Err(RouterError::InvalidParams(err_msg))
+            }
         }
-    })
+    }
 }
 
 #[cfg(test)]
@@ -1012,5 +1031,19 @@ mod tests {
             }
             _ => panic!("Expected TeamExecute, got {:?}", method),
         }
+    }
+
+    #[test]
+    fn test_parse_session_info_with_empty_map() {
+        let req = make_request("session.info", json!({}));
+        let method = parse_client_method(&req).unwrap();
+        assert_eq!(method, ClientMethod::SessionInfo);
+    }
+
+    #[test]
+    fn test_parse_session_info_with_null() {
+        let req = make_request("session.info", json!(null));
+        let method = parse_client_method(&req).unwrap();
+        assert_eq!(method, ClientMethod::SessionInfo);
     }
 }
