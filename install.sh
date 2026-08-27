@@ -2,9 +2,23 @@
 # BaoClaw Installer — installs baoclaw command globally
 set -e
 
+# Ensure execution with bash even if invoked with 'sh install.sh'
+if [ -z "$BASH_VERSION" ]; then
+  exec bash "$0" "$@"
+fi
+
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 INSTALL_DIR="${BAOCLAW_HOME:-$HOME/.baoclaw}"
 BIN_DIR="${BAOCLAW_BIN_DIR:-$HOME/.local/bin}"
+
+FORCE_DEPS=0
+for arg in "$@"; do
+  case "$arg" in
+    --force-deps|--reinstall-deps|-f)
+      FORCE_DEPS=1
+      ;;
+  esac
+done
 
 echo "╔═══════════════════════════════════════╗"
 echo "║       BaoClaw Installer v2.1.0        ║"
@@ -14,46 +28,61 @@ echo ""
 # 1. Build Rust core
 echo "🔨 Building Rust core (release)..."
 cd "$SCRIPT_DIR/baoclaw-core"
-cargo build --release 2>&1 | tail -3
+cargo build --release --quiet
 cd "$SCRIPT_DIR"
 echo "✓ Rust core built"
 
-# 2. Install all TS gateway dependencies
-for dir in ts-ipc baoclaw-telegram baoclaw-web baoclaw-feishu baoclaw-whatsapp; do
-  if [ -d "$SCRIPT_DIR/$dir" ]; then
-    echo "📦 Installing $dir dependencies..."
-    cd "$SCRIPT_DIR/$dir"
-    npm install --silent 2>&1
+# 2. Build ts-ipc bundle
+if [ -d "$SCRIPT_DIR/ts-ipc" ]; then
+  if [ ! -d "$SCRIPT_DIR/ts-ipc/node_modules" ] || [ "$FORCE_DEPS" -eq 1 ]; then
+    echo "📦 Installing ts-ipc dependencies..."
+    cd "$SCRIPT_DIR/ts-ipc"
+    npm install --prefer-offline --no-audit --no-fund --silent
     cd "$SCRIPT_DIR"
+  fi
+  echo "⚡ Building fast CLI bundle (esbuild)..."
+  npm --prefix "$SCRIPT_DIR/ts-ipc" run build --silent
+  echo "✓ CLI bundle ready (dist/baoclaw.mjs)"
+fi
+
+# 3. Ensure TS gateway dependencies in source directories
+for dir in baoclaw-telegram baoclaw-web baoclaw-feishu baoclaw-whatsapp; do
+  if [ -d "$SCRIPT_DIR/$dir" ]; then
+    if [ ! -d "$SCRIPT_DIR/$dir/node_modules" ] || [ "$FORCE_DEPS" -eq 1 ]; then
+      echo "📦 Installing $dir dependencies..."
+      cd "$SCRIPT_DIR/$dir"
+      npm install --prefer-offline --no-audit --no-fund --silent
+      cd "$SCRIPT_DIR"
+    fi
     echo "✓ $dir ready"
   fi
 done
 
-# 3. Create install dirs
+# 4. Create install dirs
 mkdir -p "$INSTALL_DIR/bin" "$BIN_DIR"
 
-# 4. Copy Rust binary
+# 5. Copy Rust binary (unlink first to avoid ETXTBUSY if daemon is running)
 rm -f "$INSTALL_DIR/bin/baoclaw-core"
 cp "$SCRIPT_DIR/baoclaw-core/target/release/baoclaw-core" "$INSTALL_DIR/bin/baoclaw-core"
 chmod +x "$INSTALL_DIR/bin/baoclaw-core"
 echo "✓ Rust binary → $INSTALL_DIR/bin/"
 
-# 5. Copy each gateway source
+# 6. Copy each gateway source
 copy_gateway() {
   local name="$1"
   local src="$SCRIPT_DIR/$name"
   local dst="$INSTALL_DIR/$name"
   [ ! -d "$src" ] && return 0
   mkdir -p "$dst/src" "$dst/public" "$dst/tui" 2>/dev/null
-  # Kök seviye TS kaynakları (ts-ipc cli.ts / client.ts / vb. kökte tutar)
+  # Root level TS files (cli.ts, client.ts, colors.ts, images.ts, etc.)
   for f in "$src"/*.ts "$src"/*.tsx; do
     [ -f "$f" ] && cp "$f" "$dst/"
   done
-  # 复制 TS/TSX 源码
+  # TS/TSX sources in src/
   for f in "$src"/src/*.ts "$src"/src/*.tsx; do
     [ -f "$f" ] && cp "$f" "$dst/src/"
   done
-  # TUI 子目录（仅 ts-ipc）
+  # TUI subfolder (ts-ipc)
   if [ "$name" = "ts-ipc" ] && [ -d "$src/tui" ]; then
     mkdir -p "$dst/tui/components"
     for f in "$src"/tui/*.ts "$src"/tui/*.tsx; do
@@ -63,22 +92,27 @@ copy_gateway() {
       [ -f "$f" ] && cp "$f" "$dst/tui/components/"
     done
   fi
-  # public 静态资源（web）
+  # public static assets (web)
   [ -d "$src/public" ] && cp -r "$src/public/." "$dst/public/" 2>/dev/null
   # Gateway-specific install hooks and patch-package patches
   [ -d "$src/scripts" ] && cp -r "$src/scripts/." "$dst/scripts/" 2>/dev/null
   [ -d "$src/patches" ] && cp -r "$src/patches/." "$dst/patches/" 2>/dev/null
-  # dist 目录（构建产物）
+  # dist bundle directory
   [ -d "$src/dist" ] && mkdir -p "$dst/dist" && cp -r "$src/dist/." "$dst/dist/" 2>/dev/null
-  # 元信息
+  # package metadata
   cp "$src/package.json" "$dst/" 2>/dev/null
   cp "$src/package-lock.json" "$dst/" 2>/dev/null
   cp "$src/tsconfig.json" "$dst/" 2>/dev/null
-  cd "$dst" && npm install --silent 2>&1
-  if [ "$name" = "ts-ipc" ]; then
-    npm run build --silent 2>/dev/null || true
+
+  # Only install dependencies in destination if node_modules missing or forced
+  if [ ! -d "$dst/node_modules" ] || [ "$FORCE_DEPS" -eq 1 ]; then
+    if [ -d "$src/node_modules" ]; then
+      cp -r "$src/node_modules" "$dst/" 2>/dev/null || (cd "$dst" && npm install --prefer-offline --no-audit --no-fund --silent)
+    else
+      cd "$dst" && npm install --prefer-offline --no-audit --no-fund --silent
+    fi
   fi
-  cd "$SCRIPT_DIR"
+
   echo "✓ $name → $dst"
 }
 copy_gateway ts-ipc
@@ -87,7 +121,7 @@ copy_gateway baoclaw-web
 copy_gateway baoclaw-feishu
 copy_gateway baoclaw-whatsapp
 
-# 6. Launcher 函数（统一生成非 CLI 客户端）
+# 7. Launcher functions
 make_launcher() {
   local name="$1" target_subpath="$2" help="$3"
   cat > "$BIN_DIR/$name" << EOF
@@ -101,7 +135,7 @@ EOF
   echo "✓ $name → $BIN_DIR/$name"
 }
 
-# CLI launcher（优先使用预构建的 fast bundle，降级使用 tsx）
+# CLI launcher (fast prebundled .mjs first, tsx fallback)
 cat > "$BIN_DIR/baoclaw" << 'LAUNCHER'
 #!/bin/bash
 BAOCLAW_HOME="${BAOCLAW_HOME:-$HOME/.baoclaw}"
@@ -116,40 +150,38 @@ LAUNCHER
 chmod +x "$BIN_DIR/baoclaw"
 echo "✓ baoclaw → $BIN_DIR/baoclaw"
 
-# 其他客户端启动器
+# Other gateway launchers
 make_launcher "baoclaw-tui"       "ts-ipc/tui/index.tsx"           "Rich terminal UI (ink)"
 make_launcher "baoclaw-web"       "baoclaw-web/src/server.ts"      "Web browser chat"
 make_launcher "baoclaw-telegram"  "baoclaw-telegram/src/gateway.ts" "Telegram bot gateway"
 make_launcher "baoclaw-feishu"    "baoclaw-feishu/src/gateway.ts"  "Feishu bot gateway"
 make_launcher "baoclaw-whatsapp"  "baoclaw-whatsapp/src/gateway.ts" "WhatsApp gateway"
 
-# 7. 创建 MCP 服务器启动脚本
+# 8. MCP server launcher script
 mkdir -p "$INSTALL_DIR/bin"
 if [ -f "$SCRIPT_DIR/scripts/mcp-servers.sh" ]; then
-    cp "$SCRIPT_DIR/scripts/mcp-servers.sh" "$INSTALL_DIR/bin/mcp-servers"
-    chmod +x "$INSTALL_DIR/bin/mcp-servers"
-    echo "✓ mcp-servers → $INSTALL_DIR/bin/mcp-servers"
-    echo "  Usage: $INSTALL_DIR/bin/mcp-servers {start|stop|restart|status|debug}"
+  cp "$SCRIPT_DIR/scripts/mcp-servers.sh" "$INSTALL_DIR/bin/mcp-servers"
+  chmod +x "$INSTALL_DIR/bin/mcp-servers"
+  echo "✓ mcp-servers → $INSTALL_DIR/bin/mcp-servers"
+  echo "  Usage: $INSTALL_DIR/bin/mcp-servers {start|stop|restart|status|debug}"
 fi
 
-# 8. 复制文档到安装目录
+# 9. Docs
 mkdir -p "$INSTALL_DIR/docs"
 [ -f "$SCRIPT_DIR/docs/USAGE.md" ] && cp "$SCRIPT_DIR/docs/USAGE.md" "$INSTALL_DIR/docs/" && echo "✓ docs/USAGE.md → $INSTALL_DIR/docs/"
 [ -f "$SCRIPT_DIR/docs/DAEMON_MIGRATION.md" ] && cp "$SCRIPT_DIR/docs/DAEMON_MIGRATION.md" "$INSTALL_DIR/docs/" && echo "✓ docs/DAEMON_MIGRATION.md → $INSTALL_DIR/docs/"
 
-# 9. 更新 systemd service（如果存在）
+# 10. Systemd service update (if exists)
 SYSTEMD_DIR="$HOME/.config/systemd/user"
 if [ -d "$SYSTEMD_DIR" ] && [ -f "$SYSTEMD_DIR/baoclaw.service" ]; then
-    # 检查是否需要添加 MCP 启动
-    if ! grep -q "ExecStartPre.*mcp-servers" "$SYSTEMD_DIR/baoclaw.service" 2>/dev/null; then
-        echo ""
-        echo "⚠️  Updating systemd service to start MCP servers..."
-        # 添加 ExecStartPre 启动 MCP 服务器
-        BAOCLAW_BIN="$HOME/.baoclaw/bin"
-        sed -i "s|ExecStart=${BAOCLAW_BIN}/baoclaw-core --daemon|ExecStartPre=${BAOCLAW_BIN}/mcp-servers start\nExecStart=${BAOCLAW_BIN}/baoclaw-core --daemon|" "$SYSTEMD_DIR/baoclaw.service"
-        echo "✓ systemd service updated"
-        echo "  Run: systemctl --user daemon-reload && systemctl --user restart baoclaw"
-    fi
+  if ! grep -q "ExecStartPre.*mcp-servers" "$SYSTEMD_DIR/baoclaw.service" 2>/dev/null; then
+    echo ""
+    echo "⚠️  Updating systemd service to start MCP servers..."
+    BAOCLAW_BIN="$HOME/.baoclaw/bin"
+    sed -i "s|ExecStart=${BAOCLAW_BIN}/baoclaw-core --daemon|ExecStartPre=${BAOCLAW_BIN}/mcp-servers start\nExecStart=${BAOCLAW_BIN}/baoclaw-core --daemon|" "$SYSTEMD_DIR/baoclaw.service"
+    echo "✓ systemd service updated"
+    echo "  Run: systemctl --user daemon-reload && systemctl --user restart baoclaw"
+  fi
 fi
 
 echo ""
