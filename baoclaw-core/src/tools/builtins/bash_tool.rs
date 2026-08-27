@@ -164,6 +164,30 @@ impl Tool for BashTool {
         for arg in &args {
             cmd.arg(arg);
         }
+
+        // Sanitize child environment to prevent exfiltration of credentials
+        const SENSITIVE_ENV_KEYS: &[&str] = &[
+            "ANTHROPIC_API_KEY",
+            "OPENAI_API_KEY",
+            "DEEPSEEK_API_KEY",
+            "GEMINI_API_KEY",
+            "GOOGLE_API_KEY",
+            "BRAVE_API_KEY",
+            "BRAVE_SEARCH_API_KEY",
+            "TELEGRAM_BOT_TOKEN",
+            "FEISHU_APP_SECRET",
+            "FEISHU_APP_ID",
+            "WHATSAPP_TOKEN",
+            "AWS_SECRET_ACCESS_KEY",
+            "AWS_SESSION_TOKEN",
+            "GITHUB_TOKEN",
+            "GH_TOKEN",
+            "BAOCLAW_API_KEY",
+        ];
+        for key in SENSITIVE_ENV_KEYS {
+            cmd.env_remove(key);
+        }
+
         let child = cmd
             .kill_on_drop(true)
             .current_dir(&context.cwd)
@@ -221,8 +245,10 @@ impl Tool for BashTool {
 
         match result {
             Ok(output) => {
-                let stdout = String::from_utf8_lossy(&output.stdout);
-                let stderr = String::from_utf8_lossy(&output.stderr);
+                let raw_stdout = String::from_utf8_lossy(&output.stdout);
+                let raw_stderr = String::from_utf8_lossy(&output.stderr);
+                let stdout = crate::engine::security::redact_secrets(&raw_stdout);
+                let stderr = crate::engine::security::redact_secrets(&raw_stderr);
 
                 let exit_code = output.status.code().unwrap_or(-1);
                 let is_error = !output.status.success();

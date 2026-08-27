@@ -89,6 +89,26 @@ static DANGEROUS_PATTERNS: &[(&str, &str)] = &[
         "> /dev/nvme",
         "Dangerous command: writing directly to NVMe block device",
     ),
+    (
+        "> /dev/vd",
+        "Dangerous command: writing directly to virtual block device /dev/vd",
+    ),
+    (
+        "rm -rf ~",
+        "Destructive command: recursive home directory delete (rm -rf ~)",
+    ),
+    (
+        "rm -rf $home",
+        "Destructive command: recursive home directory delete (rm -rf $HOME)",
+    ),
+    (
+        "| bash",
+        "Dangerous command: piping untrusted remote content directly into bash",
+    ),
+    (
+        "| sh",
+        "Dangerous command: piping untrusted remote content directly into sh",
+    ),
 ];
 
 /// Check a command string against the hard blocklist.
@@ -447,6 +467,37 @@ impl<'a> Iterator for MemchrIter<'a> {
 }
 
 // ---------------------------------------------------------------------------
+// 4. Secret redaction
+// ---------------------------------------------------------------------------
+
+use std::sync::OnceLock;
+
+static REDACTION_REGEXES: OnceLock<Vec<regex::Regex>> = OnceLock::new();
+
+/// Redact sensitive API keys, tokens, credentials, and passwords from strings.
+pub fn redact_secrets(input: &str) -> String {
+    let regexes = REDACTION_REGEXES.get_or_init(|| {
+        let patterns = [
+            r"(?i)Bearer\s+[A-Za-z0-9_.\-]{16,}",
+            r#"(?i)(?:api[_-]?key|token|secret|password)\s*[:=]\s*['"]?([A-Za-z0-9_.\-]{8,})['"]?"#,
+            r"sk-[A-Za-z0-9_-]{16,}",
+            r"ghp_[A-Za-z0-9]{36}",
+            r"github_pat_[A-Za-z0-9_]{22,}",
+            r"AKIA[0-9A-Z]{16}",
+            r"xox[baprs]-[A-Za-z0-9_-]{10,}",
+        ];
+        patterns
+            .iter()
+            .filter_map(|pat| regex::Regex::new(pat).ok())
+            .collect()
+    });
+
+    regexes.iter().fold(input.to_string(), |acc, re| {
+        re.replace_all(&acc, "[REDACTED]").into_owned()
+    })
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -651,5 +702,16 @@ mod tests {
             extract_host("ftp://10.0.0.1/file"),
             Some("10.0.0.1".to_string())
         );
+    }
+
+    // === Secret Redaction tests ============================================
+
+    #[test]
+    fn test_redact_secrets() {
+        let input = "Key: sk-ant-api03-abcdefghijklmnopqrstuvwxyz123456, Token: ghp_123456789012345678901234567890123456, Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.test";
+        let redacted = redact_secrets(input);
+        assert!(!redacted.contains("sk-ant-api03"));
+        assert!(!redacted.contains("ghp_123456"));
+        assert!(redacted.contains("[REDACTED]"));
     }
 }

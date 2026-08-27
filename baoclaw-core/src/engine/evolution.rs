@@ -1354,17 +1354,13 @@ impl EvolutionEngine {
 }
 
 fn redact_training_text(text: &str) -> String {
-    let patterns = [
-        r"(?i)Bearer\s+[^\s]+",
-        r"(?i)(?:api[_-]?key|token|secret|password)\s*[:=]\s*[^\s,;]+",
-        r"sk-[A-Za-z0-9_-]{12,}",
-        r"(?i)(?:/home/|/Users/|[A-Za-z]:\\Users\\)[^\s]+",
-    ];
-    patterns.iter().fold(text.to_string(), |value, pattern| {
-        regex::Regex::new(pattern)
-            .map(|regex| regex.replace_all(&value, "[REDACTED]").into_owned())
-            .unwrap_or(value)
-    })
+    let intermediate = crate::engine::security::redact_secrets(text);
+    let path_pattern = r"(?i)(?:/home/|/Users/|[A-Za-z]:\\Users\\)[^\s]+";
+    if let Ok(re) = regex::Regex::new(path_pattern) {
+        re.replace_all(&intermediate, "[REDACTED]").into_owned()
+    } else {
+        intermediate
+    }
 }
 
 fn is_safe_skill_name(name: &str) -> bool {

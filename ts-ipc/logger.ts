@@ -15,7 +15,11 @@ export function redactSensitiveText(message: string): string {
       /((?:token|api[_-]?key|secret|password)\s*[:=]\s*)[^\s,;]+/gi,
       "$1[REDACTED]",
     )
-    .replace(/(sk-[A-Za-z0-9_-]{12,})/g, "[REDACTED]");
+    .replace(/(sk-[A-Za-z0-9_-]{16,})/g, "[REDACTED]")
+    .replace(/(ghp_[A-Za-z0-9]{36})/g, "[REDACTED]")
+    .replace(/(github_pat_[A-Za-z0-9_]{22,})/g, "[REDACTED]")
+    .replace(/(AKIA[0-9A-Z]{16})/g, "[REDACTED]")
+    .replace(/(xox[baprs]-[A-Za-z0-9_-]{10,})/g, "[REDACTED]");
 }
 
 function format(level: Level, component: string, msg: string): string {
