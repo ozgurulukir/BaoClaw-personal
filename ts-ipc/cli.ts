@@ -22,29 +22,30 @@ function turnPrefix(): string {
 // ═══════════════════════════════════════════════════════════════
 // ANSI helpers
 // ═══════════════════════════════════════════════════════════════
-const ESC = "\x1b[";
-const RESET = `${ESC}0m`;
-const BOLD = `${ESC}1m`;
-const DIM = `${ESC}2m`;
-const ITALIC = `${ESC}3m`;
-const UNDERLINE = `${ESC}4m`;
+const noColor = Boolean(process.env.NO_COLOR || process.env.TERM === "dumb");
+const ESC = noColor ? "" : "\x1b[";
+const RESET = noColor ? "" : `${ESC}0m`;
+const BOLD = noColor ? "" : `${ESC}1m`;
+const DIM = noColor ? "" : `${ESC}2m`;
+const ITALIC = noColor ? "" : `${ESC}3m`;
+const UNDERLINE = noColor ? "" : `${ESC}4m`;
 
 // Colors (optimized for dark terminal backgrounds)
-const FG_ORANGE = `${ESC}38;2;217;119;40m`; // BaoClaw orange
-const FG_CYAN = `${ESC}96m`; // bright cyan
-const FG_GREEN = `${ESC}92m`; // bright green
-const FG_YELLOW = `${ESC}93m`; // bright yellow
-const FG_RED = `${ESC}91m`; // bright red
-const FG_MAGENTA = `${ESC}95m`; // bright magenta
-const FG_BLUE = `${ESC}94m`; // bright blue
-const FG_WHITE = `${ESC}97m`; // bright white
-const FG_GRAY = `${ESC}38;2;160;160;160m`; // lighter gray (visible on dark bg)
-const FG_BRIGHT_WHITE = `${ESC}97m`;
-const BG_DARK = `${ESC}48;2;30;30;30m`;
+const FG_ORANGE = noColor ? "" : `${ESC}38;2;217;119;40m`; // BaoClaw orange
+const FG_CYAN = noColor ? "" : `${ESC}96m`; // bright cyan
+const FG_GREEN = noColor ? "" : `${ESC}92m`; // bright green
+const FG_YELLOW = noColor ? "" : `${ESC}93m`; // bright yellow
+const FG_RED = noColor ? "" : `${ESC}91m`; // bright red
+const FG_MAGENTA = noColor ? "" : `${ESC}95m`; // bright magenta
+const FG_BLUE = noColor ? "" : `${ESC}94m`; // bright blue
+const FG_WHITE = noColor ? "" : `${ESC}97m`; // bright white
+const FG_GRAY = noColor ? "" : `${ESC}38;2;160;160;160m`; // lighter gray (visible on dark bg)
+const FG_BRIGHT_WHITE = noColor ? "" : `${ESC}97m`;
+const BG_DARK = noColor ? "" : `${ESC}48;2;30;30;30m`;
 
 // Clawd body color (warm tan/beige like the original)
-const FG_CLAWD = `${ESC}38;2;210;180;140m`;
-const BG_CLAWD = `${ESC}48;2;60;50;40m`;
+const FG_CLAWD = noColor ? "" : `${ESC}38;2;210;180;140m`;
+const BG_CLAWD = noColor ? "" : `${ESC}48;2;60;50;40m`;
 
 // ═══════════════════════════════════════════════════════════════
 // Image helpers — save base64 images & iTerm2 inline display
@@ -1141,63 +1142,407 @@ function completer(line: string): [string[], string] {
 }
 
 // ═══════════════════════════════════════════════════════════════
+function printHelp(): void {
+  console.log(
+    `${FG_ORANGE}${BOLD}BaoClaw v2.1.0${RESET} — AI coding assistant powered by Rust\n`,
+  );
+  console.log(`${BOLD}USAGE:${RESET}`);
+  console.log(`  baoclaw [OPTIONS] [PROMPT]`);
+  console.log(`  <command> | baoclaw [OPTIONS] [PROMPT]\n`);
+  console.log(`${BOLD}COMMANDS:${RESET}`);
+  console.log(`  doctor              Run system diagnostics & health checks`);
+  console.log(
+    `  completion <shell>  Generate shell completion script (bash, zsh, fish)\n`,
+  );
+  console.log(`${BOLD}OPTIONS:${RESET}`);
+  console.log(
+    `  -p, --prompt <text> Run one-shot prompt and exit (non-interactive)`,
+  );
+  console.log(`      --json          Output result in structured JSON format`);
+  console.log(
+    `      --sandbox <mod> Sandbox isolation mode: bwrap | docker | none`,
+  );
+  console.log(
+    `      --think [token] Enable extended thinking with token budget`,
+  );
+  console.log(`      --vim           Enable Vim modal keybindings`);
+  console.log(`      --debug         Enable debug latency instrumentation`);
+  console.log(`  -v, --version       Show version`);
+  console.log(`  -h, --help          Show this help message\n`);
+  console.log(`${BOLD}EXAMPLES:${RESET}`);
+  console.log(`  baoclaw                              # Interactive chat REPL`);
+  console.log(
+    `  baoclaw "Explain this project"       # One-shot command execution`,
+  );
+  console.log(`  git diff | baoclaw "Write a commit"  # Piped stdin execution`);
+  console.log(`  baoclaw "List functions" --json      # JSON output`);
+  console.log(
+    `  baoclaw doctor                       # Diagnose system health\n`,
+  );
+}
+
+function printVersion(): void {
+  console.log("baoclaw 2.1.0");
+}
+
+function resolveCoreBinary(): string {
+  const candidates = [
+    process.env.BAOCLAW_CORE_BIN,
+    path.resolve(
+      process.cwd(),
+      "baoclaw-core",
+      "target",
+      "release",
+      "baoclaw-core",
+    ),
+    path.resolve(process.cwd(), "target", "release", "baoclaw-core"),
+    path.resolve(os.homedir(), ".baoclaw", "bin", "baoclaw-core"),
+    path.resolve(os.homedir(), ".local", "bin", "baoclaw-core"),
+  ].filter(Boolean) as string[];
+
+  try {
+    const scriptDir = path.dirname(new URL(import.meta.url).pathname);
+    candidates.push(
+      path.resolve(
+        scriptDir,
+        "..",
+        "baoclaw-core",
+        "target",
+        "release",
+        "baoclaw-core",
+      ),
+    );
+    candidates.push(path.resolve(scriptDir, "..", "bin", "baoclaw-core"));
+    candidates.push(path.resolve(scriptDir, "baoclaw-core"));
+  } catch {}
+
+  for (const c of candidates) {
+    if (c && fs.existsSync(c)) {
+      return c;
+    }
+  }
+  return candidates[0] || "baoclaw-core";
+}
+
+async function runDoctor(): Promise<void> {
+  console.log(
+    `\n${FG_ORANGE}${BOLD}BaoClaw System Diagnostics (doctor)${RESET}\n`,
+  );
+
+  let allGood = true;
+
+  // 1. Rust Binary
+  const bin = resolveCoreBinary();
+  if (fs.existsSync(bin)) {
+    console.log(
+      `  ${FG_GREEN}✓${RESET} Rust Core Binary: ${DIM}${bin}${RESET}`,
+    );
+  } else {
+    console.log(
+      `  ${FG_RED}✗${RESET} Rust Core Binary: ${FG_RED}Not found at ${bin} (run \`cargo build --release\` in baoclaw-core)${RESET}`,
+    );
+    allGood = false;
+  }
+
+  // 2. Config & Profiles
+  const configPath = path.join(os.homedir(), ".baoclaw", "config.json");
+  if (fs.existsSync(configPath)) {
+    console.log(
+      `  ${FG_GREEN}✓${RESET} Config File: ${DIM}${configPath}${RESET}`,
+    );
+    try {
+      const cfg = JSON.parse(fs.readFileSync(configPath, "utf-8"));
+      const profile = cfg.primary_profile ?? "primary";
+      const model =
+        cfg.model_profiles?.[profile]?.model ?? cfg.model ?? "default";
+      console.log(
+        `  ${FG_GREEN}✓${RESET} Primary Profile: ${FG_CYAN}${profile}${RESET} ${DIM}(${model})${RESET}`,
+      );
+    } catch {
+      console.log(
+        `  ${FG_YELLOW}⚠${RESET} Config File: ${FG_YELLOW}Invalid JSON${RESET}`,
+      );
+    }
+  } else {
+    console.log(
+      `  ${FG_YELLOW}○${RESET} Config File: ${DIM}Not created yet (~/.baoclaw/config.json)${RESET}`,
+    );
+  }
+
+  // 3. API Key
+  if (hasApiKey()) {
+    console.log(
+      `  ${FG_GREEN}✓${RESET} API Credentials: ${FG_GREEN}Configured${RESET}`,
+    );
+  } else {
+    console.log(
+      `  ${FG_RED}✗${RESET} API Credentials: ${FG_RED}Missing (set ANTHROPIC_API_KEY / OPENAI_API_KEY or ~/.baoclaw/config.json)${RESET}`,
+    );
+    allGood = false;
+  }
+
+  // 4. Daemon & IPC Socket
+  const fixed = fixedSocketPath();
+  const daemons = discoverDaemons();
+  if ((fixed && fs.existsSync(fixed)) || daemons.length > 0) {
+    console.log(
+      `  ${FG_GREEN}✓${RESET} Daemon Socket: ${FG_GREEN}Active${RESET} ${DIM}(found ${daemons.length} running daemon(s))${RESET}`,
+    );
+  } else {
+    console.log(
+      `  ${FG_YELLOW}○${RESET} Daemon Socket: ${DIM}Idle (will auto-start when needed)${RESET}`,
+    );
+  }
+
+  // 5. Sandbox backend
+  let hasBwrap = false;
+  let hasDocker = false;
+  try {
+    const { execSync } = await import("child_process");
+    try {
+      execSync("which bwrap", { stdio: "ignore" });
+      hasBwrap = true;
+    } catch {}
+    try {
+      execSync("which docker", { stdio: "ignore" });
+      hasDocker = true;
+    } catch {}
+  } catch {}
+
+  if (hasBwrap) {
+    console.log(
+      `  ${FG_GREEN}✓${RESET} Sandbox Backend: ${FG_GREEN}Bubblewrap (bwrap) available${RESET}`,
+    );
+  } else if (hasDocker) {
+    console.log(
+      `  ${FG_GREEN}✓${RESET} Sandbox Backend: ${FG_GREEN}Docker available${RESET}`,
+    );
+  } else {
+    console.log(
+      `  ${FG_YELLOW}⚠${RESET} Sandbox Backend: ${DIM}Neither bwrap nor docker in PATH (direct execution mode)${RESET}`,
+    );
+  }
+
+  console.log();
+  if (allGood) {
+    console.log(
+      `  ${FG_GREEN}${BOLD}Status: All essential checks passed! BaoClaw is ready.${RESET}\n`,
+    );
+  } else {
+    console.log(
+      `  ${FG_RED}${BOLD}Status: Some essential checks failed. Please review errors above.${RESET}\n`,
+    );
+  }
+}
+
+async function readAllStdin(): Promise<string> {
+  if (process.stdin.isTTY) {
+    return "";
+  }
+  return new Promise((resolve) => {
+    let data = "";
+    process.stdin.setEncoding("utf-8");
+    const timer = setTimeout(() => {
+      resolve(data.trim());
+    }, 1500);
+
+    process.stdin.on("data", (chunk) => {
+      data += chunk;
+    });
+    process.stdin.on("end", () => {
+      clearTimeout(timer);
+      resolve(data.trim());
+    });
+    process.stdin.on("error", () => {
+      clearTimeout(timer);
+      resolve(data.trim());
+    });
+    process.stdin.resume();
+  });
+}
+
+async function executeOneShot(
+  client: IpcClient,
+  prompt: string,
+  effectiveCwd: string,
+  jsonMode: boolean,
+  thinkingEnabled: boolean,
+  thinkingBudget: number,
+): Promise<void> {
+  const thinkingSettings = thinkingEnabled
+    ? { thinking: { mode: "enabled", budget_tokens: thinkingBudget } }
+    : {};
+  await client.request("initialize", {
+    cwd: effectiveCwd,
+    settings: { ...thinkingSettings },
+    shared_session_id: "default",
+  });
+
+  let fullResponse = "";
+  const toolsUsed: Array<{ name: string; input?: unknown }> = [];
+
+  client.onNotification("stream/event", async (params: any) => {
+    if (!params) return;
+    if (params.type === "text_delta" && params.text) {
+      fullResponse += params.text;
+      if (!jsonMode) {
+        process.stdout.write(params.text);
+      }
+    } else if (params.type === "tool_use" && params.tool_name) {
+      toolsUsed.push({ name: params.tool_name, input: params.input });
+      if (!jsonMode && process.stderr.isTTY) {
+        process.stderr.write(`${DIM}[tool: ${params.tool_name}]${RESET}\n`);
+      }
+    } else if (params.type === "permission_request") {
+      try {
+        await client.request("permissionResponse", {
+          tool_use_id: params.tool_use_id,
+          decision: "allow",
+        });
+      } catch {}
+    }
+  });
+
+  try {
+    const result = await client.request("submitMessage", {
+      prompt,
+    });
+
+    if (jsonMode) {
+      console.log(
+        JSON.stringify(
+          {
+            success: true,
+            response: fullResponse,
+            tools_used: toolsUsed,
+            raw_result: result,
+          },
+          null,
+          2,
+        ),
+      );
+    } else {
+      if (!fullResponse.endsWith("\n")) {
+        process.stdout.write("\n");
+      }
+    }
+    await client.disconnect().catch(() => {});
+    process.exit(0);
+  } catch (err: any) {
+    if (jsonMode) {
+      console.error(
+        JSON.stringify({ success: false, error: err?.message || String(err) }),
+      );
+    } else {
+      console.error(`${FG_RED}Error:${RESET} ${err?.message || err}`);
+    }
+    await client.disconnect().catch(() => {});
+    process.exit(1);
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════
 // Main
 // ═══════════════════════════════════════════════════════════════
 async function main() {
-  const defaultBin = path.resolve(
-    process.cwd(),
-    "baoclaw-core",
-    "target",
-    "release",
-    "baoclaw-core",
-  );
-  const binaryPath = path.resolve(process.env.BAOCLAW_CORE_BIN ?? defaultBin);
+  const binaryPath = resolveCoreBinary();
 
   // Parse CLI flags
   const args = process.argv.slice(2);
+
+  if (args.includes("-h") || args.includes("--help")) {
+    printHelp();
+    process.exit(0);
+  }
+
+  if (args.includes("-v") || args.includes("--version")) {
+    printVersion();
+    process.exit(0);
+  }
+
+  if (args[0] === "doctor") {
+    await runDoctor();
+    process.exit(0);
+  }
+
   let thinkingEnabled = false;
   let thinkingBudget = 10240;
   const vimMode = args.includes("--vim") || process.env.BAOCLAW_VIM === "1";
+  const jsonMode = args.includes("--json");
+  const cliDebugMode = args.includes("--debug");
+  let explicitPrompt: string | undefined;
+  let sandboxMode: string | undefined;
+  const positionalArgs: string[] = [];
+
   for (let i = 0; i < args.length; i++) {
-    if (args[i] === "--think") {
+    const arg = args[i];
+    if (arg === "--think") {
       thinkingEnabled = true;
-      // Check if next arg is a number (budget)
       if (i + 1 < args.length && /^\d+$/.test(args[i + 1])) {
         thinkingBudget = parseInt(args[i + 1], 10);
         i++;
       }
-    } else if (args[i]?.startsWith("--think=")) {
+    } else if (arg.startsWith("--think=")) {
       thinkingEnabled = true;
-      const val = args[i].split("=")[1];
+      const val = arg.split("=")[1];
       if (val && /^\d+$/.test(val)) {
         thinkingBudget = parseInt(val, 10);
       }
-    }
-  }
-  // --debug flag: enable timing instrumentation for the first query
-  const cliDebugMode = args.includes("--debug");
-
-  // --sandbox flag: forward to daemon for sandboxed bash execution
-  let sandboxMode: string | undefined;
-  for (let i = 0; i < args.length; i++) {
-    if (args[i] === "--sandbox") {
-      if (i + 1 < args.length && !args[i + 1]?.startsWith("--")) {
-        sandboxMode = args[i + 1]; // e.g. --sandbox docker
+    } else if (arg === "-p" || arg === "--prompt") {
+      if (i + 1 < args.length) {
+        explicitPrompt = args[i + 1];
+        i++;
+      }
+    } else if (arg.startsWith("--prompt=")) {
+      explicitPrompt = arg.slice("--prompt=".length);
+    } else if (arg === "--sandbox") {
+      if (i + 1 < args.length && !args[i + 1].startsWith("-")) {
+        sandboxMode = args[i + 1];
         i++;
       } else {
-        sandboxMode = "auto"; // just --sandbox → auto-detect
+        sandboxMode = "auto";
       }
-    } else if (args[i]?.startsWith("--sandbox=")) {
-      sandboxMode = args[i].split("=")[1]; // e.g. --sandbox=bwrap
+    } else if (arg.startsWith("--sandbox=")) {
+      sandboxMode = arg.split("=")[1];
+    } else if (
+      arg === "--vim" ||
+      arg === "--json" ||
+      arg === "--debug" ||
+      arg === "-y" ||
+      arg === "--yes" ||
+      arg === "-h" ||
+      arg === "--help" ||
+      arg === "-v" ||
+      arg === "--version"
+    ) {
+      // Standalone flag
+    } else if (!arg.startsWith("-")) {
+      positionalArgs.push(arg);
     }
   }
+
   if (sandboxMode === "auto") {
     sandboxMode = undefined; // let baoclaw-core auto-detect (no value = just --sandbox)
   }
 
-  // Check API key: env var OR a key configured in the primary model profile.
-  // The Rust core (resolve_api_key) already prefers config profile keys over env;
-  // this gate only needs to ensure at least one source is available.
+  // Check positional prompt (e.g. `baoclaw "Explain this"`)
+  if (!explicitPrompt && positionalArgs.length > 0) {
+    explicitPrompt = positionalArgs.join(" ");
+  }
+
+  // Check if stdin is piped (e.g. `git diff | baoclaw "write commit"`)
+  const isInputPiped = !process.stdin.isTTY;
+  let pipedStdinContent = "";
+  if (isInputPiped) {
+    pipedStdinContent = await readAllStdin();
+  }
+
+  const finalPrompt = [pipedStdinContent, explicitPrompt]
+    .filter(Boolean)
+    .join("\n\n");
+  const isOneShot = finalPrompt.trim().length > 0;
+
+  // Check API key
   if (!hasApiKey()) {
     console.error(`${FG_RED}${BOLD}Error:${RESET} No API key found.`);
     console.error(
@@ -1213,32 +1558,33 @@ async function main() {
     process.exit(1);
   }
 
-  // Clear screen and print logo
-  process.stdout.write(`${ESC}2J${ESC}H`);
-  printLogo();
+  // Only clear screen and print logo in interactive mode
+  if (!isOneShot) {
+    process.stdout.write(`${ESC}2J${ESC}H`);
+    printLogo();
+  }
 
   // ── Discover existing daemons ──
-  // Global daemon model: reuse any existing daemon, start new only if none exists.
-  // Each CLI sends its own cwd; the daemon manages per-project sessions internally.
-  // P3-1e: Fixed socket path takes priority; cwd-hash fallback for backward compat.
   const fixed = fixedSocketPath();
   const daemons = discoverDaemons();
   let socketPath: string;
   let child: ChildProcess | null = null;
   let isReconnect = false;
-  const effectiveCwd = process.cwd(); // always use the terminal's current directory
+  const effectiveCwd = process.cwd();
 
-  // 1. Try fixed socket first (P3-1c machine-level single daemon)
+  // 1. Try fixed socket first
   if (fixed && fs.existsSync(fixed)) {
     socketPath = fixed;
     isReconnect = true;
-    console.log(`${DIM}Connecting to daemon via fixed socket...${RESET}`);
+    if (!isOneShot)
+      console.log(`${DIM}Connecting to daemon via fixed socket...${RESET}`);
   } else if (daemons.length > 0) {
-    // 2. Fallback: connect to the first discovered daemon (global singleton)
+    // 2. Fallback: connect to the first discovered daemon
     const daemon = daemons[0];
     socketPath = daemon.socket;
     isReconnect = true;
-    console.log(`${DIM}Connecting to daemon pid=${daemon.pid}...${RESET}`);
+    if (!isOneShot)
+      console.log(`${DIM}Connecting to daemon pid=${daemon.pid}...${RESET}`);
   } else {
     // 3. No existing daemon found — start a new one
     socketPath = await startNewDaemon(binaryPath, sandboxMode);
@@ -1246,23 +1592,39 @@ async function main() {
 
   // Connect IPC
   const client = new IpcClient();
-  startSpinner("Connecting to engine (loading MCP servers)...");
+  if (!isOneShot) {
+    startSpinner("Connecting to engine (loading MCP servers)...");
+  }
   try {
     await client.connect(socketPath);
   } catch (error) {
-    // A stale fixed socket can survive a daemon crash. Start a replacement
-    // instead of exposing the raw ECONNREFUSED to the user.
     if (isReconnect && fixed && socketPath === fixed) {
-      stopSpinner();
-      console.log(
-        `${DIM}Daemon socket is stale; starting a new daemon...${RESET}`,
-      );
+      if (!isOneShot) {
+        stopSpinner();
+        console.log(
+          `${DIM}Daemon socket is stale; starting a new daemon...${RESET}`,
+        );
+      }
       socketPath = await startNewDaemon(binaryPath, sandboxMode);
-      startSpinner("Connecting to engine (loading MCP servers)...");
+      if (!isOneShot)
+        startSpinner("Connecting to engine (loading MCP servers)...");
       await client.connect(socketPath);
     } else {
       throw error;
     }
+  }
+
+  // If one-shot prompt, execute and exit immediately
+  if (isOneShot) {
+    await executeOneShot(
+      client,
+      finalPrompt,
+      effectiveCwd,
+      jsonMode,
+      thinkingEnabled,
+      thinkingBudget,
+    );
+    return;
   }
 
   // Initialize

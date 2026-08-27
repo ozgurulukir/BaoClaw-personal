@@ -71,7 +71,7 @@ for (const file of files) {
   const src = await readFile(file, "utf8");
   try {
     // Parse-only: validates syntax without executing anything.
-    new Function(src); // eslint-disable-line no-new-func
+    new Function(src);
     console.log(`  ok    ${file.replace(root + "/", "")}`);
   } catch (err) {
     failed++;

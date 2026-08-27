@@ -27,6 +27,7 @@ libc = "0.2"
 rusqlite = { version = "0.31", features = ["bundled"] }
 base64 = "0.22"
 docx-rs = "0.4"
+mimalloc = { version = "0.1", default-features = false }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows-service = "0.7"
@@ -34,6 +35,13 @@ windows-service = "0.7"
 [dev-dependencies]
 proptest = "1"
 tempfile = "3"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+panic = "abort"
+strip = "symbols"
 
 # Unified lint policy. `cargo clippy` (used by `make check-all` / CI) enforces
 # `-D warnings` on the command line; these table entries additionally make the

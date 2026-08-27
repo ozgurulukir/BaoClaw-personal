@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "prepare": "husky",
-    "format": "prettier --write . && cargo fmt --all",
+    "format": "prettier --write . && cargo fmt --manifest-path baoclaw-core/Cargo.toml --all",
     "lint": "eslint . --ext .ts,.tsx && cargo clippy --manifest-path baoclaw-core/Cargo.toml --all-targets --all-features -- -D warnings",
     "typecheck": "tsc --noEmit -p ts-ipc/tsconfig.json",
     "check": "cargo check --manifest-path baoclaw-core/Cargo.toml --all-targets --all-features",

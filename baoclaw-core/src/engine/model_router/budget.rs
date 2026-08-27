@@ -308,7 +308,6 @@ mod tests {
     #[test]
     fn test_can_afford_warning_near_limit() {
         let mut bm = BudgetManager::new(0.01, 200.0);
-        let model = make_model(0.003, 0.015);
 
         // Spend enough to get close to the limit
         bm.current_daily = 0.0095; // 95% of $0.01
@@ -363,7 +362,7 @@ mod tests {
         bm.record_cost(2.5);
 
         // Load from file
-        let loaded = BudgetManager::load();
+        let _loaded = BudgetManager::load();
         // Can't easily test file-based load in unit test since it uses global path,
         // but we can test save directly
         let json = serde_json::to_string(&bm).unwrap();

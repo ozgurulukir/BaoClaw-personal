@@ -66,11 +66,17 @@ copy_gateway() {
   # Gateway-specific install hooks and patch-package patches
   [ -d "$src/scripts" ] && cp -r "$src/scripts/." "$dst/scripts/" 2>/dev/null
   [ -d "$src/patches" ] && cp -r "$src/patches/." "$dst/patches/" 2>/dev/null
+  # dist 目录（构建产物）
+  [ -d "$src/dist" ] && mkdir -p "$dst/dist" && cp -r "$src/dist/." "$dst/dist/" 2>/dev/null
   # 元信息
   cp "$src/package.json" "$dst/" 2>/dev/null
   cp "$src/package-lock.json" "$dst/" 2>/dev/null
   cp "$src/tsconfig.json" "$dst/" 2>/dev/null
-  cd "$dst" && npm install --silent 2>&1 && cd "$SCRIPT_DIR"
+  cd "$dst" && npm install --silent 2>&1
+  if [ "$name" = "ts-ipc" ]; then
+    npm run build --silent 2>/dev/null || true
+  fi
+  cd "$SCRIPT_DIR"
   echo "✓ $name → $dst"
 }
 copy_gateway ts-ipc
@@ -93,38 +99,17 @@ EOF
   echo "✓ $name → $BIN_DIR/$name"
 }
 
-# CLI launcher（特殊：带 --help / --version）
+# CLI launcher（优先使用预构建的 fast bundle，降级使用 tsx）
 cat > "$BIN_DIR/baoclaw" << 'LAUNCHER'
 #!/bin/bash
 BAOCLAW_HOME="${BAOCLAW_HOME:-$HOME/.baoclaw}"
-
-if [ "$1" = "--help" ] || [ "$1" = "-h" ]; then
-  echo "BaoClaw v2.1.0 — AI coding assistant"
-  echo ""
-  echo "Usage: baoclaw [options]"
-  echo ""
-  echo "Options:"
-  echo "  --sandbox <mode>  docker|bwrap|none"
-  echo "  --think [budget]  Extended thinking"
-  echo "  --vim             Vim mode"
-  echo "  --debug           Debug mode"
-  echo "  --version         Show version"
-  echo "  --help            This help"
-  echo ""
-  echo "Config:  ~/.baoclaw/config.json (model_profiles, api keys)"
-  echo "Clients: baoclaw, baoclaw-tui, baoclaw-web,"
-  echo "          baoclaw-telegram, baoclaw-feishu, baoclaw-whatsapp"
-  echo "Docs:    ~/.baoclaw/docs/USAGE.md"
-  exit 0
-fi
-
-if [ "$1" = "--version" ] || [ "$1" = "-v" ]; then
-  echo "baoclaw 2.1.0"
-  exit 0
-fi
-
 export BAOCLAW_CORE_BIN="$BAOCLAW_HOME/bin/baoclaw-core"
-exec npx --prefix "$BAOCLAW_HOME/ts-ipc" tsx "$BAOCLAW_HOME/ts-ipc/cli.ts" "$@"
+
+if [ -f "$BAOCLAW_HOME/ts-ipc/dist/baoclaw.mjs" ]; then
+  exec node "$BAOCLAW_HOME/ts-ipc/dist/baoclaw.mjs" "$@"
+else
+  exec npx --prefix "$BAOCLAW_HOME/ts-ipc" tsx "$BAOCLAW_HOME/ts-ipc/cli.ts" "$@"
+fi
 LAUNCHER
 chmod +x "$BIN_DIR/baoclaw"
 echo "✓ baoclaw → $BIN_DIR/baoclaw"

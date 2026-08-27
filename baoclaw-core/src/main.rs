@@ -1,4 +1,7 @@
 #![allow(dead_code)]
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 

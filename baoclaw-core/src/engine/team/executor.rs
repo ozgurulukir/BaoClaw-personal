@@ -1256,11 +1256,11 @@ mod tests {
     async fn test_list_teams() {
         let executor = make_executor();
 
-        let team1 = executor
+        let _team1 = executor
             .create_team("Task 1".to_string(), TeamConfig::default())
             .await
             .unwrap();
-        let team2 = executor
+        let _team2 = executor
             .create_team("Task 2".to_string(), TeamConfig::default())
             .await
             .unwrap();
