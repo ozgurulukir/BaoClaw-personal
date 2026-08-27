@@ -640,26 +640,154 @@ function openProject(p) {
   connectTab(p.cwd);
 }
 
+let currentDiffText = "";
+
+function showDiffPreview(title, diffText) {
+  const panel = $("diff-panel");
+  const titleEl = $("diff-title");
+  const bodyEl = $("diff-content");
+  if (!panel || !titleEl || !bodyEl) return;
+
+  currentDiffText = diffText || "";
+  titleEl.textContent = title || "📄 Diff Preview";
+  bodyEl.innerHTML = "";
+
+  const lines = currentDiffText.split("\n");
+  lines.forEach((line) => {
+    const lineEl = document.createElement("div");
+    lineEl.className = "diff-line";
+    if (line.startsWith("+") && !line.startsWith("+++")) {
+      lineEl.classList.add("diff-line-add");
+    } else if (line.startsWith("-") && !line.startsWith("---")) {
+      lineEl.classList.add("diff-line-del");
+    } else if (line.startsWith("@@")) {
+      lineEl.classList.add("diff-line-hunk");
+    } else if (
+      line.startsWith("diff ") ||
+      line.startsWith("index ") ||
+      line.startsWith("---") ||
+      line.startsWith("+++")
+    ) {
+      lineEl.classList.add("diff-line-meta");
+    }
+    lineEl.textContent = line || " ";
+    bodyEl.appendChild(lineEl);
+  });
+
+  panel.classList.remove("hidden");
+}
+
+$("btn-close-diff")?.addEventListener("click", () => {
+  $("diff-panel")?.classList.add("hidden");
+});
+
+$("btn-copy-diff")?.addEventListener("click", () => {
+  if (currentDiffText) {
+    navigator.clipboard.writeText(currentDiffText).then(() => {
+      const btn = $("btn-copy-diff");
+      if (btn) {
+        const old = btn.textContent;
+        btn.textContent = "✓ Copied!";
+        setTimeout(() => (btn.textContent = old), 1500);
+      }
+    });
+  }
+});
+
+function initModelPicker(models, primary) {
+  const modelPicker = $("model-picker");
+  if (!modelPicker) return;
+  modelPicker.innerHTML = "";
+  const profileList =
+    Array.isArray(models) && models.length
+      ? models
+      : [
+          { id: "glm52", label: "GLM-5.2 (Anthropic API)" },
+          { id: "deepseek", label: "DeepSeek V3 / R1" },
+          { id: "claude-sonnet", label: "Claude 3.7 Sonnet" },
+          { id: "gpt-4o", label: "GPT-4o" },
+          { id: "auto", label: "Auto Router" },
+        ];
+
+  profileList.forEach((p) => {
+    const opt = document.createElement("option");
+    opt.value = p.id || p.name || p;
+    opt.textContent = p.label || p.name || p.id || p;
+    if (opt.value === primary) opt.selected = true;
+    modelPicker.appendChild(opt);
+  });
+
+  modelPicker.onchange = () => {
+    const selected = modelPicker.value;
+    const w = getActiveWs();
+    if (w?.readyState === 1) {
+      w.send(
+        JSON.stringify({
+          action: "rpc",
+          method: "model.setProfile",
+          params: { profile: selected },
+        }),
+      );
+      setStatus("Profile: " + selected, "connected");
+    }
+  };
+}
+
 function connectTab(cwd) {
   const tab = tabs.get(cwd);
   if (!tab) return;
+  if (tab.ws) {
+    try {
+      tab.ws.close();
+    } catch {}
+    tab.ws = null;
+  }
+  if (typeof tab.reconnectAttempts !== "number") tab.reconnectAttempts = 0;
+  clearTimeout(tab.reconnectTimer);
+
+  const isDefault = cwd === "__default__";
   const wsUrl =
     (location.protocol === "https:" ? "wss:" : "ws:") +
     "//" +
     location.host +
-    "/?cwd=" +
-    encodeURIComponent(cwd);
+    "/" +
+    (isDefault ? "" : "?cwd=" + encodeURIComponent(cwd));
   const w = new WebSocket(wsUrl);
   tab.ws = w;
   w.onopen = () => {
-    if (activeTab === cwd) setStatus("Connected", "connected");
+    tab.reconnectAttempts = 0;
+    if (activeTab === cwd || isDefault) setStatus("Connected", "connected");
   };
-  w.onmessage = (evt) => handleTabMessage(tab, JSON.parse(evt.data));
+  w.onmessage = (evt) => {
+    const msg = JSON.parse(evt.data);
+    if (isDefault && msg.type === "init") {
+      const realCwd = msg.cwd || cwd;
+      if (realCwd !== cwd) {
+        tabs.delete(cwd);
+        tab.cwd = realCwd;
+        tabs.set(realCwd, tab);
+        activeTab = realCwd;
+      }
+      tab.label = realCwd.split("/").pop() || realCwd;
+      renderTabBar();
+    }
+    handleTabMessage(tab, msg);
+  };
   w.onclose = () => {
-    if (activeTab === cwd) setStatus("Disconnected", "error");
+    tab.reconnectAttempts++;
+    const delay = Math.min(15000, 1000 * Math.pow(1.5, tab.reconnectAttempts));
+    if (activeTab === tab.cwd) {
+      setStatus(
+        "Reconnecting in " + (delay / 1000).toFixed(0) + "s…",
+        "warning",
+      );
+    }
+    tab.reconnectTimer = setTimeout(() => {
+      connectTab(tab.cwd);
+    }, delay);
   };
   w.onerror = () => {
-    if (activeTab === cwd) setStatus("Error", "error");
+    if (activeTab === tab.cwd) setStatus("Error", "error");
   };
 }
 
@@ -1094,35 +1222,9 @@ $("btn-download-pdf").onclick = () => {
 // ═══════════════════════════════════════════════════════════════
 (function init() {
   const initialCwd = "__default__";
-  const tab = createTab(initialCwd, "Connecting...");
+  createTab(initialCwd, "Connecting...");
   activateTab(initialCwd);
-  const wsUrl =
-    (location.protocol === "https:" ? "wss:" : "ws:") +
-    "//" +
-    location.host +
-    "/";
-  const w = new WebSocket(wsUrl);
-  tab.ws = w;
-  let inited = false;
-  w.onopen = () => setStatus("Connected", "connected");
-  w.onmessage = (evt) => {
-    const msg = JSON.parse(evt.data);
-    if (!inited && msg.type === "init") {
-      inited = true;
-      const realCwd = msg.cwd || initialCwd;
-      if (realCwd !== initialCwd) {
-        tabs.delete(initialCwd);
-        tab.cwd = realCwd;
-        tabs.set(realCwd, tab);
-        activeTab = realCwd;
-      }
-      tab.label = realCwd.split("/").pop() || realCwd;
-      renderTabBar();
-    }
-    handleTabMessage(tab, msg);
-  };
-  w.onclose = () => setStatus("Disconnected", "error");
-  w.onerror = () => setStatus("Error", "error");
+  connectTab(initialCwd);
 })();
 
 // Shared message handler for all tabs (used by connectTab and init)
@@ -1137,6 +1239,10 @@ function handleTabMessage(tab, msg) {
       if (isActive()) {
         updateSessionInfo(tab, cwd);
         setStatus("Connected", "connected");
+        initModelPicker(
+          msg.data.models || msg.data.model_profiles,
+          msg.data.primary_profile,
+        );
       }
       loadProjects();
       if (tab.ws?.readyState === 1) {
@@ -1218,10 +1324,23 @@ function handleTabMessage(tab, msg) {
           s.lastStreamType = "tool_use";
           if (isActive()) addToolCall(e.tool_name, e.input, e.tool_use_id);
           break;
-        case "tool_result":
+        case "tool_result": {
           s.lastStreamType = "tool_result";
           if (isActive()) addToolResult(e.tool_use_id, e.output, e.is_error);
+          const outStr =
+            typeof e.output === "string"
+              ? e.output
+              : JSON.stringify(e.output || "");
+          if (
+            outStr.includes("@@") ||
+            outStr.startsWith("diff --git") ||
+            outStr.includes("--- a/") ||
+            outStr.includes("+++ b/")
+          ) {
+            showDiffPreview("📄 Tool Diff: " + (e.tool_name || "Git"), outStr);
+          }
           break;
+        }
         case "permission_request":
           if (isActive())
             addPermissionRequest(e.tool_name, e.input, e.tool_use_id);
