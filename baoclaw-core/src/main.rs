@@ -581,32 +581,15 @@ async fn handle_shared_client(
                                 .await;
                         }
                         ClientMethod::GitStatus => {
-                            let git_info =
-                                engine::git_info::get_git_info(std::path::Path::new(&work_cwd));
                             let mut conn_guard = conn.lock().await;
-                            match git_info {
-                                Some(info) => {
-                                    let _ = conn_guard
-                                        .send_response(
-                                            id,
-                                            serde_json::json!({
-                                                "branch": info.branch,
-                                                "has_changes": info.has_changes,
-                                                "staged_files": info.staged_files,
-                                                "modified_files": info.modified_files,
-                                                "untracked_files": info.untracked_files,
-                                            }),
-                                        )
-                                        .await;
+                            match ipc::handlers::git::handle_git_status(std::path::Path::new(
+                                &work_cwd,
+                            )) {
+                                Ok(res) => {
+                                    let _ = conn_guard.send_response(id, res).await;
                                 }
-                                None => {
-                                    let _ = conn_guard
-                                        .send_error(
-                                            Some(id),
-                                            -32000,
-                                            "Not a git repository".to_string(),
-                                        )
-                                        .await;
+                                Err(err) => {
+                                    let _ = conn_guard.send_error(Some(id), -32000, err).await;
                                 }
                             }
                         }
@@ -2403,68 +2386,22 @@ async fn handle_shared_client(
 
                         // ── Model Router handlers ──
                         ClientMethod::ModelList => {
-                            let router = engine::model_router::router::ModelRouter::new();
-                            let models = router.list_models();
-                            let model_list: Vec<serde_json::Value> = models
-                                .iter()
-                                .map(|m| {
-                                    serde_json::json!({
-                                        "name": m.name,
-                                        "provider": m.provider,
-                                        "max_tokens": m.max_tokens,
-                                        "cost_per_1k_input": m.cost_per_1k_input,
-                                        "cost_per_1k_output": m.cost_per_1k_output,
-                                        "capabilities": m.capabilities,
-                                        "priority": m.priority,
-                                    })
-                                })
-                                .collect();
+                            let result = ipc::handlers::model::handle_model_list();
                             let mut conn_guard = conn.lock().await;
-                            let _ = conn_guard.send_response(id, serde_json::json!({"models": model_list, "count": model_list.len()})).await;
+                            let _ = conn_guard.send_response(id, result).await;
                         }
                         ClientMethod::ModelRoute { task } => {
-                            let router = engine::model_router::router::ModelRouter::new();
-                            let decision = router.route(&task, 0, 0.5);
+                            let result = ipc::handlers::model::handle_model_route(&task);
                             let mut conn_guard = conn.lock().await;
-                            let _ = conn_guard
-                                .send_response(
-                                    id,
-                                    serde_json::json!({
-                                        "selected_model": decision.selected_model,
-                                        "reason": decision.reason,
-                                        "confidence": decision.confidence,
-                                    }),
-                                )
-                                .await;
+                            let _ = conn_guard.send_response(id, result).await;
                         }
                         ClientMethod::ModelBudget => {
-                            let budget = engine::model_router::budget::BudgetManager::load();
-                            let result = serde_json::json!({
-                                "daily_limit": budget.daily_limit,
-                                "monthly_limit": budget.monthly_limit,
-                                "current_daily": budget.current_daily,
-                                "current_monthly": budget.current_monthly,
-                                "remaining_daily": budget.remaining_daily(),
-                                "remaining_monthly": budget.remaining_monthly(),
-                            });
+                            let result = ipc::handlers::model::handle_model_budget();
                             let mut conn_guard = conn.lock().await;
                             let _ = conn_guard.send_response(id, result).await;
                         }
                         ClientMethod::ModelStats => {
-                            let router = engine::model_router::router::ModelRouter::new();
-                            let models = router.list_models();
-                            let rules = router.list_rules();
-                            let result = serde_json::json!({
-                                "models_count": models.len(),
-                                "rules_count": rules.len(),
-                                "rules": rules.iter().map(|r| serde_json::json!({
-                                    "id": r.id,
-                                    "description": r.description,
-                                    "target_model": r.target_model,
-                                    "priority": r.priority,
-                                    "enabled": r.enabled,
-                                })).collect::<Vec<_>>(),
-                            });
+                            let result = ipc::handlers::model::handle_model_stats();
                             let mut conn_guard = conn.lock().await;
                             let _ = conn_guard.send_response(id, result).await;
                         }

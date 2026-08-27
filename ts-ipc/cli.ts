@@ -19,74 +19,34 @@ function turnPrefix(): string {
   return "";
 }
 
-// ═══════════════════════════════════════════════════════════════
-// ANSI helpers
-// ═══════════════════════════════════════════════════════════════
-const noColor = Boolean(process.env.NO_COLOR || process.env.TERM === "dumb");
-const ESC = noColor ? "" : "\x1b[";
-const RESET = noColor ? "" : `${ESC}0m`;
-const BOLD = noColor ? "" : `${ESC}1m`;
-const DIM = noColor ? "" : `${ESC}2m`;
-const ITALIC = noColor ? "" : `${ESC}3m`;
-const UNDERLINE = noColor ? "" : `${ESC}4m`;
-
-// Colors (optimized for dark terminal backgrounds)
-const FG_ORANGE = noColor ? "" : `${ESC}38;2;217;119;40m`; // BaoClaw orange
-const FG_CYAN = noColor ? "" : `${ESC}96m`; // bright cyan
-const FG_GREEN = noColor ? "" : `${ESC}92m`; // bright green
-const FG_YELLOW = noColor ? "" : `${ESC}93m`; // bright yellow
-const FG_RED = noColor ? "" : `${ESC}91m`; // bright red
-const FG_MAGENTA = noColor ? "" : `${ESC}95m`; // bright magenta
-const FG_BLUE = noColor ? "" : `${ESC}94m`; // bright blue
-const FG_WHITE = noColor ? "" : `${ESC}97m`; // bright white
-const FG_GRAY = noColor ? "" : `${ESC}38;2;160;160;160m`; // lighter gray (visible on dark bg)
-const FG_BRIGHT_WHITE = noColor ? "" : `${ESC}97m`;
-const BG_DARK = noColor ? "" : `${ESC}48;2;30;30;30m`;
-
-// Clawd body color (warm tan/beige like the original)
-const FG_CLAWD = noColor ? "" : `${ESC}38;2;210;180;140m`;
-const BG_CLAWD = noColor ? "" : `${ESC}48;2;60;50;40m`;
-
-// ═══════════════════════════════════════════════════════════════
-// Image helpers — save base64 images & iTerm2 inline display
-// ═══════════════════════════════════════════════════════════════
-const IMAGE_DIR = "/tmp/baoclaw-images";
-
-/** Ensure the image output directory exists */
-function ensureImageDir(): void {
-  if (!fs.existsSync(IMAGE_DIR)) {
-    fs.mkdirSync(IMAGE_DIR, { recursive: true });
-  }
-}
-
-/** Save a base64-encoded image to /tmp/baoclaw-images/ and return the file path */
-function saveBase64Image(base64Data: string, mediaType: string): string {
-  ensureImageDir();
-  const ext = mediaType.split("/")[1] || "png"; // e.g. "png", "jpeg", "gif", "webp"
-  const normalizedExt = ext === "jpeg" ? "jpg" : ext;
-  const timestamp = Math.floor(Date.now() / 1000);
-  const fileName = `baoclaw-${timestamp}.${normalizedExt}`;
-  const filePath = path.join(IMAGE_DIR, fileName);
-  const buffer = Buffer.from(base64Data, "base64");
-  fs.writeFileSync(filePath, buffer);
-  return filePath;
-}
-
-/** Display an image inline using iTerm2 Inline Image Protocol (if supported) */
-function displayIterm2Image(filePath: string): void {
-  if (process.env.TERM_PROGRAM !== "iTerm.app") return;
-  try {
-    const data = fs.readFileSync(filePath);
-    const base64 = data.toString("base64");
-    const name = path.basename(filePath);
-    // iTerm2 escape: ESC ] 1337 ; File = ... BEL
-    process.stdout.write(
-      `\x1b]1337;File=inline=1;name=${name}:size=${data.length}:${base64}\x07\n`,
-    );
-  } catch {
-    // Silently ignore if iTerm2 display fails
-  }
-}
+import {
+  noColor,
+  ESC,
+  RESET,
+  BOLD,
+  DIM,
+  ITALIC,
+  UNDERLINE,
+  FG_ORANGE,
+  FG_CYAN,
+  FG_GREEN,
+  FG_YELLOW,
+  FG_RED,
+  FG_MAGENTA,
+  FG_BLUE,
+  FG_WHITE,
+  FG_GRAY,
+  FG_BRIGHT_WHITE,
+  BG_DARK,
+  FG_CLAWD,
+  BG_CLAWD,
+} from "./colors.js";
+import {
+  IMAGE_DIR,
+  ensureImageDir,
+  saveBase64Image,
+  displayIterm2Image,
+} from "./images.js";
 
 /** Extract image content blocks from a tool_result output, save & display them.
  *  Returns the number of images found. */
