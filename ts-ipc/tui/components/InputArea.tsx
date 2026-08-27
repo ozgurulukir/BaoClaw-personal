@@ -1,19 +1,31 @@
-import React, { useState, useCallback } from "react";
+import React, { useState } from "react";
 import { Text, Box, useInput } from "ink";
 import { colors, zen } from "../theme.js";
 
 interface InputAreaProps {
   input: string;
   isStreaming: boolean;
+  mode?: "insert" | "normal";
   onSubmit: (text: string) => void;
   onInputChange: (text: string) => void;
+  onToggleMode?: () => void;
+  onNavigate?: (delta: number) => void;
+  onToggleExpand?: () => void;
+  onCopy?: () => void;
+  onToggleHelp?: () => void;
 }
 
 export const InputArea: React.FC<InputAreaProps> = ({
   input,
   isStreaming,
+  mode = "insert",
   onSubmit,
   onInputChange,
+  onToggleMode,
+  onNavigate,
+  onToggleExpand,
+  onCopy,
+  onToggleHelp,
 }) => {
   const [cursorVisible, setCursorVisible] = useState(true);
 
@@ -29,6 +41,32 @@ export const InputArea: React.FC<InputAreaProps> = ({
   useInput((inputChar, key) => {
     if (isStreaming) return;
 
+    if (mode === "normal") {
+      // Normal / Navigation mode keybindings
+      if (key.escape || inputChar === "i" || inputChar === "a") {
+        onToggleMode?.();
+      } else if (key.return) {
+        onToggleExpand?.();
+      } else if (inputChar === " ") {
+        onToggleExpand?.();
+      } else if (inputChar === "j" || key.downArrow) {
+        onNavigate?.(1);
+      } else if (inputChar === "k" || key.upArrow) {
+        onNavigate?.(-1);
+      } else if (inputChar === "y" || (key.ctrl && inputChar === "y")) {
+        onCopy?.();
+      } else if (inputChar === "?" || (key.ctrl && inputChar === "h")) {
+        onToggleHelp?.();
+      }
+      return;
+    }
+
+    // Insert Mode
+    if (key.escape) {
+      onToggleMode?.();
+      return;
+    }
+
     if (key.return) {
       if (input.trim()) {
         onSubmit(input.trim());
@@ -36,36 +74,61 @@ export const InputArea: React.FC<InputAreaProps> = ({
       }
     } else if (key.backspace || key.delete) {
       onInputChange(input.slice(0, -1));
+    } else if (key.ctrl && inputChar === "y") {
+      onCopy?.();
+    } else if (key.ctrl && inputChar === "h") {
+      onToggleHelp?.();
     } else if (!key.ctrl && !key.meta && inputChar) {
       onInputChange(input + inputChar);
     }
   });
 
-  const displayText = input || "Type your message...";
-  const displayColor = input ? colors.text.primary : colors.text.dim;
+  const displayText =
+    mode === "normal"
+      ? "Normal Mode (press 'i' to type, 'j/k' to navigate tools, 'Space' to expand)"
+      : input || "Type your message...";
+
+  const displayColor =
+    mode === "normal"
+      ? colors.status.warning
+      : input
+        ? colors.text.primary
+        : colors.text.dim;
 
   return (
     <Box
       flexDirection="column"
       borderStyle="single"
-      borderColor={colors.border}
+      borderColor={mode === "normal" ? colors.status.warning : colors.border}
       paddingX={1}
     >
-      {/* Input hint */}
+      {/* Input row */}
       <Box>
-        <Text color={colors.role.user} bold>
-          You
+        <Text
+          color={mode === "normal" ? colors.status.warning : colors.role.user}
+          bold
+        >
+          {mode === "normal" ? "NAV" : "You"}
         </Text>
         <Text color={colors.text.muted}> {zen.separator} </Text>
         <Text color={displayColor}>{displayText}</Text>
-        {cursorVisible && input && <Text color={colors.text.primary}>█</Text>}
+        {mode === "insert" && cursorVisible && input && (
+          <Text color={colors.text.primary}>█</Text>
+        )}
       </Box>
 
       {/* Help text */}
-      <Box>
-        <Text color={colors.text.dim}>
-          Press Enter to send • Ctrl+C to exit
-        </Text>
+      <Box justifyContent="space-between">
+        <Box>
+          <Text color={colors.text.dim}>
+            {mode === "normal"
+              ? "Space/Enter: Toggle Tool • j/k: Navigate • y: Copy • i: Insert"
+              : "Enter: Send • Esc: Normal Mode • Ctrl+Y: Copy • Ctrl+H: Help"}
+          </Text>
+        </Box>
+        <Box>
+          <Text color={colors.text.muted}>[{mode.toUpperCase()}]</Text>
+        </Box>
       </Box>
     </Box>
   );

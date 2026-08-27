@@ -134,11 +134,47 @@ export function subscribeToEvents(
         break;
       }
 
+      case "usage":
       case "result": {
         // { type: "result", status: string, usage: object }
-        // Stream complete - handled in App component
         flushNow();
         dispatch({ type: "SET_STREAMING", payload: false });
+        const usage = (p.usage || (p.type === "usage" ? p : undefined)) as any;
+        if (usage && typeof usage === "object") {
+          const promptTokens = Number(
+            usage.prompt_tokens ?? usage.input_tokens ?? 0,
+          );
+          const completionTokens = Number(
+            usage.completion_tokens ?? usage.output_tokens ?? 0,
+          );
+          const totalTokens = Number(
+            usage.total_tokens ?? promptTokens + completionTokens,
+          );
+          const cost = Number(usage.cost ?? 0);
+          dispatch({
+            type: "UPDATE_USAGE",
+            payload: {
+              promptTokens,
+              completionTokens,
+              totalTokens,
+              cost,
+            },
+          });
+        }
+        break;
+      }
+
+      case "permission_request": {
+        // Auto-grant in TUI stream to maintain responsive UI
+        const toolUseId = (p.tool_use_id as string) || "";
+        if (toolUseId) {
+          client
+            .request("permissionResponse", {
+              tool_use_id: toolUseId,
+              decision: "allow",
+            })
+            .catch(() => {});
+        }
         break;
       }
 

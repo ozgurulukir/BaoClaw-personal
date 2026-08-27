@@ -15,8 +15,18 @@ export const INITIAL_STATE: TuiState = {
   thinkingContent: "",
   currentTools: [],
   session: null,
+  mode: "insert",
+  selectedToolIndex: 0,
   input: "",
   error: null,
+  flashMessage: null,
+  usage: {
+    promptTokens: 0,
+    completionTokens: 0,
+    totalTokens: 0,
+    contextWindow: 200000,
+    cost: 0,
+  },
 };
 
 export function reducer(state: TuiState, action: Action): TuiState {
@@ -30,10 +40,13 @@ export function reducer(state: TuiState, action: Action): TuiState {
     }
 
     case "SET_STREAMING": {
+      const isStarting = action.payload as boolean;
       return {
         ...state,
-        isStreaming: action.payload as boolean,
+        isStreaming: isStarting,
         streamingContent: "",
+        currentTools: isStarting ? [] : state.currentTools,
+        selectedToolIndex: 0,
       };
     }
 
@@ -75,7 +88,7 @@ export function reducer(state: TuiState, action: Action): TuiState {
       return {
         ...state,
         currentTools: state.currentTools.map((tool) =>
-          tool.name === id ? { ...tool, ...update } : tool,
+          tool.id === id || tool.name === id ? { ...tool, ...update } : tool,
         ),
       };
     }
@@ -85,6 +98,57 @@ export function reducer(state: TuiState, action: Action): TuiState {
         ...state,
         session: action.payload as Session,
       };
+    }
+
+    case "UPDATE_USAGE": {
+      const usage = action.payload as Partial<TuiState["usage"]>;
+      return {
+        ...state,
+        usage: {
+          ...state.usage,
+          ...usage,
+        },
+      };
+    }
+
+    case "SET_NAV_MODE": {
+      return {
+        ...state,
+        mode: action.payload as "insert" | "normal",
+      };
+    }
+
+    case "SET_SELECTED_TOOL_INDEX": {
+      const idx = action.payload as number;
+      const maxIdx = Math.max(0, state.currentTools.length - 1);
+      return {
+        ...state,
+        selectedToolIndex: Math.max(0, Math.min(idx, maxIdx)),
+      };
+    }
+
+    case "TOGGLE_TOOL_EXPAND": {
+      const { index, toolId } =
+        (action.payload as {
+          index?: number;
+          toolId?: string;
+        }) || {};
+      const targetIdx =
+        index !== undefined
+          ? index
+          : toolId
+            ? state.currentTools.findIndex((t) => t.id === toolId)
+            : state.selectedToolIndex;
+
+      if (targetIdx >= 0 && targetIdx < state.currentTools.length) {
+        const tools = [...state.currentTools];
+        tools[targetIdx] = {
+          ...tools[targetIdx],
+          isExpanded: !tools[targetIdx].isExpanded,
+        };
+        return { ...state, currentTools: tools };
+      }
+      return state;
     }
 
     case "ADD_TOOL_USE": {
@@ -99,7 +163,19 @@ export function reducer(state: TuiState, action: Action): TuiState {
         toolName,
         toolId,
         input,
+        isExpanded: false,
       };
+
+      const newTool: ToolProgress = {
+        id: toolId,
+        name: toolName,
+        status: "running",
+        input,
+        isExpanded: false,
+      };
+
+      const currentTools = [...state.currentTools, newTool];
+
       // Append to last assistant message's content
       const messages = [...state.messages];
       if (
@@ -120,7 +196,7 @@ export function reducer(state: TuiState, action: Action): TuiState {
           timestamp: new Date(),
         });
       }
-      return { ...state, messages };
+      return { ...state, messages, currentTools };
     }
 
     case "ADD_TOOL_RESULT": {
@@ -134,7 +210,21 @@ export function reducer(state: TuiState, action: Action): TuiState {
         content: output,
         toolId,
         isError,
+        isExpanded: false,
       };
+
+      const currentTools = state.currentTools.map((t) =>
+        t.id === toolId
+          ? {
+              ...t,
+              output,
+              status: (isError
+                ? "error"
+                : "completed") as ToolProgress["status"],
+            }
+          : t,
+      );
+
       const messages = [...state.messages];
       // Append to last assistant message
       if (
@@ -147,7 +237,7 @@ export function reducer(state: TuiState, action: Action): TuiState {
           content: [...last.content, block],
         };
       }
-      return { ...state, messages };
+      return { ...state, messages, currentTools };
     }
 
     case "SET_INPUT": {
@@ -168,6 +258,13 @@ export function reducer(state: TuiState, action: Action): TuiState {
       return {
         ...state,
         error: null,
+      };
+    }
+
+    case "SET_FLASH": {
+      return {
+        ...state,
+        flashMessage: action.payload as string | null,
       };
     }
 

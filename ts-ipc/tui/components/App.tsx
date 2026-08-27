@@ -13,6 +13,7 @@ import StreamOutput from "./StreamOutput.js";
 import InputArea from "./InputArea.js";
 import HelpOverlay from "./HelpOverlay.js";
 import ToolsPanel from "./ToolsPanel.js";
+import { copyToClipboard } from "../clipboard.js";
 import {
   reducer,
   INITIAL_STATE,
@@ -57,11 +58,8 @@ export const App: React.FC<AppProps> = ({ client, model }) => {
   }, [client]);
 
   // Handle result event - add message only if streamingContent is non-empty
-  // This uses a ref to get the current value at event time
   useEffect(() => {
     const handler = (params: unknown) => {
-      const p = params as { type?: string; status?: string };
-
       // Only add message if we have streaming content
       const content = streamingContentRef.current.trim();
       const thinking = thinkingContentRef.current.trim();
@@ -88,12 +86,30 @@ export const App: React.FC<AppProps> = ({ client, model }) => {
     return unsub;
   }, [client]);
 
-  // Handle help toggle
-  useInput((input, key) => {
-    if (key.ctrl && input === "h") {
-      setShowHelp((h) => !h);
+  // Handle clipboard copy action
+  const handleCopy = useCallback(() => {
+    let textToCopy = "";
+    if (
+      state.currentTools.length > 0 &&
+      state.selectedToolIndex < state.currentTools.length
+    ) {
+      const tool = state.currentTools[state.selectedToolIndex];
+      textToCopy = tool.output || JSON.stringify(tool.input || {}, null, 2);
+    } else if (state.messages.length > 0) {
+      const lastMsg = state.messages[state.messages.length - 1];
+      textToCopy = lastMsg.content.map((b) => b.content).join("\n");
     }
-  });
+
+    if (textToCopy) {
+      const success = copyToClipboard(textToCopy);
+      if (success) {
+        dispatch({ type: "SET_FLASH", payload: "✓ Copied to clipboard!" });
+        setTimeout(() => {
+          dispatch({ type: "SET_FLASH", payload: null });
+        }, 2500);
+      }
+    }
+  }, [state.currentTools, state.selectedToolIndex, state.messages]);
 
   const handleSubmit = useCallback(
     async (text: string) => {
@@ -116,10 +132,40 @@ export const App: React.FC<AppProps> = ({ client, model }) => {
     dispatch({ type: "SET_INPUT", payload: text });
   }, []);
 
+  const handleToggleMode = useCallback(() => {
+    dispatch({
+      type: "SET_NAV_MODE",
+      payload: state.mode === "insert" ? "normal" : "insert",
+    });
+  }, [state.mode]);
+
+  const handleNavigate = useCallback(
+    (delta: number) => {
+      dispatch({
+        type: "SET_SELECTED_TOOL_INDEX",
+        payload: state.selectedToolIndex + delta,
+      });
+    },
+    [state.selectedToolIndex],
+  );
+
+  const handleToggleExpand = useCallback(() => {
+    dispatch({
+      type: "TOGGLE_TOOL_EXPAND",
+      payload: { index: state.selectedToolIndex },
+    });
+  }, [state.selectedToolIndex]);
+
   return (
     <Box flexDirection="column" width="100%" height="100%" padding={1}>
-      {/* Status bar */}
-      <StatusBar session={state.session} isStreaming={state.isStreaming} />
+      {/* Status bar with live context gauge & mode badge */}
+      <StatusBar
+        session={state.session}
+        isStreaming={state.isStreaming}
+        mode={state.mode}
+        usage={state.usage}
+        flashMessage={state.flashMessage}
+      />
 
       {/* Messages area */}
       <Box
@@ -140,9 +186,13 @@ export const App: React.FC<AppProps> = ({ client, model }) => {
           />
         )}
 
-        {/* Tools panel */}
+        {/* Collapsible Tools panel */}
         {!state.isStreaming && state.currentTools.length > 0 && (
-          <ToolsPanel tools={state.currentTools} />
+          <ToolsPanel
+            tools={state.currentTools}
+            selectedIdx={state.selectedToolIndex}
+            isNormalMode={state.mode === "normal"}
+          />
         )}
 
         {/* Error display */}
@@ -157,12 +207,18 @@ export const App: React.FC<AppProps> = ({ client, model }) => {
         )}
       </Box>
 
-      {/* Input area */}
+      {/* Modal Input area */}
       <InputArea
         input={state.input}
         isStreaming={state.isStreaming}
+        mode={state.mode}
         onSubmit={handleSubmit}
         onInputChange={handleInputChange}
+        onToggleMode={handleToggleMode}
+        onNavigate={handleNavigate}
+        onToggleExpand={handleToggleExpand}
+        onCopy={handleCopy}
+        onToggleHelp={() => setShowHelp((h) => !h)}
       />
 
       {/* Help overlay */}
