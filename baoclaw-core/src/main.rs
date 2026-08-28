@@ -402,6 +402,7 @@ async fn handle_shared_client(
                             };
 
                             let mut disconnected = false;
+                            let mut turn_finished = false;
                             while let Some(event) = rx.recv().await {
                                 // Render Loop Headers to TUI on turn events
                                 match &event {
@@ -423,6 +424,10 @@ async fn handle_shared_client(
                                     _ => {}
                                 }
 
+                                let terminal_event = matches!(
+                                    &event,
+                                    EngineEvent::Result(_) | EngineEvent::Error(_)
+                                );
                                 // Broadcast to all clients
                                 session.broadcast(event.clone());
 
@@ -431,23 +436,29 @@ async fn handle_shared_client(
                                     let mut conn_guard = conn.lock().await;
                                     if send_engine_event(&mut conn_guard, &event).await.is_err() {
                                         disconnected = true;
+                                        turn_finished = terminal_event;
                                         break;
                                     }
                                 }
 
-                                if matches!(event, EngineEvent::Result(_) | EngineEvent::Error(_)) {
-                                    let mut engine = session.engine_write().await;
-                                    engine.sync_messages().await;
-                                    drop(engine);
-                                    // Persist session state to disk after turn completes
-                                    let reg = Arc::clone(&shared.session_registry);
-                                    let sid = session_id.clone();
-                                    tokio::spawn(async move {
-                                        if let Err(e) = reg.persist_session(&sid).await {
-                                            eprintln!("[daemon] session persist warning: {}", e);
-                                        }
-                                    });
+                                if terminal_event {
+                                    turn_finished = true;
                                     break;
+                                }
+                            }
+
+                            if turn_finished {
+                                let mut engine = session.engine_write().await;
+                                engine.sync_messages().await;
+                                drop(engine);
+                                // Persist before releasing the submitter or handling disconnect.
+                                if let Err(e) =
+                                    shared.session_registry.persist_session(&session_id).await
+                                {
+                                    eprintln!(
+                                        "[daemon] session {} persistence warning: {}",
+                                        session_id, e
+                                    );
                                 }
                             }
 
@@ -2907,7 +2918,7 @@ async fn handle_client(mut conn: IpcConnection, shared: SharedState) {
         init_id,
         init_cwd,
         init_model,
-        _init_resume_session_id,
+        init_resume_session_id,
         init_shared_session_id,
         init_protocol_version,
     ) = match init_msg {
@@ -2961,6 +2972,17 @@ async fn handle_client(mut conn: IpcConnection, shared: SharedState) {
         }
     }
 
+    if init_resume_session_id.is_some() {
+        let _ = conn
+            .send_error(
+                Some(init_id),
+                -32602,
+                "resume_session_id is not supported; use shared_session_id instead".into(),
+            )
+            .await;
+        return;
+    }
+
     let model = init_model
         .or_else(|| std::env::var("ANTHROPIC_MODEL").ok())
         .unwrap_or_else(|| shared.baoclaw_config.model.clone());
@@ -2969,10 +2991,32 @@ async fn handle_client(mut conn: IpcConnection, shared: SharedState) {
     // ── Shared mode: session key is derived from cwd, not client-provided ID ──
     // This allows one daemon to manage multiple project sessions.
     if let Some(ref shared_session_id) = init_shared_session_id {
+        if !engine::session_persistence::is_valid_session_id(shared_session_id) {
+            let _ = conn
+                .send_error(
+                    Some(init_id),
+                    -32602,
+                    "Invalid shared_session_id: use only letters, digits, '-' or '_' (max 128 bytes)"
+                        .into(),
+                )
+                .await;
+            return;
+        }
         // Session key = cwd_hash + client_type, so different clients (web/telegram/cli)
         // on the same cwd get independent sessions and don't block each other.
         let cwd_hash = format!("{:x}", md5_simple(&work_cwd.to_string_lossy()))[..8].to_string();
         let session_id_clone = format!("{}-{}", cwd_hash, shared_session_id);
+        if !engine::session_persistence::is_valid_session_id(&session_id_clone) {
+            let _ = conn
+                .send_error(
+                    Some(init_id),
+                    -32602,
+                    "Invalid shared_session_id: use only letters, digits, '-' or '_' (max 128 bytes)"
+                        .into(),
+                )
+                .await;
+            return;
+        }
         eprintln!(
             "Client connecting to session '{}' (cwd: {})",
             session_id_clone,
@@ -2982,9 +3026,9 @@ async fn handle_client(mut conn: IpcConnection, shared: SharedState) {
         let model_clone = model.clone();
         let work_cwd_clone = work_cwd.clone();
 
-        let (session, is_new) = shared
+        let (session, is_new, mut resumed) = shared
             .session_registry
-            .get_or_create(&session_id_clone, || {
+            .get_or_create_with_restore(&session_id_clone, || {
                 QueryEngine::new(QueryEngineConfig {
                     cwd: work_cwd_clone,
                     tools: shared_clone.engine_tools.clone(),
@@ -3009,7 +3053,9 @@ async fn handle_client(mut conn: IpcConnection, shared: SharedState) {
                         crate::engine::session_memory::SessionMemory::load(&session_id_clone),
                     )),
                     file_cache: Some(Arc::clone(&shared_clone.file_cache)),
-                    tool_result_store: shared_clone.tool_result_store.as_ref().map(Arc::clone),
+                    tool_result_store: Some(Arc::new(
+                        engine::tool_result_store::ToolResultStore::for_session(&session_id_clone),
+                    )),
                     hook_manager: Some(Arc::clone(&shared_clone.hook_manager)),
                 })
             })
@@ -3021,11 +3067,11 @@ async fn handle_client(mut conn: IpcConnection, shared: SharedState) {
             .ensure_registered(&work_cwd.to_string_lossy(), None)
             .await;
 
-        // ── Resume session history: summary-first strategy ──
+        // ── Resume session history: snapshot-first, legacy transcript fallback ──
         // Inspired by Claude Code: load pre-written summary + recent tail,
         // NEVER rebuild the full history or do on-demand API summarization.
         let current_msg_count = session.engine_read().await.get_messages().len();
-        if is_new || current_msg_count == 0 {
+        if (is_new || current_msg_count == 0) && !resumed {
             let cwd_str_for_resume = work_cwd.to_string_lossy().to_string();
             if let Some(rid) = engine::transcript::find_latest_session_for_cwd(&cwd_str_for_resume)
             {
@@ -3106,6 +3152,7 @@ async fn handle_client(mut conn: IpcConnection, shared: SharedState) {
                                 entry_count,
                                 engine.get_messages().len()
                             );
+                            resumed = true;
                         }
                     }
                     Err(e) => eprintln!("Failed to resume session {}: {}", rid, e),
@@ -3125,7 +3172,7 @@ async fn handle_client(mut conn: IpcConnection, shared: SharedState) {
                     "session_id": &session_id_clone,
                     "shared": true,
                     "reconnected": msg_count > 0,
-                    "resumed": false,
+                    "resumed": resumed,
                     "message_count": msg_count,
                     "model": session.engine_read().await.get_model(),
                 }),
@@ -3147,7 +3194,15 @@ async fn handle_client(mut conn: IpcConnection, shared: SharedState) {
 
         // Client disconnect handling (Task 6.1)
         let is_last = session.remove_client(client_id).await;
-        if is_last {
+        let cleanup_guard = if is_last {
+            shared_clone
+                .session_registry
+                .acquire_last_client_cleanup(&session_id_clone, &session)
+                .await
+        } else {
+            None
+        };
+        if is_last && cleanup_guard.is_some() {
             // ── Session-close evolution hook ──
             // Extract structured summary before removing the session.
             {
@@ -3243,14 +3298,26 @@ async fn handle_client(mut conn: IpcConnection, shared: SharedState) {
                     .await;
             }
 
-            shared_clone
+            match shared_clone
                 .session_registry
-                .remove(&session_id_clone)
-                .await;
-            eprintln!(
-                "Shared session '{}' removed (last client disconnected)",
-                session_id_clone
-            );
+                .persist_session(&session_id_clone)
+                .await
+            {
+                Ok(()) => {
+                    shared_clone
+                        .session_registry
+                        .remove_after_last_client_cleanup(&session_id_clone)
+                        .await;
+                    eprintln!(
+                        "Shared session '{}' removed (last client disconnected)",
+                        session_id_clone
+                    );
+                }
+                Err(error) => eprintln!(
+                    "[daemon] WARNING: keeping session '{}' in memory because final persistence failed: {}",
+                    session_id_clone, error
+                ),
+            }
         }
 
         eprintln!("Shared client {} session ended", client_id);

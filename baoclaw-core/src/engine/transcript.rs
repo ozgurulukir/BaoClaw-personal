@@ -39,11 +39,21 @@ impl TranscriptWriter {
     /// Create or open a transcript file in a specific directory.
     pub fn open_in_dir(session_id: &str, dir: &PathBuf) -> Result<Self, std::io::Error> {
         std::fs::create_dir_all(dir)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
+        }
         let path = dir.join(format!("{}.jsonl", session_id));
         let file = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
             .open(&path)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+        }
         Ok(Self {
             file,
             session_id: session_id.to_string(),

@@ -75,6 +75,11 @@ impl ToolResultStore {
     pub fn persist(&self, content: &str, tool_use_id: &str) -> std::io::Result<PersistedOutput> {
         // Ensure base_dir exists
         std::fs::create_dir_all(&self.base_dir)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&self.base_dir, std::fs::Permissions::from_mode(0o700))?;
+        }
 
         // Sanitise tool_use_id for use as a filename
         let safe_id: String = tool_use_id
@@ -89,7 +94,7 @@ impl ToolResultStore {
             .collect();
         let file_path = self.base_dir.join(format!("{}.txt", safe_id));
 
-        std::fs::write(&file_path, content)?;
+        crate::engine::session_persistence::atomic_write(&file_path, content)?;
 
         let preview: String = content.chars().take(PREVIEW_CHARS).collect();
         let total_chars = content.len();

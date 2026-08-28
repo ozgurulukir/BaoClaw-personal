@@ -29,7 +29,14 @@ async function loadDeps() {
 
 const AUTH_DIR_NAME = "whatsapp-auth";
 const MAX_RETRIES = 5;
+const RETRY_BASE_DELAY_MS = 3_000;
+const RETRY_MAX_DELAY_MS = 30_000;
 const usePairingMode = process.argv.includes("--pairing");
+
+export function retryDelayMs(retry: number): number {
+  const exponent = Math.max(0, retry - 1);
+  return Math.min(RETRY_BASE_DELAY_MS * 2 ** exponent, RETRY_MAX_DELAY_MS);
+}
 
 const logger = {
   level: "warn" as const,
@@ -102,6 +109,12 @@ export class SessionManager {
   private pairingPhone: string | null;
   private proxyUrl: string | null = null;
   private proxyAgent: any = undefined;
+  private initializePromise: Promise<any> | null = null;
+  private retryTimer: ReturnType<typeof setTimeout> | null = null;
+  private connectionGeneration = 0;
+  private lifecycleGeneration = 0;
+  private pendingReject: ((reason?: unknown) => void) | null = null;
+  private stopping = false;
 
   constructor(authDir?: string, pairingPhone?: string, proxyUrl?: string) {
     this.authDir = authDir ?? getAuthDir();
@@ -123,7 +136,31 @@ export class SessionManager {
   }
 
   async initialize(): Promise<any> {
+    if (this._isConnected && this.sock) return this.sock;
+    if (this.initializePromise) return this.initializePromise;
+
+    if (this.retryTimer) {
+      clearTimeout(this.retryTimer);
+      this.retryTimer = null;
+    }
+    this.stopping = false;
+    const lifecycleGeneration = ++this.lifecycleGeneration;
+    const initialization = this.initializeInternal(lifecycleGeneration);
+    this.initializePromise = initialization;
+    try {
+      return await initialization;
+    } finally {
+      if (this.initializePromise === initialization) {
+        this.initializePromise = null;
+      }
+    }
+  }
+
+  private async initializeInternal(lifecycleGeneration: number): Promise<any> {
     await loadDeps();
+    if (lifecycleGeneration !== this.lifecycleGeneration || this.stopping) {
+      throw new Error("WhatsApp initialization was stopped");
+    }
     await this.initProxy();
 
     let waVersion: number[] | undefined;
@@ -136,19 +173,45 @@ export class SessionManager {
       );
     }
 
+    if (lifecycleGeneration !== this.lifecycleGeneration || this.stopping) {
+      throw new Error("WhatsApp initialization was stopped");
+    }
+
     fs.mkdirSync(this.authDir, { recursive: true, mode: 0o700 });
     secureAuthDirectory(this.authDir);
     const { state, saveCreds } = await useMultiFileAuthState(this.authDir);
+    if (lifecycleGeneration !== this.lifecycleGeneration || this.stopping) {
+      throw new Error("WhatsApp initialization was stopped");
+    }
     const hasAuth =
       fs.existsSync(path.join(this.authDir, "creds.json")) &&
       state.creds?.registered;
 
     return new Promise((resolve, reject) => {
       let retries = 0;
-      let resolved = false;
       let pairingRequested = false;
+      let settled = false;
+
+      const settleReject = (reason?: unknown) => {
+        if (settled) return;
+        settled = true;
+        this.pendingReject = null;
+        reject(
+          reason instanceof Error
+            ? reason
+            : new Error(String(reason ?? "WhatsApp initialization failed")),
+        );
+      };
+
+      this.pendingReject = settleReject;
 
       const startSocket = () => {
+        if (this.stopping || lifecycleGeneration !== this.lifecycleGeneration) {
+          settleReject(new Error("WhatsApp initialization was stopped"));
+          return;
+        }
+
+        const generation = ++this.connectionGeneration;
         const browserConfig = Browsers
           ? Browsers.ubuntu("Chrome")
           : ["BaoClaw", "Chrome", "22.04"];
@@ -163,6 +226,18 @@ export class SessionManager {
             ? { agent: this.proxyAgent, fetchAgent: this.proxyAgent }
             : {}),
         });
+        this.sock = sock;
+
+        const isCurrentSocket = () =>
+          generation === this.connectionGeneration && this.sock === sock;
+
+        const scheduleRetry = () => {
+          if (this.stopping || this.retryTimer) return;
+          this.retryTimer = setTimeout(() => {
+            this.retryTimer = null;
+            startSocket();
+          }, retryDelayMs(retries));
+        };
 
         sock.ev.on("creds.update", () => {
           void saveCreds()
@@ -212,8 +287,8 @@ export class SessionManager {
             }
           }
 
-          if (connection === "open" && !resolved) {
-            resolved = true;
+          if (connection === "open" && isCurrentSocket()) {
+            retries = 0;
             this.sock = sock;
             this._isConnected = true;
             this.phoneNumber = sock.user?.id
@@ -222,23 +297,33 @@ export class SessionManager {
             runtimeLogger.info(
               `\n✅ WhatsApp connected${this.phoneNumber ? ` as ${this.phoneNumber}` : ""}.`,
             );
-            resolve(sock);
+            if (!settled) {
+              settled = true;
+              this.pendingReject = null;
+              resolve(sock);
+            }
           }
 
-          if (connection === "close" && !resolved) {
+          if (connection === "close" && isCurrentSocket()) {
             this._isConnected = false;
+            this.phoneNumber = null;
+            this.sock = null;
             const statusCode = (lastDisconnect?.error as any)?.output
               ?.statusCode;
             const isLoggedOut = statusCode === DisconnectReason?.loggedOut;
+            if (this.stopping) {
+              settleReject(new Error("WhatsApp connection stopped"));
+              return;
+            }
             if (isLoggedOut) {
               runtimeLogger.info("Logged out. Clearing auth state.");
               this.clearAuthState();
-              reject(new Error("Logged out from WhatsApp"));
+              settleReject(new Error("Logged out from WhatsApp"));
               return;
             }
             retries++;
             if (retries > MAX_RETRIES) {
-              reject(
+              settleReject(
                 new Error(
                   `Failed after ${MAX_RETRIES} retries (status=${statusCode})`,
                 ),
@@ -246,11 +331,9 @@ export class SessionManager {
               return;
             }
             runtimeLogger.info(
-              `Connection closed (status=${statusCode}). Retry ${retries}/${MAX_RETRIES} in 3s...`,
+              `Connection closed (status=${statusCode}). Retry ${retries}/${MAX_RETRIES} in ${retryDelayMs(retries)}ms...`,
             );
-            setTimeout(() => {
-              if (!resolved) startSocket();
-            }, 3000);
+            scheduleRetry();
           }
         });
       };
@@ -275,12 +358,25 @@ export class SessionManager {
   }
 
   async disconnect(): Promise<void> {
-    if (this.sock) {
+    this.stopping = true;
+    this.lifecycleGeneration++;
+    this.connectionGeneration++;
+    if (this.retryTimer) {
+      clearTimeout(this.retryTimer);
+      this.retryTimer = null;
+    }
+    this.pendingReject?.(new Error("WhatsApp connection stopped"));
+    this.pendingReject = null;
+
+    const socket = this.sock;
+    this.sock = null;
+    this._isConnected = false;
+    this.phoneNumber = null;
+    this.initializePromise = null;
+    if (socket) {
       try {
-        this.sock.end(undefined);
+        socket.end(undefined);
       } catch {}
-      this.sock = null;
-      this._isConnected = false;
     }
   }
 

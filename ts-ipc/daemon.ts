@@ -126,9 +126,7 @@ export class DaemonConnector {
       settings: {},
       protocol_version: "1",
     };
-    if (sharedSessionId) {
-      initParams.shared_session_id = sharedSessionId;
-    }
+    initParams.shared_session_id = sharedSessionId ?? this.sessionTag;
     await client.request("initialize", initParams);
     return client;
   }

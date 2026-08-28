@@ -46,8 +46,48 @@ impl SessionMemory {
     /// Load an existing session memory file. Returns empty string if missing.
     pub fn load(session_id: &str) -> Self {
         let file_path = Self::path_for(session_id);
-        let _ = fs::create_dir_all(file_path.parent().unwrap_or(&file_path));
-        let content = fs::read_to_string(&file_path).unwrap_or_default();
+        let parent = file_path.parent().unwrap_or(&file_path);
+        if let Err(error) = fs::create_dir_all(parent) {
+            eprintln!(
+                "[session-memory] WARNING: failed to create {}: {}",
+                parent.display(),
+                error
+            );
+        }
+        #[cfg(unix)]
+        if let Err(error) = {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(parent, fs::Permissions::from_mode(0o700))
+        } {
+            eprintln!(
+                "[session-memory] WARNING: failed to secure {}: {}",
+                parent.display(),
+                error
+            );
+        }
+        let content = match fs::read_to_string(&file_path) {
+            Ok(content) => content,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+            Err(error) => {
+                eprintln!(
+                    "[session-memory] WARNING: failed to read {}: {}",
+                    file_path.display(),
+                    error
+                );
+                String::new()
+            }
+        };
+        #[cfg(unix)]
+        if file_path.exists() {
+            use std::os::unix::fs::PermissionsExt;
+            if let Err(error) = fs::set_permissions(&file_path, fs::Permissions::from_mode(0o600)) {
+                eprintln!(
+                    "[session-memory] WARNING: failed to secure {}: {}",
+                    file_path.display(),
+                    error
+                );
+            }
+        }
 
         Self {
             file_path,
@@ -108,7 +148,15 @@ impl SessionMemory {
         };
         let mut guard = self.content.lock().unwrap_or_else(|e| e.into_inner());
         *guard = truncated;
-        let _ = fs::write(&self.file_path, guard.as_bytes());
+        if let Err(error) =
+            crate::engine::session_persistence::atomic_write(&self.file_path, &guard)
+        {
+            eprintln!(
+                "[session-memory] WARNING: failed to persist {}: {}",
+                self.file_path.display(),
+                error
+            );
+        }
     }
 
     /// Record the current message count so `should_update` can track deltas.
@@ -124,7 +172,13 @@ impl SessionMemory {
     pub fn clear(&self) {
         let mut guard = self.content.lock().unwrap_or_else(|e| e.into_inner());
         guard.clear();
-        let _ = fs::write(&self.file_path, "");
+        if let Err(error) = crate::engine::session_persistence::atomic_write(&self.file_path, "") {
+            eprintln!(
+                "[session-memory] WARNING: failed to clear {}: {}",
+                self.file_path.display(),
+                error
+            );
+        }
     }
 
     /// Path to the backing file (for diagnostics).
