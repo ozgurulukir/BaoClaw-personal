@@ -33,6 +33,14 @@ const RETRY_BASE_DELAY_MS = 3_000;
 const RETRY_MAX_DELAY_MS = 30_000;
 const usePairingMode = process.argv.includes("--pairing");
 
+export type SessionLifecycleState =
+  | "idle"
+  | "connecting"
+  | "connected"
+  | "reconnecting"
+  | "logged_out"
+  | "stopping";
+
 export function retryDelayMs(retry: number): number {
   const exponent = Math.max(0, retry - 1);
   return Math.min(RETRY_BASE_DELAY_MS * 2 ** exponent, RETRY_MAX_DELAY_MS);
@@ -54,9 +62,34 @@ export function getAuthDir(): string {
 }
 
 function secureAuthDirectory(authDir: string): void {
+  rejectSymlinkedPathPrefix(authDir);
+  const directory = fs.lstatSync(authDir);
+  if (!directory.isDirectory() || directory.isSymbolicLink()) {
+    throw new Error("WhatsApp auth path must be a real directory");
+  }
   fs.chmodSync(authDir, 0o700);
   for (const entry of fs.readdirSync(authDir, { withFileTypes: true })) {
-    if (entry.isFile()) fs.chmodSync(path.join(authDir, entry.name), 0o600);
+    const entryPath = path.join(authDir, entry.name);
+    if (entry.isSymbolicLink()) {
+      throw new Error("WhatsApp auth directory contains a symbolic link");
+    }
+    if (entry.isFile()) fs.chmodSync(entryPath, 0o600);
+  }
+}
+
+function rejectSymlinkedPathPrefix(target: string): void {
+  let current = path.resolve(target);
+  while (true) {
+    try {
+      if (fs.lstatSync(current).isSymbolicLink()) {
+        throw new Error("WhatsApp auth path contains a symbolic link");
+      }
+    } catch (error: any) {
+      if (error?.code !== "ENOENT") throw error;
+    }
+    const parent = path.dirname(current);
+    if (parent === current) return;
+    current = parent;
   }
 }
 
@@ -115,6 +148,7 @@ export class SessionManager {
   private lifecycleGeneration = 0;
   private pendingReject: ((reason?: unknown) => void) | null = null;
   private stopping = false;
+  private lifecycleState: SessionLifecycleState = "idle";
 
   constructor(authDir?: string, pairingPhone?: string, proxyUrl?: string) {
     this.authDir = authDir ?? getAuthDir();
@@ -144,11 +178,18 @@ export class SessionManager {
       this.retryTimer = null;
     }
     this.stopping = false;
+    this.lifecycleState = "connecting";
     const lifecycleGeneration = ++this.lifecycleGeneration;
     const initialization = this.initializeInternal(lifecycleGeneration);
     this.initializePromise = initialization;
     try {
       return await initialization;
+    } catch (error) {
+      if (this.lifecycleGeneration === lifecycleGeneration && !this.stopping) {
+        const state = this.getLifecycleState();
+        if (state !== "logged_out") this.lifecycleState = "idle";
+      }
+      throw error;
     } finally {
       if (this.initializePromise === initialization) {
         this.initializePromise = null;
@@ -177,6 +218,15 @@ export class SessionManager {
       throw new Error("WhatsApp initialization was stopped");
     }
 
+    rejectSymlinkedPathPrefix(this.authDir);
+    try {
+      const existing = fs.lstatSync(this.authDir);
+      if (existing.isSymbolicLink() || !existing.isDirectory()) {
+        throw new Error("WhatsApp auth path must be a real directory");
+      }
+    } catch (error: any) {
+      if (error?.code !== "ENOENT") throw error;
+    }
     fs.mkdirSync(this.authDir, { recursive: true, mode: 0o700 });
     secureAuthDirectory(this.authDir);
     const { state, saveCreds } = await useMultiFileAuthState(this.authDir);
@@ -289,6 +339,7 @@ export class SessionManager {
 
           if (connection === "open" && isCurrentSocket()) {
             retries = 0;
+            this.lifecycleState = "connected";
             this.sock = sock;
             this._isConnected = true;
             this.phoneNumber = sock.user?.id
@@ -312,17 +363,21 @@ export class SessionManager {
               ?.statusCode;
             const isLoggedOut = statusCode === DisconnectReason?.loggedOut;
             if (this.stopping) {
+              this.lifecycleState = "stopping";
               settleReject(new Error("WhatsApp connection stopped"));
               return;
             }
             if (isLoggedOut) {
+              this.lifecycleState = "logged_out";
               runtimeLogger.info("Logged out. Clearing auth state.");
               this.clearAuthState();
               settleReject(new Error("Logged out from WhatsApp"));
               return;
             }
+            this.lifecycleState = "reconnecting";
             retries++;
             if (retries > MAX_RETRIES) {
+              this.lifecycleState = "idle";
               settleReject(
                 new Error(
                   `Failed after ${MAX_RETRIES} retries (status=${statusCode})`,
@@ -356,9 +411,13 @@ export class SessionManager {
   getSocket(): any {
     return this.sock;
   }
+  getLifecycleState(): SessionLifecycleState {
+    return this.lifecycleState;
+  }
 
   async disconnect(): Promise<void> {
     this.stopping = true;
+    this.lifecycleState = "stopping";
     this.lifecycleGeneration++;
     this.connectionGeneration++;
     if (this.retryTimer) {
@@ -382,7 +441,12 @@ export class SessionManager {
 
   clearAuthState(): void {
     try {
+      rejectSymlinkedPathPrefix(this.authDir);
       fs.rmSync(this.authDir, { recursive: true, force: true });
-    } catch {}
+    } catch (error) {
+      runtimeLogger.warn(
+        `Failed to clear WhatsApp auth state: ${String(error)}`,
+      );
+    }
   }
 }

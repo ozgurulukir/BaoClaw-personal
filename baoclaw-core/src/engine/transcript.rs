@@ -38,13 +38,14 @@ impl TranscriptWriter {
 
     /// Create or open a transcript file in a specific directory.
     pub fn open_in_dir(session_id: &str, dir: &PathBuf) -> Result<Self, std::io::Error> {
+        let path =
+            crate::engine::session_persistence::session_artifact_path(dir, session_id, "jsonl")?;
         std::fs::create_dir_all(dir)?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
         }
-        let path = dir.join(format!("{}.jsonl", session_id));
         let file = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
@@ -81,7 +82,8 @@ impl TranscriptWriter {
         session_id: &str,
         dir: &Path,
     ) -> Result<Vec<TranscriptEntry>, std::io::Error> {
-        let path = dir.join(format!("{}.jsonl", session_id));
+        let path =
+            crate::engine::session_persistence::session_artifact_path(dir, session_id, "jsonl")?;
         let file = std::fs::File::open(&path)?;
         let reader = std::io::BufReader::new(file);
         let entries = reader
@@ -255,23 +257,24 @@ pub fn find_latest_session_for_cwd(cwd: &str) -> Option<String> {
         return None;
     }
 
-    // Compute cwd hash prefix (same FNV-1a algorithm as md5_simple in main.rs)
+    // Match the current 16-character cwd identity and the legacy 8-character
+    // FNV identity so existing transcripts remain discoverable during migration.
     let cwd_hash = {
         let mut h: u64 = 0xcbf29ce484222325;
         for b in cwd.bytes() {
             h ^= b as u64;
             h = h.wrapping_mul(0x100000001b3);
         }
-        format!("{:x}", h)
+        format!("{:016x}", h)
     };
-    let prefix = &cwd_hash[..8.min(cwd_hash.len())];
+    let prefixes = [cwd_hash.as_str(), &cwd_hash[..8]];
 
     let mut best: Option<(String, std::time::SystemTime)> = None;
 
     if let Ok(entries) = std::fs::read_dir(&sessions_dir) {
         for entry in entries.flatten() {
             let name = entry.file_name().to_string_lossy().to_string();
-            if name.starts_with(prefix) && name.ends_with(".jsonl") {
+            if prefixes.iter().any(|prefix| name.starts_with(prefix)) && name.ends_with(".jsonl") {
                 let session_id = name.trim_end_matches(".jsonl").to_string();
                 if let Ok(meta) = entry.metadata() {
                     if let Ok(modified) = meta.modified() {

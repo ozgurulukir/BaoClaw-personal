@@ -39,6 +39,70 @@ pub fn is_valid_session_id(session_id: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
 }
 
+/// Build a path for a session artifact without accepting raw path components.
+pub fn session_artifact_path(
+    sessions_dir: &Path,
+    session_id: &str,
+    suffix: &str,
+) -> io::Result<PathBuf> {
+    validate_session_id(session_id)?;
+    reject_symlinked_path_prefix(sessions_dir)?;
+    if suffix.is_empty()
+        || suffix.contains('/')
+        || suffix.contains('\\')
+        || suffix.chars().any(|character| character.is_control())
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "session artifact suffix contains invalid path characters",
+        ));
+    }
+    let path = sessions_dir.join(format!("{}.{}", session_id, suffix));
+    reject_existing_symlink(&path)?;
+    Ok(path)
+}
+
+/// Build a directory path for session-scoped artifacts after validation.
+pub fn session_directory_path(sessions_dir: &Path, session_id: &str) -> io::Result<PathBuf> {
+    validate_session_id(session_id)?;
+    reject_symlinked_path_prefix(sessions_dir)?;
+    let path = sessions_dir.join(session_id);
+    reject_existing_symlink(&path)?;
+    Ok(path)
+}
+
+fn reject_symlinked_path_prefix(path: &Path) -> io::Result<()> {
+    let mut current = Some(path);
+    while let Some(candidate) = current {
+        if let Ok(metadata) = fs::symlink_metadata(candidate) {
+            if metadata.file_type().is_symlink() {
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "session storage path contains a symbolic link",
+                ));
+            }
+        }
+        let parent = candidate.parent();
+        if parent == Some(candidate) {
+            break;
+        }
+        current = parent;
+    }
+    Ok(())
+}
+
+fn reject_existing_symlink(path: &Path) -> io::Result<()> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "session storage target is a symbolic link",
+        )),
+        Ok(_) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
 fn persistence_lock() -> &'static Mutex<()> {
     PERSISTENCE_LOCK.get_or_init(|| Mutex::new(()))
 }
@@ -87,6 +151,7 @@ pub fn default_sessions_dir() -> PathBuf {
 
 /// Ensure a directory exists, creating it (and parents) if needed.
 fn ensure_dir(dir: &Path) -> io::Result<()> {
+    reject_symlinked_path_prefix(dir)?;
     fs::create_dir_all(dir)?;
     #[cfg(unix)]
     {
@@ -96,7 +161,13 @@ fn ensure_dir(dir: &Path) -> io::Result<()> {
     Ok(())
 }
 
+/// Ensure the session storage directory exists without following symlinks.
+pub fn ensure_session_storage_dir(dir: &Path) -> io::Result<()> {
+    ensure_dir(dir)
+}
+
 fn secure_file(path: &Path) -> io::Result<()> {
+    reject_existing_symlink(path)?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -111,6 +182,8 @@ fn secure_file(path: &Path) -> io::Result<()> {
 /// This prevents corruption if the process is killed mid-write.
 /// The rename is atomic on the same filesystem (POSIX guarantee).
 pub fn atomic_write(path: &Path, content: &str) -> io::Result<()> {
+    reject_symlinked_path_prefix(path)?;
+    reject_existing_symlink(path)?;
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
     if parent == Path::new(".") {
         fs::create_dir_all(parent)?;
@@ -142,13 +215,16 @@ pub fn atomic_write(path: &Path, content: &str) -> io::Result<()> {
 }
 
 /// Path for a session's JSON state file.
-fn session_file_path(sessions_dir: &Path, session_id: &str) -> PathBuf {
-    sessions_dir.join(format!("{}.json", session_id))
+fn session_file_path(sessions_dir: &Path, session_id: &str) -> io::Result<PathBuf> {
+    session_artifact_path(sessions_dir, session_id, "json")
 }
 
 /// Path for the registry index file.
-fn registry_file_path(sessions_dir: &Path) -> PathBuf {
-    sessions_dir.join("registry.json")
+fn registry_file_path(sessions_dir: &Path) -> io::Result<PathBuf> {
+    reject_symlinked_path_prefix(sessions_dir)?;
+    let path = sessions_dir.join("registry.json");
+    reject_existing_symlink(&path)?;
+    Ok(path)
 }
 
 /// Path for the archive subdirectory.
@@ -165,7 +241,16 @@ pub fn load_registry(sessions_dir: &Path) -> SessionRegistryIndex {
 }
 
 fn load_registry_unlocked(sessions_dir: &Path) -> SessionRegistryIndex {
-    let path = registry_file_path(sessions_dir);
+    let path = match registry_file_path(sessions_dir) {
+        Ok(path) => path,
+        Err(error) => {
+            eprintln!(
+                "[session-persist] WARNING: rejected registry storage path: {}",
+                error
+            );
+            return SessionRegistryIndex::default();
+        }
+    };
     match fs::read_to_string(&path) {
         Ok(content) => {
             if let Err(error) = secure_file(&path) {
@@ -248,6 +333,7 @@ fn rebuild_registry(sessions_dir: &Path) -> SessionRegistryIndex {
                 return None;
             }
             let expected_id = path.file_stem()?.to_str()?.to_string();
+            reject_existing_symlink(&path).ok()?;
             let content = fs::read_to_string(path).ok()?;
             let state = serde_json::from_str::<PersistedSession>(&content).ok()?;
             (state.session_id == expected_id
@@ -274,7 +360,7 @@ pub fn save_registry(sessions_dir: &Path, index: &SessionRegistryIndex) -> io::R
 
 fn save_registry_unlocked(sessions_dir: &Path, index: &SessionRegistryIndex) -> io::Result<()> {
     ensure_dir(sessions_dir)?;
-    let path = registry_file_path(sessions_dir);
+    let path = registry_file_path(sessions_dir)?;
     let json = serde_json::to_string_pretty(index)
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
     atomic_write(&path, &json)
@@ -335,7 +421,7 @@ pub fn persist_session_state(sessions_dir: &Path, state: &PersistedSession) -> i
     ensure_dir(sessions_dir)?;
 
     // 1. Write the session state file
-    let path = session_file_path(sessions_dir, &state.session_id);
+    let path = session_file_path(sessions_dir, &state.session_id)?;
     let json = serde_json::to_string_pretty(state)
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
     atomic_write(&path, &json)?;
@@ -369,7 +455,7 @@ pub fn load_session_state(sessions_dir: &Path, session_id: &str) -> Option<Persi
         eprintln!("[session-persist] WARNING: rejected invalid session ID during load");
         return None;
     }
-    let path = session_file_path(sessions_dir, session_id);
+    let path = session_file_path(sessions_dir, session_id).ok()?;
     match fs::read_to_string(&path) {
         Ok(content) => {
             if let Err(error) = secure_file(&path) {
@@ -408,6 +494,101 @@ pub fn load_session_state(sessions_dir: &Path, session_id: &str) -> Option<Persi
             None
         }
     }
+}
+
+/// Copy a trusted legacy session snapshot to a new normalized session key.
+/// The legacy file is retained until a later cleanup so migration cannot lose data.
+pub fn migrate_legacy_session(
+    sessions_dir: &Path,
+    legacy_id: &str,
+    new_id: &str,
+    expected_cwd: &str,
+) -> io::Result<bool> {
+    validate_session_id(legacy_id)?;
+    validate_session_id(new_id)?;
+    if legacy_id == new_id || load_session_state(sessions_dir, new_id).is_some() {
+        return Ok(false);
+    }
+    let Some(mut state) = load_session_state(sessions_dir, legacy_id) else {
+        return Ok(false);
+    };
+    if state.cwd != expected_cwd {
+        return Ok(false);
+    }
+    let source_dir = session_directory_path(sessions_dir, legacy_id)?;
+    if source_dir.is_dir() {
+        validate_directory_tree(&source_dir)?;
+    }
+    let target_dir = session_directory_path(sessions_dir, new_id)?;
+    for suffix in ["jsonl", "memory.md", "baseline.json"] {
+        session_artifact_path(sessions_dir, legacy_id, suffix)?;
+        session_artifact_path(sessions_dir, new_id, suffix)?;
+    }
+    state.session_id = new_id.to_string();
+    persist_session_state(sessions_dir, &state)?;
+
+    for suffix in ["jsonl", "memory.md", "baseline.json"] {
+        let source = session_artifact_path(sessions_dir, legacy_id, suffix)?;
+        let target = session_artifact_path(sessions_dir, new_id, suffix)?;
+        if source.exists() && !target.exists() {
+            fs::copy(source, &target)?;
+            secure_file(&target)?;
+        }
+    }
+    if source_dir.is_dir() && !target_dir.exists() {
+        copy_directory(&source_dir, &target_dir)?;
+    }
+    let mut registry = load_registry(sessions_dir);
+    if registry
+        .sessions
+        .iter()
+        .any(|entry| entry.session_id == legacy_id)
+    {
+        registry
+            .sessions
+            .retain(|entry| entry.session_id != legacy_id);
+        save_registry(sessions_dir, &registry)?;
+    }
+    Ok(true)
+}
+
+fn validate_directory_tree(path: &Path) -> io::Result<()> {
+    for entry in fs::read_dir(path)? {
+        let entry = entry?;
+        let file_type = entry.file_type()?;
+        if file_type.is_symlink() {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "legacy session artifact contains a symbolic link",
+            ));
+        }
+        if file_type.is_dir() {
+            validate_directory_tree(&entry.path())?;
+        }
+    }
+    Ok(())
+}
+
+fn copy_directory(source: &Path, target: &Path) -> io::Result<()> {
+    ensure_dir(target)?;
+    for entry in fs::read_dir(source)? {
+        let entry = entry?;
+        let destination = target.join(entry.file_name());
+        let file_type = entry.file_type()?;
+        if file_type.is_symlink() {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "legacy session artifact contains a symbolic link",
+            ));
+        }
+        if file_type.is_dir() {
+            copy_directory(&entry.path(), &destination)?;
+        } else if !destination.exists() {
+            fs::copy(entry.path(), &destination)?;
+            secure_file(&destination)?;
+        }
+    }
+    Ok(())
 }
 
 // ── Archive Stale Sessions ──
@@ -455,7 +636,16 @@ fn archive_stale_sessions_unlocked(
 
         let age = now.signed_duration_since(last_active);
         if age.num_days() > max_age_days as i64 {
-            let src = session_file_path(sessions_dir, &entry.session_id);
+            let src = match session_file_path(sessions_dir, &entry.session_id) {
+                Ok(path) => path,
+                Err(error) => {
+                    eprintln!(
+                        "[session-persist] WARNING: rejected session {} during archive: {}",
+                        entry.session_id, error
+                    );
+                    continue;
+                }
+            };
             if src.exists() {
                 match archive_session_artifacts(sessions_dir, &archive, &entry.session_id) {
                     Ok(mut moved) => {
@@ -494,25 +684,27 @@ fn archive_session_artifacts(
     ensure_dir(archive)?;
     let mut moved = Vec::new();
     let mut artifacts = vec![(
-        session_file_path(sessions_dir, session_id),
+        session_file_path(sessions_dir, session_id)?,
         archive.join(format!("{}.json", session_id)),
     )];
     artifacts.extend(
         ["jsonl", "memory.md", "baseline.json"]
             .into_iter()
-            .map(|suffix| {
-                (
-                    sessions_dir.join(format!("{}.{}", session_id, suffix)),
+            .map(|suffix| -> io::Result<(PathBuf, PathBuf)> {
+                Ok((
+                    session_artifact_path(sessions_dir, session_id, suffix)?,
                     archive.join(format!("{}.{}", session_id, suffix)),
-                )
-            }),
+                ))
+            })
+            .collect::<io::Result<Vec<_>>>()?,
     );
-    let tool_results = sessions_dir.join(session_id);
+    let tool_results = session_directory_path(sessions_dir, session_id)?;
     if tool_results.exists() {
         artifacts.push((tool_results, archive.join(session_id)));
     }
 
     for (source, destination) in artifacts {
+        reject_existing_symlink(&destination)?;
         if !source.exists() {
             continue;
         }
@@ -561,7 +753,7 @@ pub fn archive_stale_default(sessions_dir: &Path) -> io::Result<Vec<String>> {
 pub fn delete_session(sessions_dir: &Path, session_id: &str) -> io::Result<()> {
     validate_session_id(session_id)?;
     let _guard = persistence_lock().lock().unwrap_or_else(|e| e.into_inner());
-    let path = session_file_path(sessions_dir, session_id);
+    let path = session_file_path(sessions_dir, session_id)?;
     let mut deletion_error = None;
     if let Err(e) = fs::remove_file(&path) {
         if e.kind() != std::io::ErrorKind::NotFound {
@@ -575,7 +767,7 @@ pub fn delete_session(sessions_dir: &Path, session_id: &str) -> io::Result<()> {
     }
 
     for suffix in ["jsonl", "memory.md", "baseline.json"] {
-        let related = sessions_dir.join(format!("{}.{}", session_id, suffix));
+        let related = session_artifact_path(sessions_dir, session_id, suffix)?;
         if let Err(e) = fs::remove_file(&related) {
             if e.kind() != std::io::ErrorKind::NotFound {
                 eprintln!(
@@ -589,7 +781,7 @@ pub fn delete_session(sessions_dir: &Path, session_id: &str) -> io::Result<()> {
             }
         }
     }
-    let tool_results = sessions_dir.join(session_id);
+    let tool_results = session_directory_path(sessions_dir, session_id)?;
     if tool_results.exists() {
         let result = if tool_results.is_dir() {
             fs::remove_dir_all(&tool_results)
@@ -663,6 +855,43 @@ mod tests {
     }
 
     #[test]
+    fn test_session_artifact_path_rejects_invalid_ids_and_suffixes() {
+        let dir = make_test_dir();
+        assert!(session_artifact_path(dir.path(), "safe_session", "json").is_ok());
+        assert!(session_artifact_path(dir.path(), "../outside", "json").is_err());
+        assert!(session_artifact_path(dir.path(), "safe_session", "../escape").is_err());
+        assert!(session_directory_path(dir.path(), "safe_session").is_ok());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_session_artifact_path_rejects_symlinked_storage() {
+        let dir = make_test_dir();
+        let target = dir.path().join("target");
+        let link = dir.path().join("link");
+        fs::create_dir(&target).unwrap();
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        assert!(session_artifact_path(&link, "safe_session", "json").is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_session_artifact_path_rejects_symlinked_targets() {
+        let dir = make_test_dir();
+        let target_file = dir.path().join("target.json");
+        let linked_file = dir.path().join("safe_session.json");
+        let target_dir = dir.path().join("target-dir");
+        let linked_dir = dir.path().join("safe_session");
+        fs::write(&target_file, "outside").unwrap();
+        fs::create_dir(&target_dir).unwrap();
+        std::os::unix::fs::symlink(&target_file, &linked_file).unwrap();
+        std::os::unix::fs::symlink(&target_dir, &linked_dir).unwrap();
+
+        assert!(session_artifact_path(dir.path(), "safe_session", "json").is_err());
+        assert!(session_directory_path(dir.path(), "safe_session").is_err());
+    }
+
+    #[test]
     fn test_session_id_rejects_path_components() {
         assert!(is_valid_session_id("project-1_client"));
         assert!(!is_valid_session_id("../outside"));
@@ -712,6 +941,103 @@ mod tests {
 
         let loaded = load_session_state(&sessions_dir, "legacy-1").unwrap();
         assert_eq!(loaded.schema_version, CURRENT_SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn test_migrate_legacy_session_copies_artifacts_and_retains_source() {
+        let dir = make_test_dir();
+        let sessions_dir = dir.path().join("sessions");
+        let state = PersistedSession {
+            schema_version: CURRENT_SCHEMA_VERSION,
+            session_id: "legacy-session".to_string(),
+            cwd: "/tmp/project".to_string(),
+            model: "m".to_string(),
+            created_at: "2025-01-01T00:00:00Z".to_string(),
+            last_active: "2025-01-01T00:00:00Z".to_string(),
+            messages: Vec::new(),
+            memory_summary: None,
+        };
+        persist_session_state(&sessions_dir, &state).unwrap();
+        for suffix in ["jsonl", "memory.md", "baseline.json"] {
+            fs::write(
+                sessions_dir.join(format!("legacy-session.{}", suffix)),
+                suffix,
+            )
+            .unwrap();
+        }
+        ensure_dir(&sessions_dir.join("legacy-session")).unwrap();
+        fs::write(
+            sessions_dir.join("legacy-session").join("result.txt"),
+            "tool result",
+        )
+        .unwrap();
+
+        assert!(migrate_legacy_session(
+            &sessions_dir,
+            "legacy-session",
+            "new-session",
+            "/tmp/project"
+        )
+        .unwrap());
+        assert_eq!(
+            load_session_state(&sessions_dir, "new-session")
+                .unwrap()
+                .cwd,
+            "/tmp/project"
+        );
+        assert_eq!(
+            fs::read_to_string(sessions_dir.join("new-session.jsonl")).unwrap(),
+            "jsonl"
+        );
+        assert_eq!(
+            fs::read_to_string(sessions_dir.join("new-session").join("result.txt")).unwrap(),
+            "tool result"
+        );
+        assert!(sessions_dir.join("legacy-session.json").exists());
+        let registry = load_registry(&sessions_dir);
+        assert!(registry
+            .sessions
+            .iter()
+            .all(|entry| entry.session_id != "legacy-session"));
+        assert!(registry
+            .sessions
+            .iter()
+            .any(|entry| entry.session_id == "new-session"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_migrate_legacy_session_rejects_nested_symlink_before_writing_target() {
+        let dir = make_test_dir();
+        let sessions_dir = dir.path().join("sessions");
+        let state = PersistedSession {
+            schema_version: CURRENT_SCHEMA_VERSION,
+            session_id: "legacy-session".to_string(),
+            cwd: "/tmp/project".to_string(),
+            model: "m".to_string(),
+            created_at: "2025-01-01T00:00:00Z".to_string(),
+            last_active: "2025-01-01T00:00:00Z".to_string(),
+            messages: Vec::new(),
+            memory_summary: None,
+        };
+        persist_session_state(&sessions_dir, &state).unwrap();
+        ensure_dir(&sessions_dir.join("legacy-session")).unwrap();
+        let outside = dir.path().join("outside");
+        fs::write(&outside, "outside").unwrap();
+        std::os::unix::fs::symlink(
+            &outside,
+            sessions_dir.join("legacy-session").join("linked.txt"),
+        )
+        .unwrap();
+
+        assert!(migrate_legacy_session(
+            &sessions_dir,
+            "legacy-session",
+            "new-session",
+            "/tmp/project"
+        )
+        .is_err());
+        assert!(!sessions_dir.join("new-session.json").exists());
     }
 
     #[test]

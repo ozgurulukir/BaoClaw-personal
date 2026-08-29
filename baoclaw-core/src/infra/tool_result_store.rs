@@ -36,11 +36,11 @@ impl ToolResultStore {
     /// It is created lazily on first persist.
     pub fn for_session(session_id: &str) -> Self {
         let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
-        let base_dir = PathBuf::from(home)
-            .join(".baoclaw")
-            .join("sessions")
-            .join(session_id)
-            .join("tool-results");
+        let sessions_dir = PathBuf::from(home).join(".baoclaw").join("sessions");
+        let base_dir =
+            crate::engine::session_persistence::session_directory_path(&sessions_dir, session_id)
+                .map(|path| path.join("tool-results"))
+                .unwrap_or_default();
 
         Self {
             base_dir,
@@ -73,12 +73,11 @@ impl ToolResultStore {
     /// The file is named `{tool_use_id}.txt` (sanitised) to make it easy to
     /// correlate with the tool call.
     pub fn persist(&self, content: &str, tool_use_id: &str) -> std::io::Result<PersistedOutput> {
-        // Ensure base_dir exists
-        std::fs::create_dir_all(&self.base_dir)?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&self.base_dir, std::fs::Permissions::from_mode(0o700))?;
+        if self.base_dir.as_os_str().is_empty() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "cannot persist tool result for an invalid session ID",
+            ));
         }
 
         // Sanitise tool_use_id for use as a filename
@@ -230,5 +229,15 @@ mod tests {
         assert!(!filename.contains('/'));
         assert!(!filename.contains(':'));
         assert!(!filename.contains('*'));
+    }
+
+    #[test]
+    fn test_invalid_session_id_refuses_persistence() {
+        let store = ToolResultStore::for_session("../invalid-session");
+
+        assert!(matches!(
+            store.persist("sensitive output", "tool-1"),
+            Err(error) if error.kind() == std::io::ErrorKind::InvalidInput
+        ));
     }
 }

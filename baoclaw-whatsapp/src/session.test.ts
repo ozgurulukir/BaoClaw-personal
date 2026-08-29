@@ -12,9 +12,11 @@ test("retry delay grows exponentially and stays bounded", () => {
 test("disconnect is idempotent before initialization", async () => {
   const session = new SessionManager();
 
+  assert.equal(session.getLifecycleState(), "idle");
   await session.disconnect();
   await session.disconnect();
 
   assert.equal(session.isConnected(), false);
   assert.equal(session.getSocket(), null);
+  assert.equal(session.getLifecycleState(), "stopping");
 });

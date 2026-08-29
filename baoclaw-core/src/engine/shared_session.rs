@@ -1,5 +1,5 @@
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::sync::{broadcast, Mutex, RwLock, RwLockReadGuard, RwLockWriteGuard};
@@ -88,7 +88,15 @@ impl SharedSession {
     /// If the removed client held the ActiveSubmitter lock, it is automatically released.
     /// Returns `true` if this was the last connected client (session should be cleaned up).
     pub async fn remove_client(&self, client_id: ClientId) -> bool {
-        self.connected_clients.lock().await.remove(&client_id);
+        self.detach_client(client_id).await.unwrap_or(true)
+    }
+
+    /// Detach a client and report whether it was the last connected client.
+    /// Returns `None` when the client was not attached.
+    pub(crate) async fn detach_client(&self, client_id: ClientId) -> Option<bool> {
+        if !self.connected_clients.lock().await.remove(&client_id) {
+            return None;
+        }
 
         // Auto-release ActiveSubmitter if held by this client
         let mut submitter = self.active_submitter.lock().await;
@@ -96,7 +104,7 @@ impl SharedSession {
             *submitter = None;
         }
 
-        self.connected_clients.lock().await.is_empty()
+        Some(self.connected_clients.lock().await.is_empty())
     }
 
     /// Try to acquire the ActiveSubmitter lock for the given client.
@@ -211,20 +219,9 @@ impl SessionRegistry {
     /// Create an empty registry with a custom persistence directory.
     /// Ensures the directory exists.
     pub fn with_persistence_dir(persistence_dir: PathBuf) -> Self {
-        // Create directory if it doesn't exist (backward compatible: no error on first run)
-        if let Err(e) = std::fs::create_dir_all(&persistence_dir) {
+        if let Err(e) = session_persistence::ensure_session_storage_dir(&persistence_dir) {
             eprintln!(
                 "[session-registry] WARNING: failed to create persistence dir {:?}: {}",
-                persistence_dir, e
-            );
-        }
-        #[cfg(unix)]
-        if let Err(e) = {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&persistence_dir, std::fs::Permissions::from_mode(0o700))
-        } {
-            eprintln!(
-                "[session-registry] WARNING: failed to secure persistence dir {:?}: {}",
                 persistence_dir, e
             );
         }
@@ -267,6 +264,15 @@ impl SessionRegistry {
     ) -> (Arc<SharedSession>, bool, bool) {
         let _lifecycle_guard = self.lifecycle.lock().await;
         let mut sessions = self.sessions.lock().await;
+        self.get_or_create_unlocked(&mut sessions, session_id, config_factory)
+    }
+
+    fn get_or_create_unlocked(
+        &self,
+        sessions: &mut HashMap<String, Arc<SharedSession>>,
+        session_id: &str,
+        config_factory: impl FnOnce() -> QueryEngine,
+    ) -> (Arc<SharedSession>, bool, bool) {
         if let Some(existing) = sessions.get(session_id) {
             (Arc::clone(existing), false, false)
         } else {
@@ -288,6 +294,78 @@ impl SessionRegistry {
             sessions.insert(session_id.to_string(), Arc::clone(&session));
             (session, true, resumed)
         }
+    }
+
+    /// Atomically persist the current session, detach one client, and attach it
+    /// to another session. The registry lifecycle lock covers the whole move.
+    pub async fn switch_client(
+        &self,
+        current_id: &str,
+        current_session: &Arc<SharedSession>,
+        client_id: ClientId,
+        target_id: &str,
+        target_cwd: &Path,
+        config_factory: impl FnOnce() -> QueryEngine,
+    ) -> Result<
+        (
+            Arc<SharedSession>,
+            ClientId,
+            tokio::sync::broadcast::Receiver<EngineEvent>,
+        ),
+        String,
+    > {
+        if current_id == target_id {
+            return Err("target session is already active".to_string());
+        }
+
+        let _lifecycle_guard = self.lifecycle.lock().await;
+        if current_session.has_active_submitter().await {
+            return Err(
+                "session busy: cannot switch cwd while a message is being processed".to_string(),
+            );
+        }
+
+        {
+            let sessions = self.sessions.lock().await;
+            if !sessions
+                .get(current_id)
+                .is_some_and(|session| Arc::ptr_eq(session, current_session))
+            {
+                return Err("current session is no longer attached".to_string());
+            }
+        }
+
+        let mut sessions = self.sessions.lock().await;
+        let (target_session, target_is_new, _) =
+            self.get_or_create_unlocked(&mut sessions, target_id, config_factory);
+        drop(sessions);
+        if target_session.engine_read().await.get_cwd() != target_cwd {
+            if target_is_new {
+                self.sessions.lock().await.remove(target_id);
+            }
+            return Err("target session identity does not match its working directory".to_string());
+        }
+
+        if let Err(error) = self.persist_session(current_id).await {
+            if target_is_new {
+                self.sessions.lock().await.remove(target_id);
+            }
+            return Err(error);
+        }
+
+        let Some(no_clients) = current_session.detach_client(client_id).await else {
+            if target_is_new {
+                self.sessions.lock().await.remove(target_id);
+            }
+            return Err("current client is no longer attached".to_string());
+        };
+
+        let mut sessions = self.sessions.lock().await;
+        if no_clients {
+            sessions.remove(current_id);
+        }
+        let (new_client_id, broadcast_rx) = target_session.add_client().await;
+        Ok((target_session, new_client_id, broadcast_rx))
     }
 
     /// Remove a session from the registry.
@@ -491,5 +569,180 @@ impl SessionRegistry {
 impl Default for SessionRegistry {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::api::client::ApiClientConfig;
+    use crate::api::unified::UnifiedClient;
+    use crate::engine::query_engine::ThinkingConfig;
+    use std::path::PathBuf;
+    use tempfile::TempDir;
+
+    fn make_engine(cwd: PathBuf, session_id: &str) -> QueryEngine {
+        QueryEngine::new(crate::engine::query_engine::QueryEngineConfig {
+            cwd,
+            tools: vec![],
+            api_client: Arc::new(UnifiedClient::new_anthropic(ApiClientConfig {
+                api_key: "test-key".to_string(),
+                base_url: None,
+                max_retries: None,
+                api_path: None,
+            })),
+            model: "test-model".to_string(),
+            thinking_config: ThinkingConfig::Disabled,
+            max_turns: None,
+            max_budget_usd: None,
+            verbose: false,
+            custom_system_prompt: None,
+            append_system_prompt: None,
+            session_id: Some(session_id.to_string()),
+            fallback_models: vec![],
+            max_retries_per_model: 1,
+            context_window: 200_000,
+            auto_compact_threshold_ratio: 0.7,
+            parent_turn_id: None,
+            agent_label: None,
+            session_memory: None,
+            file_cache: None,
+            tool_result_store: None,
+            hook_manager: None,
+        })
+    }
+
+    fn make_registry() -> (TempDir, SessionRegistry, PathBuf, PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let registry = SessionRegistry::with_persistence_dir(dir.path().join("sessions"));
+        let current_cwd = dir.path().join("current");
+        let target_cwd = dir.path().join("target");
+        std::fs::create_dir_all(&current_cwd).unwrap();
+        std::fs::create_dir_all(&target_cwd).unwrap();
+        (dir, registry, current_cwd, target_cwd)
+    }
+
+    #[tokio::test]
+    async fn switch_client_rejects_busy_session_without_detaching_client() {
+        let (_dir, registry, current_cwd, target_cwd) = make_registry();
+        let current = registry
+            .get_or_create("current", || make_engine(current_cwd.clone(), "current"))
+            .await
+            .0;
+        let (client_id, _rx) = current.add_client().await;
+        assert!(current.try_acquire_submitter(client_id).await);
+
+        let result = registry
+            .switch_client(
+                "current",
+                &current,
+                client_id,
+                "target",
+                &target_cwd,
+                || make_engine(target_cwd.clone(), "target"),
+            )
+            .await;
+
+        assert!(result.is_err());
+        assert_eq!(current.client_count().await, 1);
+        assert!(registry.contains("current").await);
+        assert!(!registry.contains("target").await);
+    }
+
+    #[tokio::test]
+    async fn switch_client_rejects_target_identity_mismatch_without_detaching_client() {
+        let (_dir, registry, current_cwd, target_cwd) = make_registry();
+        let current = registry
+            .get_or_create("current", || make_engine(current_cwd.clone(), "current"))
+            .await
+            .0;
+        let (client_id, _rx) = current.add_client().await;
+        let (_other_client_id, _other_rx) = current.add_client().await;
+
+        let result = registry
+            .switch_client(
+                "current",
+                &current,
+                client_id,
+                "target",
+                &target_cwd,
+                || make_engine(current_cwd.clone(), "target"),
+            )
+            .await;
+
+        assert!(result.is_err());
+        assert_eq!(current.client_count().await, 2);
+        assert!(registry.contains("current").await);
+        assert!(!registry.contains("target").await);
+    }
+
+    #[tokio::test]
+    async fn switch_client_persists_old_session_and_attaches_target_client() {
+        let (_dir, registry, current_cwd, target_cwd) = make_registry();
+        let current = registry
+            .get_or_create("current", || make_engine(current_cwd.clone(), "current"))
+            .await
+            .0;
+        let (client_id, _rx) = current.add_client().await;
+        let (_other_client_id, _other_rx) = current.add_client().await;
+
+        let (target, new_client_id, _rx) = registry
+            .switch_client(
+                "current",
+                &current,
+                client_id,
+                "target",
+                &target_cwd,
+                || make_engine(target_cwd.clone(), "target"),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(current.client_count().await, 1);
+        assert_eq!(target.client_count().await, 1);
+        assert_eq!(new_client_id, 1);
+        assert!(registry.contains("current").await);
+        assert!(registry.contains("target").await);
+        assert_eq!(
+            registry.load_persisted_session("current").unwrap().cwd,
+            current_cwd.to_string_lossy()
+        );
+    }
+
+    #[tokio::test]
+    async fn concurrent_switches_allow_only_one_client_transition() {
+        let (_dir, registry, current_cwd, target_cwd) = make_registry();
+        let current = registry
+            .get_or_create("current", || make_engine(current_cwd.clone(), "current"))
+            .await
+            .0;
+        let (client_id, _rx) = current.add_client().await;
+
+        let first = registry.switch_client(
+            "current",
+            &current,
+            client_id,
+            "target",
+            &target_cwd,
+            || make_engine(target_cwd.clone(), "target"),
+        );
+        let second = registry.switch_client(
+            "current",
+            &current,
+            client_id,
+            "target",
+            &target_cwd,
+            || make_engine(target_cwd.clone(), "target"),
+        );
+        let (first_result, second_result) = tokio::join!(first, second);
+
+        assert_eq!(first_result.is_ok() as u8 + second_result.is_ok() as u8, 1);
+        assert!(!registry.contains("current").await);
+        assert!(registry.contains("target").await);
+        let target = registry
+            .get_or_create("target", || make_engine(target_cwd, "target"))
+            .await
+            .0;
+        assert_eq!(target.client_count().await, 1);
     }
 }

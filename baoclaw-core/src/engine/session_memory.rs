@@ -37,30 +37,32 @@ impl SessionMemory {
     /// Compute the file path for a given session ID.
     pub fn path_for(session_id: &str) -> PathBuf {
         let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
-        PathBuf::from(home)
-            .join(".baoclaw")
-            .join("sessions")
-            .join(format!("{}.memory.md", session_id))
+        let sessions_dir = PathBuf::from(home).join(".baoclaw").join("sessions");
+        crate::engine::session_persistence::session_artifact_path(
+            &sessions_dir,
+            session_id,
+            "memory.md",
+        )
+        .unwrap_or_default()
     }
 
     /// Load an existing session memory file. Returns empty string if missing.
     pub fn load(session_id: &str) -> Self {
         let file_path = Self::path_for(session_id);
-        let parent = file_path.parent().unwrap_or(&file_path);
-        if let Err(error) = fs::create_dir_all(parent) {
+        let parent = match file_path.parent() {
+            Some(parent) if !file_path.as_os_str().is_empty() => parent,
+            _ => {
+                eprintln!("[session-memory] WARNING: refusing persistence for invalid session ID");
+                return Self {
+                    file_path,
+                    content: Mutex::new(String::new()),
+                    last_update_count: Mutex::new(0),
+                };
+            }
+        };
+        if let Err(error) = crate::engine::session_persistence::ensure_session_storage_dir(parent) {
             eprintln!(
                 "[session-memory] WARNING: failed to create {}: {}",
-                parent.display(),
-                error
-            );
-        }
-        #[cfg(unix)]
-        if let Err(error) = {
-            use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(parent, fs::Permissions::from_mode(0o700))
-        } {
-            eprintln!(
-                "[session-memory] WARNING: failed to secure {}: {}",
                 parent.display(),
                 error
             );
@@ -148,6 +150,9 @@ impl SessionMemory {
         };
         let mut guard = self.content.lock().unwrap_or_else(|e| e.into_inner());
         *guard = truncated;
+        if self.file_path.as_os_str().is_empty() {
+            return;
+        }
         if let Err(error) =
             crate::engine::session_persistence::atomic_write(&self.file_path, &guard)
         {
@@ -172,6 +177,9 @@ impl SessionMemory {
     pub fn clear(&self) {
         let mut guard = self.content.lock().unwrap_or_else(|e| e.into_inner());
         guard.clear();
+        if self.file_path.as_os_str().is_empty() {
+            return;
+        }
         if let Err(error) = crate::engine::session_persistence::atomic_write(&self.file_path, "") {
             eprintln!(
                 "[session-memory] WARNING: failed to clear {}: {}",
@@ -240,5 +248,14 @@ mod tests {
         assert!(sm.get().len() < long.len());
         assert!(sm.get().contains("[Summary truncated"));
         sm.clear();
+    }
+
+    #[test]
+    fn test_invalid_session_id_disables_persistence_without_fallback_path() {
+        let sm = SessionMemory::load("../invalid-session");
+
+        assert!(sm.file_path().as_os_str().is_empty());
+        sm.update("summary that remains in memory only".to_string());
+        assert_eq!(sm.get(), "summary that remains in memory only");
     }
 }

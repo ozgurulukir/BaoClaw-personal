@@ -95,14 +95,14 @@ fn socket_dir() -> PathBuf {
 }
 
 /// Compute a stable hash of the working directory path.
-/// Uses SipHash-1-3 (via DefaultHasher), 64-bit output truncated to 16 hex chars
-/// for a short, collision-resistant ID.
+/// Uses the existing deterministic FNV-1a implementation with 16 hex chars
+/// for a short, stable ID.
 fn cwd_hash(cwd: &str) -> String {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-    let mut hasher = DefaultHasher::new();
-    cwd.hash(&mut hasher);
-    format!("{:016x}", hasher.finish())
+    format!("{:016x}", md5_simple(cwd))
+}
+
+fn legacy_cwd_hash(cwd: &str) -> String {
+    format!("{:016x}", md5_simple(cwd))[..8].to_string()
 }
 
 fn make_socket_path(cwd: &str) -> PathBuf {
@@ -266,53 +266,153 @@ async fn build_append_prompt(shared: &SharedState) -> Option<String> {
 /// Handle a client in shared mode. The client shares a QueryEngine with other clients
 /// via the SharedSession. Uses ActiveSubmitter lock for concurrency control and
 /// broadcast channel for event distribution.
-async fn handle_shared_client(
-    conn: IpcConnection,
-    shared: SharedState,
+fn build_shared_engine(
+    shared: &SharedState,
+    cwd: PathBuf,
+    session_id: String,
+    model: String,
+) -> QueryEngine {
+    QueryEngine::new(QueryEngineConfig {
+        cwd,
+        tools: shared.engine_tools.clone(),
+        api_client: Arc::clone(&shared.api_client),
+        model,
+        thinking_config: shared.cli_thinking_config.clone(),
+        max_turns: None,
+        max_budget_usd: None,
+        verbose: false,
+        custom_system_prompt: None,
+        append_system_prompt: shared.skill_prompt.clone(),
+        session_id: Some(session_id.clone()),
+        fallback_models: shared.baoclaw_config.fallback_models.clone(),
+        max_retries_per_model: shared.baoclaw_config.max_retries_per_model,
+        context_window: shared.baoclaw_config.context_window,
+        auto_compact_threshold_ratio: shared.baoclaw_config.auto_compact_threshold_ratio,
+        parent_turn_id: None,
+        agent_label: None,
+        session_memory: Some(Arc::new(
+            crate::engine::session_memory::SessionMemory::load(&session_id),
+        )),
+        file_cache: Some(Arc::clone(&shared.file_cache)),
+        tool_result_store: Some(Arc::new(
+            engine::tool_result_store::ToolResultStore::for_session(&session_id),
+        )),
+        hook_manager: Some(Arc::clone(&shared.hook_manager)),
+    })
+}
+
+fn spawn_shared_broadcast(
+    conn: Arc<TokioMutex<IpcConnection>>,
     session: Arc<SharedSession>,
     client_id: ClientId,
-    broadcast_rx: tokio::sync::broadcast::Receiver<EngineEvent>,
-    mut work_cwd: PathBuf,
-    session_id: String,
-) {
-    // Wrap conn in Arc<TokioMutex> so the broadcast receiver task can also send
-    let conn = Arc::new(TokioMutex::new(conn));
-
-    // Spawn background task to forward broadcast events to this client (Task 5.2)
-    let conn_for_broadcast = Arc::clone(&conn);
-    let session_for_broadcast = session.clone();
-    let broadcast_handle = tokio::spawn(async move {
-        let mut rx = broadcast_rx;
+    mut rx: tokio::sync::broadcast::Receiver<EngineEvent>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
         loop {
             match rx.recv().await {
                 Ok(event) => {
-                    // Skip forwarding if this client is the active submitter
-                    // (submitter sends events directly in the submit loop)
-                    if session_for_broadcast.is_active_submitter(client_id).await {
+                    if session.is_active_submitter(client_id).await {
                         continue;
                     }
                     let notif = engine_event_to_notification(&event);
                     let params =
                         serde_json::to_value(&notif.params).unwrap_or(serde_json::Value::Null);
-                    let mut conn_guard = conn_for_broadcast.lock().await;
+                    let mut conn_guard = conn.lock().await;
                     if conn_guard
                         .send_notification(&notif.method, params)
                         .await
                         .is_err()
                     {
-                        break; // Client disconnected
+                        break;
                     }
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
                     eprintln!("Shared client {} lagged by {} events", client_id, n);
-                    continue;
                 }
-                Err(tokio::sync::broadcast::error::RecvError::Closed) => {
-                    break;
-                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
             }
         }
-    });
+    })
+}
+
+async fn switch_shared_client(
+    shared: &SharedState,
+    conn: &Arc<TokioMutex<IpcConnection>>,
+    session: &mut Arc<SharedSession>,
+    client_id: &mut ClientId,
+    broadcast_handle: &mut tokio::task::JoinHandle<()>,
+    session_id: &mut String,
+    work_cwd: &mut PathBuf,
+    target_cwd: PathBuf,
+) -> Result<usize, String> {
+    if session.has_active_submitter().await {
+        return Err("session busy: cannot switch cwd while a message is being processed".into());
+    }
+    let session_tag = session_id
+        .split_once('-')
+        .map(|(_, tag)| tag.to_string())
+        .ok_or_else(|| "session tag is unavailable".to_string())?;
+    let target_id = format!(
+        "{}-{}",
+        cwd_hash(&target_cwd.to_string_lossy()),
+        session_tag
+    );
+    let target_model = session.engine_read().await.get_model().to_string();
+    let old_session = session.clone();
+    let old_session_id = session_id.clone();
+    let shared_clone = shared.clone();
+    let target_id_for_engine = target_id.clone();
+    let target_cwd_for_engine = target_cwd.clone();
+    let result = shared
+        .session_registry
+        .switch_client(
+            &old_session_id,
+            &old_session,
+            *client_id,
+            &target_id,
+            &target_cwd,
+            || {
+                build_shared_engine(
+                    &shared_clone,
+                    target_cwd_for_engine,
+                    target_id_for_engine,
+                    target_model,
+                )
+            },
+        )
+        .await?;
+
+    broadcast_handle.abort();
+    let (new_session, new_client_id, new_broadcast_rx) = result;
+    *session = new_session;
+    *client_id = new_client_id;
+    *session_id = target_id;
+    *work_cwd = target_cwd.clone();
+    *broadcast_handle =
+        spawn_shared_broadcast(conn.clone(), session.clone(), *client_id, new_broadcast_rx);
+    shared.memory_store.switch_project(&target_cwd).await;
+    shared
+        .project_registry
+        .ensure_registered(&target_cwd.to_string_lossy(), None)
+        .await;
+    Ok(session.engine_read().await.get_messages().len())
+}
+
+async fn handle_shared_client(
+    conn: IpcConnection,
+    shared: SharedState,
+    mut session: Arc<SharedSession>,
+    mut client_id: ClientId,
+    broadcast_rx: tokio::sync::broadcast::Receiver<EngineEvent>,
+    mut work_cwd: PathBuf,
+    mut session_id: String,
+) -> (Arc<SharedSession>, ClientId, String, PathBuf) {
+    // Wrap conn in Arc<TokioMutex> so the broadcast receiver task can also send
+    let conn = Arc::new(TokioMutex::new(conn));
+
+    // Spawn background task to forward broadcast events to this client (Task 5.2)
+    let mut broadcast_handle =
+        spawn_shared_broadcast(conn.clone(), session.clone(), client_id, broadcast_rx);
 
     // Spawn background task to forward cron results to this client.
     // Cron jobs run independently (not tied to any session), so their
@@ -698,16 +798,10 @@ async fn handle_shared_client(
                                 .await;
                         }
                         ClientMethod::SwitchCwd { cwd: new_cwd } => {
-                            if session.has_active_submitter().await {
-                                let mut conn_guard = conn.lock().await;
-                                let _ = conn_guard.send_error(Some(id), -32002,
-                                    "session busy: cannot switch cwd while a message is being processed".into()).await;
-                                continue;
-                            }
                             let abs_cwd = if new_cwd.is_absolute() {
                                 new_cwd
                             } else {
-                                std::path::PathBuf::from(&work_cwd).join(&new_cwd)
+                                work_cwd.join(new_cwd)
                             };
                             if !abs_cwd.is_dir() {
                                 let mut conn_guard = conn.lock().await;
@@ -718,58 +812,37 @@ async fn handle_shared_client(
                                         format!("Directory does not exist: {}", abs_cwd.display()),
                                     )
                                     .await;
-                            } else {
-                                let baoclaw_dir = abs_cwd.join(".baoclaw");
-                                if !baoclaw_dir.exists() {
-                                    if let Err(e) = std::fs::create_dir_all(&baoclaw_dir) {
-                                        eprintln!(
-                                            "[projects] WARNING: could not create {}: {}",
-                                            baoclaw_dir.display(),
-                                            e
-                                        );
-                                    }
-                                    if let Err(e) = std::fs::write(
-                                        baoclaw_dir.join("BAOCLAW.md"),
-                                        "# Project Instructions\n\n",
-                                    ) {
-                                        eprintln!(
-                                            "[projects] WARNING: could not write BAOCLAW.md: {}",
-                                            e
-                                        );
-                                    }
-                                    if let Err(e) = std::fs::write(
-                                        baoclaw_dir.join("mcp.json"),
-                                        "{\"mcpServers\":{}}\n",
-                                    ) {
-                                        eprintln!(
-                                            "[projects] WARNING: could not write mcp.json: {}",
-                                            e
-                                        );
-                                    }
-                                    if let Err(e) =
-                                        std::fs::create_dir_all(baoclaw_dir.join("skills"))
-                                    {
-                                        eprintln!(
-                                            "[projects] WARNING: could not create skills dir: {}",
-                                            e
-                                        );
-                                    }
+                                continue;
+                            }
+                            match switch_shared_client(
+                                &shared,
+                                &conn,
+                                &mut session,
+                                &mut client_id,
+                                &mut broadcast_handle,
+                                &mut session_id,
+                                &mut work_cwd,
+                                abs_cwd.clone(),
+                            )
+                            .await
+                            {
+                                Ok(message_count) => {
+                                    let mut conn_guard = conn.lock().await;
+                                    let _ = conn_guard
+                                        .send_response(
+                                            id,
+                                            serde_json::json!({
+                                                "cwd": abs_cwd.display().to_string(),
+                                                "session_id": session_id,
+                                                "message_count": message_count,
+                                            }),
+                                        )
+                                        .await;
                                 }
-                                let mut engine = session.engine_write().await;
-                                engine.update_cwd(abs_cwd.clone());
-                                let new_session_key =
-                                    format!("{:x}", md5_simple(&abs_cwd.to_string_lossy()))[..8]
-                                        .to_string();
-                                engine.update_session_id(new_session_key);
-                                let mut conn_guard = conn.lock().await;
-                                let _ = conn_guard
-                                    .send_response(
-                                        id,
-                                        serde_json::json!({
-                                            "cwd": abs_cwd.display().to_string()
-                                        }),
-                                    )
-                                    .await;
+                                Err(error) => {
+                                    let mut conn_guard = conn.lock().await;
+                                    let _ = conn_guard.send_error(Some(id), -32003, error).await;
+                                }
                             }
                         }
 
@@ -1127,8 +1200,7 @@ async fn handle_shared_client(
                             let enriched: Vec<serde_json::Value> = projects
                                 .iter()
                                 .map(|p| {
-                                    let session_key =
-                                        format!("{:x}", md5_simple(&p.cwd))[..8].to_string();
+                                    let session_key = cwd_hash(&p.cwd);
                                     let mut v = serde_json::to_value(p).unwrap_or_default();
                                     v["session_id"] = serde_json::json!(session_key);
                                     v
@@ -1160,48 +1232,40 @@ async fn handle_shared_client(
                                             )
                                             .await;
                                     } else {
-                                        // Switch session: update engine cwd and reload
-                                        let mut engine = session.engine_write().await;
-                                        engine.update_cwd(abs_cwd.clone());
-                                        // Update session_id so transcript writes go to the correct file
-                                        let new_session_key =
-                                            format!("{:x}", md5_simple(&abs_cwd.to_string_lossy()))
-                                                [..8]
-                                                .to_string();
-                                        engine.update_session_id(new_session_key.clone());
-                                        let new_cwd_str = abs_cwd.to_string_lossy().to_string();
-                                        if let Some(prev_session) =
-                                            engine::transcript::find_latest_session_for_cwd(
-                                                &new_cwd_str,
-                                            )
+                                        drop(conn_guard);
+                                        match switch_shared_client(
+                                            &shared,
+                                            &conn,
+                                            &mut session,
+                                            &mut client_id,
+                                            &mut broadcast_handle,
+                                            &mut session_id,
+                                            &mut work_cwd,
+                                            abs_cwd.clone(),
+                                        )
+                                        .await
                                         {
-                                            if let Ok(entries) =
-                                                engine::transcript::TranscriptWriter::load(
-                                                    &prev_session,
-                                                )
-                                            {
-                                                let messages = engine::transcript::rebuild_messages_from_transcript(&entries);
-                                                engine.set_messages(messages);
+                                            Ok(message_count) => {
+                                                shared.project_registry.touch(&project.cwd).await;
+                                                let mut conn_guard = conn.lock().await;
+                                                let _ = conn_guard
+                                                    .send_response(
+                                                        id,
+                                                        serde_json::json!({
+                                                            "project": project,
+                                                            "message_count": message_count,
+                                                            "session_id": session_id,
+                                                        }),
+                                                    )
+                                                    .await;
                                             }
-                                        } else {
-                                            engine.set_messages(vec![]);
+                                            Err(error) => {
+                                                let mut conn_guard = conn.lock().await;
+                                                let _ = conn_guard
+                                                    .send_error(Some(id), -32003, error)
+                                                    .await;
+                                            }
                                         }
-                                        drop(engine);
-                                        shared.memory_store.switch_project(&abs_cwd).await;
-                                        shared.project_registry.touch(&project.cwd).await;
-                                        work_cwd = abs_cwd.clone();
-                                        let msg_count =
-                                            session.engine_read().await.get_messages().len();
-                                        let _ = conn_guard
-                                            .send_response(
-                                                id,
-                                                serde_json::json!({
-                                                    "project": project,
-                                                    "message_count": msg_count,
-                                                    "session_id": new_session_key,
-                                                }),
-                                            )
-                                            .await;
                                     }
                                 }
                                 Err(e) => {
@@ -1270,28 +1334,40 @@ async fn handle_shared_client(
                                                 eprintln!("[projects] WARNING: could not create skills dir: {}", e);
                                             }
                                         }
-                                        // Switch to the new project
-                                        let mut engine = session.engine_write().await;
-                                        engine.update_cwd(abs_path.clone());
-                                        let new_session_key = format!(
-                                            "{:x}",
-                                            md5_simple(&abs_path.to_string_lossy())
-                                        )[..8]
-                                            .to_string();
-                                        engine.update_session_id(new_session_key);
-                                        engine.set_messages(vec![]);
-                                        drop(engine);
-                                        shared.memory_store.switch_project(&abs_path).await;
-                                        work_cwd = abs_path;
-                                        let _ = conn_guard
-                                            .send_response(
-                                                id,
-                                                serde_json::json!({
-                                                    "project": project,
-                                                    "switched": true,
-                                                }),
-                                            )
-                                            .await;
+                                        drop(conn_guard);
+                                        match switch_shared_client(
+                                            &shared,
+                                            &conn,
+                                            &mut session,
+                                            &mut client_id,
+                                            &mut broadcast_handle,
+                                            &mut session_id,
+                                            &mut work_cwd,
+                                            abs_path,
+                                        )
+                                        .await
+                                        {
+                                            Ok(message_count) => {
+                                                let mut conn_guard = conn.lock().await;
+                                                let _ = conn_guard
+                                                    .send_response(
+                                                        id,
+                                                        serde_json::json!({
+                                                            "project": project,
+                                                            "switched": true,
+                                                            "message_count": message_count,
+                                                            "session_id": session_id,
+                                                        }),
+                                                    )
+                                                    .await;
+                                            }
+                                            Err(error) => {
+                                                let mut conn_guard = conn.lock().await;
+                                                let _ = conn_guard
+                                                    .send_error(Some(id), -32003, error)
+                                                    .await;
+                                            }
+                                        }
                                     }
                                     Err(e) => {
                                         let _ = conn_guard.send_error(Some(id), -32000, e).await;
@@ -2896,6 +2972,7 @@ async fn handle_shared_client(
     // Cancel the broadcast receiver tasks
     broadcast_handle.abort();
     cron_broadcast_handle.abort();
+    (session, client_id, session_id, work_cwd)
 }
 
 /// Handle a single client connection. Each client gets its own QueryEngine
@@ -3004,8 +3081,8 @@ async fn handle_client(mut conn: IpcConnection, shared: SharedState) {
         }
         // Session key = cwd_hash + client_type, so different clients (web/telegram/cli)
         // on the same cwd get independent sessions and don't block each other.
-        let cwd_hash = format!("{:x}", md5_simple(&work_cwd.to_string_lossy()))[..8].to_string();
-        let session_id_clone = format!("{}-{}", cwd_hash, shared_session_id);
+        let cwd_key = cwd_hash(&work_cwd.to_string_lossy());
+        let session_id_clone = format!("{}-{}", cwd_key, shared_session_id);
         if !engine::session_persistence::is_valid_session_id(&session_id_clone) {
             let _ = conn
                 .send_error(
@@ -3016,6 +3093,22 @@ async fn handle_client(mut conn: IpcConnection, shared: SharedState) {
                 )
                 .await;
             return;
+        }
+        let legacy_session_id = format!(
+            "{}-{}",
+            legacy_cwd_hash(&work_cwd.to_string_lossy()),
+            shared_session_id
+        );
+        if let Err(error) = engine::session_persistence::migrate_legacy_session(
+            &shared.session_registry.persistence_dir().clone(),
+            &legacy_session_id,
+            &session_id_clone,
+            &work_cwd.to_string_lossy(),
+        ) {
+            eprintln!(
+                "[session-registry] WARNING: legacy migration skipped: {}",
+                error
+            );
         }
         eprintln!(
             "Client connecting to session '{}' (cwd: {})",
@@ -3029,35 +3122,12 @@ async fn handle_client(mut conn: IpcConnection, shared: SharedState) {
         let (session, is_new, mut resumed) = shared
             .session_registry
             .get_or_create_with_restore(&session_id_clone, || {
-                QueryEngine::new(QueryEngineConfig {
-                    cwd: work_cwd_clone,
-                    tools: shared_clone.engine_tools.clone(),
-                    api_client: Arc::clone(&shared_clone.api_client),
-                    model: model_clone,
-                    thinking_config: shared_clone.cli_thinking_config.clone(),
-                    max_turns: None,
-                    max_budget_usd: None,
-                    verbose: false,
-                    custom_system_prompt: None,
-                    append_system_prompt: shared_clone.skill_prompt.clone(),
-                    session_id: Some(session_id_clone.clone()),
-                    fallback_models: shared_clone.baoclaw_config.fallback_models.clone(),
-                    max_retries_per_model: shared_clone.baoclaw_config.max_retries_per_model,
-                    context_window: shared_clone.baoclaw_config.context_window,
-                    auto_compact_threshold_ratio: shared_clone
-                        .baoclaw_config
-                        .auto_compact_threshold_ratio,
-                    parent_turn_id: None,
-                    agent_label: None,
-                    session_memory: Some(Arc::new(
-                        crate::engine::session_memory::SessionMemory::load(&session_id_clone),
-                    )),
-                    file_cache: Some(Arc::clone(&shared_clone.file_cache)),
-                    tool_result_store: Some(Arc::new(
-                        engine::tool_result_store::ToolResultStore::for_session(&session_id_clone),
-                    )),
-                    hook_manager: Some(Arc::clone(&shared_clone.hook_manager)),
-                })
+                build_shared_engine(
+                    &shared_clone,
+                    work_cwd_clone,
+                    session_id_clone.clone(),
+                    model_clone,
+                )
             })
             .await;
 
@@ -3180,8 +3250,7 @@ async fn handle_client(mut conn: IpcConnection, shared: SharedState) {
             .await;
 
         // Enter shared-mode RPC loop
-        let hook_cwd = work_cwd.to_string_lossy().to_string();
-        handle_shared_client(
+        let (session, client_id, session_id_clone, work_cwd) = handle_shared_client(
             conn,
             shared,
             session.clone(),
@@ -3191,6 +3260,7 @@ async fn handle_client(mut conn: IpcConnection, shared: SharedState) {
             session_id_clone.clone(),
         )
         .await;
+        let hook_cwd = work_cwd.to_string_lossy().to_string();
 
         // Client disconnect handling (Task 6.1)
         let is_last = session.remove_client(client_id).await;
@@ -3889,9 +3959,37 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Reuse existing project session or create new one.
     // One project directory = one session file.
-    let cwd_hash = &format!("{:x}", md5_simple(&cwd_str))[..8];
-    let session_id = engine::transcript::find_latest_session_for_cwd(&cwd_str)
-        .unwrap_or_else(|| format!("{}-{}", cwd_hash, &uuid::Uuid::new_v4().to_string()[..8]));
+    let cwd_key = cwd_hash(&cwd_str);
+    let session_id = match engine::transcript::find_latest_session_for_cwd(&cwd_str) {
+        Some(legacy_id) => {
+            let legacy_prefix = format!("{}-", legacy_cwd_hash(&cwd_str));
+            if let Some(suffix) = legacy_id.strip_prefix(&legacy_prefix) {
+                let normalized_id = format!("{}-{}", cwd_key, suffix);
+                let sessions_dir = engine::session_persistence::default_sessions_dir();
+                let migrated = engine::session_persistence::migrate_legacy_session(
+                    &sessions_dir,
+                    &legacy_id,
+                    &normalized_id,
+                    &cwd_str,
+                )
+                .unwrap_or(false);
+                if migrated
+                    || engine::session_persistence::load_session_state(
+                        &sessions_dir,
+                        &normalized_id,
+                    )
+                    .is_some()
+                {
+                    normalized_id
+                } else {
+                    legacy_id
+                }
+            } else {
+                legacy_id
+            }
+        }
+        None => format!("{}-{}", cwd_key, &uuid::Uuid::new_v4().to_string()[..8]),
+    };
     eprintln!("Session ID: {} (cwd: {})", session_id, cwd_str);
 
     // Write metadata file for discovery by CLI

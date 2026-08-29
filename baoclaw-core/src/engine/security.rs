@@ -478,8 +478,8 @@ static REDACTION_REGEXES: OnceLock<Vec<regex::Regex>> = OnceLock::new();
 pub fn redact_secrets(input: &str) -> String {
     let regexes = REDACTION_REGEXES.get_or_init(|| {
         let patterns = [
-            r"(?i)Bearer\s+[A-Za-z0-9_.\-]{16,}",
-            r#"(?i)(?:api[_-]?key|token|secret|password)\s*[:=]\s*['"]?([A-Za-z0-9_.\-]{8,})['"]?"#,
+            r"(?i)Bearer\s+[A-Za-z0-9_.\-]{6,}",
+            r#"(?i)(?:api[_-]?key|token|secret|password)\s*[:=]\s*['"]?([A-Za-z0-9_.\-]+)['"]?"#,
             r"sk-[A-Za-z0-9_-]{16,}",
             r"ghp_[A-Za-z0-9]{36}",
             r"github_pat_[A-Za-z0-9_]{22,}",
