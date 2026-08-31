@@ -7,7 +7,39 @@ import * as fs from "fs";
 import * as path from "path";
 import * as os from "os";
 import * as net from "net";
+import * as crypto from "crypto";
 import { WebSocketServer, WebSocket } from "ws";
+
+function loadExpectedToken(): string {
+  if (process.env.BAOCLAW_WEB_TOKEN) {
+    return process.env.BAOCLAW_WEB_TOKEN;
+  }
+  const configPath = path.join(
+    process.env.BAOCLAW_HOME || path.join(os.homedir(), ".baoclaw"),
+    "config.json",
+  );
+  if (fs.existsSync(configPath)) {
+    try {
+      const cfg = JSON.parse(fs.readFileSync(configPath, "utf-8"));
+      const token = cfg.web?.token || cfg.extra?.web?.token;
+      if (typeof token === "string" && token.length > 0) {
+        return token;
+      }
+    } catch {}
+  }
+  return crypto.randomBytes(16).toString("hex");
+}
+
+function isValidToken(
+  providedToken: string | null | undefined,
+  expectedToken: string,
+): boolean {
+  if (!providedToken) return false;
+  const providedBuf = Buffer.from(providedToken, "utf-8");
+  const expectedBuf = Buffer.from(expectedToken, "utf-8");
+  if (providedBuf.length !== expectedBuf.length) return false;
+  return crypto.timingSafeEqual(providedBuf, expectedBuf);
+}
 
 // ═══════════════════════════════════════════════════════════════
 // IPC Client (same pattern as CLI/Telegram)
@@ -260,10 +292,19 @@ function serveStatic(res: http.ServerResponse, urlPath: string) {
 // ═══════════════════════════════════════════════════════════════
 async function main() {
   const args = process.argv.slice(2);
+  const hostIdx =
+    args.indexOf("--host") !== -1
+      ? args.indexOf("--host")
+      : args.indexOf("--bind");
+  const host =
+    hostIdx >= 0 && args[hostIdx + 1]
+      ? args[hostIdx + 1]
+      : (process.env.BAOCLAW_WEB_HOST ?? "127.0.0.1");
   const portIdx = args.indexOf("--port");
   const port =
     portIdx >= 0 && args[portIdx + 1] ? parseInt(args[portIdx + 1], 10) : 8080;
   const cwd = process.cwd();
+  const expectedToken = loadExpectedToken();
 
   // Find daemon
   const daemons = discoverDaemons();
@@ -288,7 +329,36 @@ async function main() {
   const wss = new WebSocketServer({ noServer: true });
 
   server.on("upgrade", (req, socket, head) => {
-    console.log(`HTTP upgrade request: ${req.url}`);
+    const reqUrl = new URL(
+      req.url || "/",
+      `http://${req.headers.host || "127.0.0.1"}`,
+    );
+    let token = reqUrl.searchParams.get("token");
+    if (!token && req.headers.authorization) {
+      const auth = req.headers.authorization;
+      if (auth.startsWith("Bearer ")) {
+        token = auth.slice(7).trim();
+      }
+    }
+    if (!token && req.headers["x-baoclaw-token"]) {
+      token = req.headers["x-baoclaw-token"] as string;
+    }
+    if (!token && req.headers["sec-websocket-protocol"]) {
+      token = req.headers["sec-websocket-protocol"] as string;
+    }
+
+    if (!isValidToken(token, expectedToken)) {
+      console.warn(
+        `[web-auth] 401 Unauthorized WebSocket upgrade attempt from ${req.socket.remoteAddress}`,
+      );
+      socket.write(
+        "HTTP/1.1 401 Unauthorized\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\nUnauthorized: Missing or invalid authentication token.\n",
+      );
+      socket.destroy();
+      return;
+    }
+
+    console.log(`HTTP upgrade request (authenticated): ${req.url}`);
     wss.handleUpgrade(req, socket, head, (ws) => {
       wss.emit("connection", ws, req);
     });
@@ -418,9 +488,14 @@ async function main() {
     });
   });
 
-  server.listen(port, () => {
-    console.log(`\n🐾 BaoClaw Web running at http://localhost:${port}`);
+  server.listen(port, host, () => {
+    const displayUrl = `http://${host === "0.0.0.0" ? "localhost" : host}:${port}/?token=${expectedToken}`;
+    console.log(`\n🐾 BaoClaw Web running at ${displayUrl}`);
+    console.log(
+      `   Host: ${host} (localhost-only default; use --host 0.0.0.0 for LAN access)`,
+    );
     console.log(`   CWD: ${cwd}`);
+    console.log(`   Auth Token: ${expectedToken}`);
     console.log(`   Daemon: pid=${daemon.pid}`);
     console.log(`   Public: ${PUBLIC_DIR}\n`);
   });

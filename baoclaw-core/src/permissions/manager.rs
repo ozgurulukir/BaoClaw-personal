@@ -213,6 +213,121 @@ impl PermissionManager {
                 rule_content,
             });
     }
+
+    /// Add a rule to the specified category ("allow", "deny", "ask").
+    pub fn add_rule(
+        &self,
+        category: &str,
+        source: &str,
+        tool_name: &str,
+        rule_content: Option<String>,
+    ) {
+        let mut ctx = self.context.write().unwrap();
+        let rule = PermissionRule {
+            tool_name: tool_name.to_string(),
+            rule_content,
+        };
+        match category.to_ascii_lowercase().as_str() {
+            "allow" | "always_allow" => {
+                ctx.always_allow_rules
+                    .entry(source.to_string())
+                    .or_default()
+                    .push(rule);
+            }
+            "deny" | "always_deny" => {
+                ctx.always_deny_rules
+                    .entry(source.to_string())
+                    .or_default()
+                    .push(rule);
+            }
+            "ask" | "always_ask" => {
+                ctx.always_ask_rules
+                    .entry(source.to_string())
+                    .or_default()
+                    .push(rule);
+            }
+            _ => {
+                ctx.always_allow_rules
+                    .entry(source.to_string())
+                    .or_default()
+                    .push(rule);
+            }
+        }
+    }
+
+    /// Remove matching rules from all categories or a specific category.
+    pub fn remove_rule(
+        &self,
+        category: Option<&str>,
+        tool_name: &str,
+        rule_content: Option<&str>,
+    ) -> usize {
+        let mut ctx = self.context.write().unwrap();
+        let mut removed = 0;
+
+        let filter_rules = |map: &mut ToolPermissionRulesBySource| -> usize {
+            let mut count = 0;
+            for rules in map.values_mut() {
+                let initial_len = rules.len();
+                rules.retain(|r| {
+                    let tool_match =
+                        r.tool_name.eq_ignore_ascii_case(tool_name) || tool_name == "*";
+                    let content_match = match (rule_content, &r.rule_content) {
+                        (Some(target), Some(content)) => target == content || target == "*",
+                        (Some(_), None) => false,
+                        (None, _) => true,
+                    };
+                    !(tool_match && content_match)
+                });
+                count += initial_len - rules.len();
+            }
+            count
+        };
+
+        match category.map(|c| c.to_ascii_lowercase()) {
+            Some(ref c) if c == "allow" || c == "always_allow" => {
+                removed += filter_rules(&mut ctx.always_allow_rules);
+            }
+            Some(ref c) if c == "deny" || c == "always_deny" => {
+                removed += filter_rules(&mut ctx.always_deny_rules);
+            }
+            Some(ref c) if c == "ask" || c == "always_ask" => {
+                removed += filter_rules(&mut ctx.always_ask_rules);
+            }
+            _ => {
+                removed += filter_rules(&mut ctx.always_allow_rules);
+                removed += filter_rules(&mut ctx.always_deny_rules);
+                removed += filter_rules(&mut ctx.always_ask_rules);
+            }
+        }
+
+        removed
+    }
+
+    /// Set the permission mode.
+    pub fn set_mode(&self, mode: PermissionMode) {
+        let mut ctx = self.context.write().unwrap();
+        ctx.mode = mode;
+    }
+}
+
+impl Default for ToolPermissionContext {
+    fn default() -> Self {
+        Self {
+            mode: PermissionMode::Default,
+            additional_working_directories: HashMap::new(),
+            always_allow_rules: HashMap::new(),
+            always_deny_rules: HashMap::new(),
+            always_ask_rules: HashMap::new(),
+            is_bypass_permissions_mode_available: false,
+        }
+    }
+}
+
+impl Default for PermissionManager {
+    fn default() -> Self {
+        Self::new(ToolPermissionContext::default())
+    }
 }
 
 #[cfg(test)]

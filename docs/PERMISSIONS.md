@@ -293,10 +293,10 @@ let decision = match tokio::time::timeout(Duration::from_secs(300), rx).await {
 
 ### 两条执行路径
 
-| 函数                             | 用途                                    | 权限检查方式                             |
-| -------------------------------- | --------------------------------------- | ---------------------------------------- |
-| `execute_tool()`                 | 简单路径（批量执行）                    | 只检查 Tool trait 的 `check_permissions` |
-| `execute_tool_with_permission()` | 完整路径（带 PermissionManager + Gate） | PermissionManager → Gate 交互式          |
+| 函数                             | 用途                                    | 权限检查方式                                                                                           |
+| -------------------------------- | --------------------------------------- | ------------------------------------------------------------------------------------------------------ |
+| `execute_tool()`                 | 简单路径（直接/批量执行）               | 检查 Tool trait 的 `check_permissions`；非只读工具遇 `Ask` 默认 Fail-Closed 阻断（只读工具警告后允许） |
+| `execute_tool_with_permission()` | 完整路径（带 PermissionManager + Gate） | PermissionManager → Gate 交互式确认（超时 5 分钟自动 Fail-Closed 拒绝）                                |
 
 ---
 

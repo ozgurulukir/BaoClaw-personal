@@ -72,13 +72,34 @@ pub async fn execute_tool(
 
     // Step 2: Check permissions
     let permission = tool.check_permissions(&request.input, context).await;
-    if let ToolPermissionCheckResult::Deny { message } = permission {
-        return ToolExecutionResult {
-            tool_use_id,
-            tool_name,
-            output: Value::String(format!("Permission denied: {}", message)),
-            is_error: true,
-        };
+    match permission {
+        ToolPermissionCheckResult::Allow { .. } => {}
+        ToolPermissionCheckResult::Deny { message } => {
+            return ToolExecutionResult {
+                tool_use_id,
+                tool_name,
+                output: Value::String(format!("Permission denied: {}", message)),
+                is_error: true,
+            };
+        }
+        ToolPermissionCheckResult::Ask { message, .. } => {
+            if tool.is_read_only(&request.input) {
+                eprintln!(
+                    "[permissions] WARN: Ask permission on read-only tool '{}'; proceeding without confirmation",
+                    tool_name
+                );
+            } else {
+                return ToolExecutionResult {
+                    tool_use_id,
+                    tool_name: tool_name.clone(),
+                    output: Value::String(format!(
+                        "Permission denied: confirmation required for non-read-only tool '{}' ({}); interactive permission channel not available in direct execution mode",
+                        tool_name, message
+                    )),
+                    is_error: true,
+                };
+            }
+        }
     }
 
     // Step 3: Call the tool with abort awareness
@@ -401,6 +422,7 @@ mod tests {
         tool_name: String,
         tool_aliases: Vec<String>,
         concurrency_safe: bool,
+        read_only: bool,
         max_result_size: usize,
         validation_result: std::sync::Mutex<Option<ValidationResult>>,
         permission_result: std::sync::Mutex<Option<ToolPermissionCheckResult>>,
@@ -414,12 +436,18 @@ mod tests {
                 tool_name: name.to_string(),
                 tool_aliases: vec![],
                 concurrency_safe: false,
+                read_only: false,
                 max_result_size: 100_000,
                 validation_result: std::sync::Mutex::new(None),
                 permission_result: std::sync::Mutex::new(None),
                 call_result: std::sync::Mutex::new(None),
                 call_count: AtomicUsize::new(0),
             }
+        }
+
+        fn with_read_only(mut self, read_only: bool) -> Self {
+            self.read_only = read_only;
+            self
         }
 
         fn with_aliases(mut self, aliases: Vec<&str>) -> Self {
@@ -470,6 +498,10 @@ mod tests {
                 required: None,
                 description: None,
             }
+        }
+
+        fn is_read_only(&self, _input: &Value) -> bool {
+            self.read_only
         }
 
         fn is_concurrency_safe(&self, _input: &Value) -> bool {
@@ -603,6 +635,52 @@ mod tests {
             .contains("Permission denied"));
         assert!(result.output.as_str().unwrap().contains("not allowed"));
         assert_eq!(tool.call_count.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn test_execute_tool_ask_fails_closed_for_mutating_tool() {
+        let tool = MockTool::new("BashTool")
+            .with_read_only(false)
+            .with_permission(ToolPermissionCheckResult::Ask {
+                message: "BashTool requires user confirmation".to_string(),
+                updated_input: Value::Null,
+            });
+        let ctx = make_context();
+        let progress = MockProgressSender;
+        let request = make_request("req-ask-deny", "BashTool");
+
+        let result = execute_tool(&tool, &request, &ctx, &progress).await;
+
+        assert!(result.is_error);
+        assert!(result
+            .output
+            .as_str()
+            .unwrap()
+            .contains("Permission denied: confirmation required"));
+        assert_eq!(tool.call_count.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn test_execute_tool_ask_proceeds_for_read_only_tool() {
+        let tool = MockTool::new("FileReadTool")
+            .with_read_only(true)
+            .with_permission(ToolPermissionCheckResult::Ask {
+                message: "FileReadTool requires confirmation".to_string(),
+                updated_input: Value::Null,
+            })
+            .with_call_result(Ok(ToolResult {
+                data: json!({"content": "file contents"}),
+                is_error: false,
+            }));
+        let ctx = make_context();
+        let progress = MockProgressSender;
+        let request = make_request("req-ask-allow", "FileReadTool");
+
+        let result = execute_tool(&tool, &request, &ctx, &progress).await;
+
+        assert!(!result.is_error);
+        assert_eq!(result.output, json!({"content": "file contents"}));
+        assert_eq!(tool.call_count.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]

@@ -746,12 +746,37 @@ function connectTab(cwd) {
   clearTimeout(tab.reconnectTimer);
 
   const isDefault = cwd === "__default__";
+  const urlParams = new URLSearchParams(window.location.search);
+  let token = urlParams.get("token") || "";
+  if (!token) {
+    try {
+      token = sessionStorage.getItem("baoclaw_web_token") || "";
+    } catch {}
+  }
+  if (!token) {
+    const prompted = window.prompt(
+      "Enter BaoClaw Web authentication token (from server startup terminal log):",
+    );
+    if (prompted && prompted.trim()) {
+      token = prompted.trim();
+    }
+  }
+  if (token) {
+    try {
+      sessionStorage.setItem("baoclaw_web_token", token);
+    } catch {}
+  }
+
+  const wsParams = new URLSearchParams();
+  if (!isDefault) wsParams.set("cwd", cwd);
+  if (token) wsParams.set("token", token);
+  const qs = wsParams.toString();
   const wsUrl =
     (location.protocol === "https:" ? "wss:" : "ws:") +
     "//" +
     location.host +
     "/" +
-    (isDefault ? "" : "?cwd=" + encodeURIComponent(cwd));
+    (qs ? "?" + qs : "");
   const w = new WebSocket(wsUrl);
   tab.ws = w;
   w.onopen = () => {

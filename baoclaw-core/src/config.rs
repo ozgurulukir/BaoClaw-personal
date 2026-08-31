@@ -280,6 +280,18 @@ pub fn save_config_to(
     Ok(())
 }
 
+impl BaoclawConfig {
+    /// Save this configuration to ~/.baoclaw/config.json.
+    pub fn save(&self) -> Result<(), std::io::Error> {
+        save_config_to(self, &config_path())
+    }
+
+    /// Save this configuration to a specific path.
+    pub fn save_to(&self, path: &std::path::Path) -> Result<(), std::io::Error> {
+        save_config_to(self, path)
+    }
+}
+
 /// Apply environment variable overrides to the config.
 /// If ANTHROPIC_MODEL is set, it overrides the primary model.
 pub fn apply_env_override(config: &mut BaoclawConfig) {

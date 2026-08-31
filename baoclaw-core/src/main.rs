@@ -1,4 +1,3 @@
-#![allow(dead_code)]
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
@@ -6,26 +5,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 const IPC_PROTOCOL_VERSION: &str = "1";
-static MCP_INITIALIZED: AtomicBool = AtomicBool::new(false);
 use std::path::PathBuf;
 use tokio::sync::Mutex as TokioMutex;
 
-mod api;
-mod bridge;
-mod config;
-mod discovery;
-mod doc_upload;
-mod engine;
-mod infra;
-mod ipc;
-mod mcp;
-mod models;
-mod permissions;
-mod state;
-mod telemetry;
-mod tools;
-mod updater;
-mod utils;
+use baoclaw_core::{
+    api, config, discovery, doc_upload, engine, ipc, models, permissions, state, tools,
+};
 
 #[cfg(target_os = "windows")]
 mod windows_service;
@@ -56,11 +41,12 @@ struct SharedState {
     engine_tools: Vec<Arc<dyn tools::Tool>>,
     api_client: Arc<UnifiedClient>,
     permission_gate: PermissionGate,
+    permission_manager: Arc<tokio::sync::RwLock<permissions::manager::PermissionManager>>,
     task_manager: Arc<TaskManager>,
     state_manager: Arc<StateManager>,
     baoclaw_config: BaoclawConfig,
     cli_thinking_config: ThinkingConfig,
-    cli_resume_session_id: Option<String>,
+    _cli_resume_session_id: Option<String>,
     session_id: String,
     should_exit: Arc<AtomicBool>,
     session_registry: Arc<SessionRegistry>,
@@ -83,6 +69,21 @@ struct SharedState {
 
 /// Socket directory for all BaoClaw daemon instances
 fn socket_dir() -> PathBuf {
+    #[cfg(target_os = "linux")]
+    {
+        if let Ok(xdg) = std::env::var("XDG_RUNTIME_DIR") {
+            if !xdg.is_empty() && std::path::Path::new(&xdg).exists() {
+                let dir = PathBuf::from(xdg).join("baoclaw-sockets");
+                let _ = std::fs::create_dir_all(&dir);
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
+                }
+                return dir;
+            }
+        }
+    }
     let dir = std::env::temp_dir().join("baoclaw-sockets");
     if let Err(e) = std::fs::create_dir_all(&dir) {
         eprintln!(
@@ -90,6 +91,11 @@ fn socket_dir() -> PathBuf {
             dir.display(),
             e
         );
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
     }
     dir
 }
@@ -162,24 +168,6 @@ fn resolve_daemon_socket(cwd: &str) -> PathBuf {
     }
 }
 
-/// Connect to a running daemon, trying the fixed socket first, then
-/// falling back to the cwd-hash socket for backward compatibility (P3-1c).
-///
-/// Returns the connected UnixStream or an error if neither socket works.
-async fn connect_to_daemon(cwd: &str) -> std::io::Result<tokio::net::UnixStream> {
-    // 1. Try fixed socket (P3-1c, machine-level single daemon)
-    if let Some(ref p) = fixed_socket_path() {
-        if p.exists() {
-            if let Ok(s) = tokio::net::UnixStream::connect(p).await {
-                return Ok(s);
-            }
-        }
-    }
-    // 2. Fallback to cwd-hash socket (P1-2, backward compat)
-    let cwd_path = make_socket_path(cwd);
-    tokio::net::UnixStream::connect(&cwd_path).await
-}
-
 /// Write a metadata JSON file next to the socket for discovery
 fn write_meta(socket_path: &std::path::Path, cwd: &str, session_id: &str) {
     let meta_path = socket_path.with_extension("json");
@@ -245,22 +233,6 @@ fn update_loop_header(turn_id: u32, tool_count: u32, duration_ms: u64) {
         "── Loop {} ── tools: {}, {:.1}s ──",
         turn_id, tool_count, duration_secs
     );
-}
-
-/// Build the combined append_system_prompt from skills + memory.
-async fn build_append_prompt(shared: &SharedState) -> Option<String> {
-    let mut parts = Vec::new();
-    if let Some(ref sp) = shared.skill_prompt {
-        parts.push(sp.clone());
-    }
-    if let Some(mp) = shared.memory_store.build_prompt_fragment().await {
-        parts.push(mp);
-    }
-    if parts.is_empty() {
-        None
-    } else {
-        Some(parts.join("\n\n"))
-    }
 }
 
 /// Handle a client in shared mode. The client shares a QueryEngine with other clients
@@ -2666,25 +2638,65 @@ async fn handle_shared_client(
                             target,
                             permanent,
                         } => {
-                            let mut gate =
-                                engine::permission_gate::gate::RuleBasedPermissionGate::new();
-                            let decision = if permanent {
-                                engine::permission_gate::types::DecisionType::AllowPermanent
+                            let rule_content = if target.is_empty() || target == "*" {
+                                None
                             } else {
-                                engine::permission_gate::types::DecisionType::AllowSession
+                                Some(target.clone())
                             };
-                            gate.grant(&tool, &action, &target, decision, None);
+                            let category = match action.to_ascii_lowercase().as_str() {
+                                "deny" => "deny",
+                                "ask" => "ask",
+                                _ => "allow",
+                            };
+                            {
+                                let mgr = shared.permission_manager.write().await;
+                                mgr.add_rule(category, "user", &tool, rule_content.clone());
+                                if permanent {
+                                    let ctx = mgr.get_context();
+                                    if let Ok(ctx_json) = serde_json::to_value(&ctx) {
+                                        let mut cfg = config::load_config();
+                                        cfg.extra.insert("permissions".to_string(), ctx_json);
+                                        let _ = cfg.save();
+                                    }
+                                }
+                            }
                             let mut conn_guard = conn.lock().await;
-                            let _ = conn_guard.send_response(id, serde_json::json!({"success": true, "tool": tool, "action": action, "target": target, "permanent": permanent})).await;
+                            let _ = conn_guard
+                                .send_response(
+                                    id,
+                                    serde_json::json!({
+                                        "success": true,
+                                        "tool": tool,
+                                        "action": action,
+                                        "target": target,
+                                        "permanent": permanent
+                                    }),
+                                )
+                                .await;
                         }
                         ClientMethod::PermissionRevoke {
                             tool,
-                            action,
+                            action: _action,
                             target,
                         } => {
-                            let mut gate =
-                                engine::permission_gate::gate::RuleBasedPermissionGate::new();
-                            let removed = gate.revoke(&tool, &action, &target);
+                            let rule_content = if target.is_empty() || target == "*" {
+                                None
+                            } else {
+                                Some(target.as_str())
+                            };
+                            let removed = {
+                                let mgr = shared.permission_manager.write().await;
+                                let count = mgr.remove_rule(None, &tool, rule_content);
+                                if count > 0 {
+                                    let ctx = mgr.get_context();
+                                    if let Ok(ctx_json) = serde_json::to_value(&ctx) {
+                                        let mut cfg = config::load_config();
+                                        cfg.extra.insert("permissions".to_string(), ctx_json);
+                                        let _ = cfg.save();
+                                    }
+                                }
+                                count
+                            };
                             let mut conn_guard = conn.lock().await;
                             let _ = conn_guard
                                 .send_response(
@@ -2696,9 +2708,14 @@ async fn handle_shared_client(
 
                         // ── Permission Manager handlers (rule-based) ──
                         ClientMethod::PermissionsInfo => {
-                            // Return the config-based permissions from config.json
-                            let cfg = &shared.baoclaw_config;
-                            let perms = cfg.extra.get("permissions").cloned().unwrap_or(serde_json::json!({"mode": "default", "always_allow_rules": {}, "always_deny_rules": {}, "always_ask_rules": {}}));
+                            let mgr = shared.permission_manager.read().await;
+                            let ctx = mgr.get_context();
+                            let perms = serde_json::to_value(&ctx).unwrap_or(serde_json::json!({
+                                "mode": "default",
+                                "always_allow_rules": {},
+                                "always_deny_rules": {},
+                                "always_ask_rules": {}
+                            }));
                             let mut conn_guard = conn.lock().await;
                             let _ = conn_guard.send_response(id, perms).await;
                         }
@@ -2707,20 +2724,96 @@ async fn handle_shared_client(
                             tool_name,
                             rule_content,
                         } => {
+                            {
+                                let mgr = shared.permission_manager.write().await;
+                                mgr.add_rule(&category, "config", &tool_name, rule_content.clone());
+                                let ctx = mgr.get_context();
+                                if let Ok(ctx_json) = serde_json::to_value(&ctx) {
+                                    let mut cfg = config::load_config();
+                                    cfg.extra.insert("permissions".to_string(), ctx_json);
+                                    let _ = cfg.save();
+                                }
+                            }
                             let mut conn_guard = conn.lock().await;
-                            let _ = conn_guard.send_response(id, serde_json::json!({"success": true, "message": "Rule added (runtime). Edit ~/.baoclaw/config.json for persistent rules.", "category": category, "tool_name": tool_name, "rule_content": rule_content})).await;
+                            let _ = conn_guard
+                                .send_response(
+                                    id,
+                                    serde_json::json!({
+                                        "success": true,
+                                        "message": "Rule added and persisted to config.",
+                                        "category": category,
+                                        "tool_name": tool_name,
+                                        "rule_content": rule_content
+                                    }),
+                                )
+                                .await;
                         }
                         ClientMethod::PermissionsRemoveRule {
                             category,
                             tool_name,
                             rule_content,
                         } => {
+                            let removed = {
+                                let mgr = shared.permission_manager.write().await;
+                                let count = mgr.remove_rule(
+                                    Some(&category),
+                                    &tool_name,
+                                    rule_content.as_deref(),
+                                );
+                                if count > 0 {
+                                    let ctx = mgr.get_context();
+                                    if let Ok(ctx_json) = serde_json::to_value(&ctx) {
+                                        let mut cfg = config::load_config();
+                                        cfg.extra.insert("permissions".to_string(), ctx_json);
+                                        let _ = cfg.save();
+                                    }
+                                }
+                                count
+                            };
                             let mut conn_guard = conn.lock().await;
-                            let _ = conn_guard.send_response(id, serde_json::json!({"success": true, "message": "Rule removed (runtime). Edit ~/.baoclaw/config.json for persistent rules.", "category": category, "tool_name": tool_name, "rule_content": rule_content})).await;
+                            let _ = conn_guard
+                                .send_response(
+                                    id,
+                                    serde_json::json!({
+                                        "success": removed > 0,
+                                        "message": format!("Removed {} rule(s)", removed),
+                                        "category": category,
+                                        "tool_name": tool_name,
+                                        "rule_content": rule_content
+                                    }),
+                                )
+                                .await;
                         }
                         ClientMethod::PermissionsSetMode { mode } => {
+                            let parsed_mode = match mode.to_ascii_lowercase().as_str() {
+                                "plan" => permissions::manager::PermissionMode::Plan,
+                                "bypass" | "bypasspermissions" => {
+                                    permissions::manager::PermissionMode::BypassPermissions
+                                }
+                                "auto" => permissions::manager::PermissionMode::Auto,
+                                _ => permissions::manager::PermissionMode::Default,
+                            };
+                            {
+                                let mgr = shared.permission_manager.write().await;
+                                mgr.set_mode(parsed_mode);
+                                let ctx = mgr.get_context();
+                                if let Ok(ctx_json) = serde_json::to_value(&ctx) {
+                                    let mut cfg = config::load_config();
+                                    cfg.extra.insert("permissions".to_string(), ctx_json);
+                                    let _ = cfg.save();
+                                }
+                            }
                             let mut conn_guard = conn.lock().await;
-                            let _ = conn_guard.send_response(id, serde_json::json!({"success": true, "mode": mode, "message": "Permission mode updated (runtime)."})).await;
+                            let _ = conn_guard
+                                .send_response(
+                                    id,
+                                    serde_json::json!({
+                                        "success": true,
+                                        "mode": mode,
+                                        "message": format!("Permission mode updated to {}", mode)
+                                    }),
+                                )
+                                .await;
                         }
 
                         // ── Session Info / Token / Cost handlers (P2-2) ──
@@ -4021,8 +4114,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let should_exit = Arc::new(AtomicBool::new(false));
 
-    // Create PermissionGate for the permission interactive flow
+    // Create PermissionGate and PermissionManager for interactive permission flow
     let permission_gate = PermissionGate::new();
+    let permission_manager = Arc::new(tokio::sync::RwLock::new(
+        permissions::manager::PermissionManager::default(),
+    ));
+    if let Some(perms_val) = baoclaw_config.extra.get("permissions") {
+        if let Ok(ctx) =
+            serde_json::from_value::<permissions::manager::ToolPermissionContext>(perms_val.clone())
+        {
+            let mgr = permission_manager.blocking_write();
+            mgr.update_context(|c| *c = ctx);
+        }
+    }
 
     // Create TaskManager for background task execution
     let task_manager = Arc::new(TaskManager::new(
@@ -4050,11 +4154,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         engine_tools,
         api_client,
         permission_gate,
+        permission_manager,
         task_manager,
         state_manager,
         baoclaw_config,
         cli_thinking_config,
-        cli_resume_session_id,
+        _cli_resume_session_id: cli_resume_session_id,
         session_id: session_id.clone(),
         should_exit: Arc::clone(&should_exit),
         session_registry: Arc::new(SessionRegistry::new()),

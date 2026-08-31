@@ -375,7 +375,7 @@ impl SessionRegistry {
     }
 
     /// Remove a session while the caller holds the last-client cleanup guard.
-    pub(crate) async fn remove_after_last_client_cleanup(&self, session_id: &str) {
+    pub async fn remove_after_last_client_cleanup(&self, session_id: &str) {
         self.sessions.lock().await.remove(session_id);
     }
 
