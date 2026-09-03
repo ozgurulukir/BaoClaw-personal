@@ -4129,9 +4129,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Create TaskManager for background task execution
-    let task_manager = Arc::new(TaskManager::new(
+    let task_manager = Arc::new(TaskManager::new_with_config(
         Arc::clone(&api_client),
         engine_tools.clone(),
+        baoclaw_config.context_window,
+        baoclaw_config.auto_compact_threshold_ratio,
     ));
 
     let team_executor = Arc::new(engine::team::TeamManager::new(
