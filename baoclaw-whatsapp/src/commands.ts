@@ -3,7 +3,7 @@
  * Provides command definitions, parsing, dispatch, formatting, and help.
  * Commands are dispatched via IPC JSON-RPC to baoclaw-core daemon.
  */
-import { IpcClient } from "../../ts-ipc/index.js";
+import { IpcClient } from "../../ts-ipc/client.js";
 import * as fs from "fs";
 import * as os from "os";
 
