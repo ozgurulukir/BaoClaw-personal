@@ -31,7 +31,7 @@ import {
 } from "./formatter.js";
 import { MessageQueue } from "./messageQueue.js";
 import { createDaemonConnector, type DaemonInfo } from "./daemon.js";
-import { IpcClient } from "../../ts-ipc/index.js";
+import { IpcClient } from "../../ts-ipc/client.js";
 import { createLogger } from "../../ts-ipc/logger.js";
 import { SessionManager } from "./session.js";
 // New modules
@@ -50,11 +50,11 @@ import { MediaHandler, isImageFile } from "./media.js";
 
 const logger = createLogger("whatsapp");
 
-const PID_FILE = path.join(os.homedir(), ".baoclaw", "whatsapp-gateway.pid");
 const SHUTDOWN_TIMEOUT_MS = 10_000;
 
 export interface GatewayOptions {
   configPath?: string;
+  pidFile?: string;
 }
 
 export class WhatsAppGateway {
@@ -68,6 +68,7 @@ export class WhatsAppGateway {
   private messageQueue: MessageQueue;
   private shuttingDown = false;
   private configPath: string;
+  private pidFile: string;
 
   // New module instances
   private senderTracker: SenderTracker;
@@ -82,6 +83,9 @@ export class WhatsAppGateway {
   constructor(options?: GatewayOptions) {
     this.configPath =
       options?.configPath ?? path.join(os.homedir(), ".baoclaw", "config.json");
+    this.pidFile =
+      options?.pidFile ??
+      path.join(os.homedir(), ".baoclaw", "whatsapp-gateway.pid");
     this.session = new SessionManager(undefined, undefined); // phone set after config load
     this.daemonConnector = createDaemonConnector();
     this.rateLimiter = new RateLimiter();
@@ -714,10 +718,10 @@ export class WhatsAppGateway {
       started_at: new Date().toISOString(),
     };
     try {
-      const dir = path.dirname(PID_FILE);
+      const dir = path.dirname(this.pidFile);
       fs.mkdirSync(dir, { recursive: true });
-      fs.writeFileSync(PID_FILE, JSON.stringify(pidData, null, 2));
-      logger.info(`PID file written: ${PID_FILE}`);
+      fs.writeFileSync(this.pidFile, JSON.stringify(pidData, null, 2));
+      logger.info(`PID file written: ${this.pidFile}`);
     } catch (err) {
       logger.warn(`Failed to write PID file: ${err}`);
     }
@@ -725,7 +729,7 @@ export class WhatsAppGateway {
 
   private removePidFile(): void {
     try {
-      fs.unlinkSync(PID_FILE);
+      fs.unlinkSync(this.pidFile);
     } catch {
       /* ignore */
     }

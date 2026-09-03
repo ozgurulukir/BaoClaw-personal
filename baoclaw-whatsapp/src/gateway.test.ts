@@ -97,8 +97,9 @@ test("WhatsAppGateway start throws error when allowFrom is empty or invalid", as
 });
 
 test("WhatsAppGateway PID file management", () => {
-  const gateway = new WhatsAppGateway();
-  const pidFile = path.join(os.homedir(), ".baoclaw", "whatsapp-gateway.pid");
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "gateway-pid-test-"));
+  const pidFile = path.join(tmpDir, "whatsapp-gateway.pid");
+  const gateway = new WhatsAppGateway({ pidFile });
 
   // Call writePidFile
   (gateway as any).writePidFile();
@@ -110,6 +111,8 @@ test("WhatsAppGateway PID file management", () => {
   // Call removePidFile
   (gateway as any).removePidFile();
   assert.equal(fs.existsSync(pidFile), false);
+
+  fs.rmSync(tmpDir, { recursive: true, force: true });
 });
 
 test("setupInboundHandler filters disallowed senders", async () => {
@@ -249,9 +252,10 @@ test("setupInboundHandler handles rate limiting", async () => {
 
   (gateway as any).setupInboundHandler(mockSock);
 
-  // Exhaust rate limit tokens for +1234567890
+  // Exhaust rate limit tokens for +1234567890 based on rateLimiter's maxMessages
   const rateLimiter = (gateway as any).rateLimiter;
-  for (let i = 0; i < 20; i++) {
+  const maxMessages = (rateLimiter as any).maxMessages ?? 20;
+  for (let i = 0; i < maxMessages; i++) {
     rateLimiter.tryConsume("+1234567890");
   }
 
