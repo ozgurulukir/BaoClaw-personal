@@ -4132,6 +4132,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let task_manager = Arc::new(TaskManager::new(
         Arc::clone(&api_client),
         engine_tools.clone(),
+        baoclaw_config.context_window,
+        baoclaw_config.auto_compact_threshold_ratio,
     ));
 
     let team_executor = Arc::new(engine::team::TeamManager::new(
