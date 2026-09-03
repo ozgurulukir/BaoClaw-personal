@@ -170,9 +170,31 @@ impl TeamExecutor {
             default_cwd,
             default_model,
             default_policy,
-            context_window: 1_000_000, // TODO: propagate from engine config
-            auto_compact_threshold_ratio: 0.7, // TODO: propagate from engine config
+            context_window: 1_000_000,
+            auto_compact_threshold_ratio: 0.7,
         }
+    }
+
+    /// Set the auto-compact threshold ratio for sub-agent execution.
+    pub fn with_auto_compact_threshold_ratio(mut self, ratio: f64) -> Self {
+        self.auto_compact_threshold_ratio = ratio;
+        self
+    }
+
+    /// Set the model context window (tokens) for sub-agent execution.
+    pub fn with_context_window(mut self, context_window: u64) -> Self {
+        self.context_window = context_window;
+        self
+    }
+
+    /// Get the configured auto-compact threshold ratio.
+    pub fn auto_compact_threshold_ratio(&self) -> f64 {
+        self.auto_compact_threshold_ratio
+    }
+
+    /// Get the configured context window in tokens.
+    pub fn context_window(&self) -> u64 {
+        self.context_window
     }
 
     /// Create a new team with the given task and configuration.
@@ -1130,6 +1152,26 @@ mod tests {
             PathBuf::from("/tmp"),
             "claude-sonnet-4-20250514".to_string(),
         )
+    }
+
+    #[tokio::test]
+    async fn test_with_policy_propagates_config() {
+        let api_client = make_api_client();
+        let tools: Vec<Arc<dyn Tool>> = vec![];
+        let custom_policy = crate::engine::team::policy::TeamPolicy::default();
+
+        let executor = TeamExecutor::with_policy(
+            api_client,
+            tools,
+            PathBuf::from("/tmp"),
+            "claude-sonnet-4-20250514".to_string(),
+            custom_policy,
+        )
+        .with_auto_compact_threshold_ratio(0.85)
+        .with_context_window(2_000_000);
+
+        assert_eq!(executor.auto_compact_threshold_ratio(), 0.85);
+        assert_eq!(executor.context_window(), 2_000_000);
     }
 
     #[tokio::test]
