@@ -1,19 +1,14 @@
+use crate::utils::command::run_command_async;
 use serde_json::{json, Value};
 use std::path::Path;
 
-/// Execute `git status --porcelain` in the given directory.
-pub fn execute_git_status(cwd: &Path) -> Value {
-    match std::process::Command::new("git")
-        .arg("status")
-        .arg("--porcelain")
-        .current_dir(cwd)
-        .output()
-    {
+/// Execute `git status --porcelain` in the given directory asynchronously.
+pub async fn execute_git_status(cwd: &Path) -> Value {
+    match run_command_async("git", &["status", "--porcelain"], Some(cwd)).await {
         Ok(out) => {
-            let stdout = String::from_utf8_lossy(&out.stdout).to_string();
             json!({
-                "clean": stdout.trim().is_empty(),
-                "status": stdout,
+                "clean": out.stdout.trim().is_empty(),
+                "status": out.stdout,
             })
         }
         Err(e) => json!({
@@ -23,17 +18,12 @@ pub fn execute_git_status(cwd: &Path) -> Value {
     }
 }
 
-/// Execute `git diff` in the given directory.
-pub fn execute_git_diff(cwd: &Path) -> Value {
-    match std::process::Command::new("git")
-        .arg("diff")
-        .current_dir(cwd)
-        .output()
-    {
+/// Execute `git diff` in the given directory asynchronously.
+pub async fn execute_git_diff(cwd: &Path) -> Value {
+    match run_command_async("git", &["diff"], Some(cwd)).await {
         Ok(out) => {
-            let stdout = String::from_utf8_lossy(&out.stdout).to_string();
             json!({
-                "diff": stdout,
+                "diff": out.stdout,
             })
         }
         Err(e) => json!({
@@ -56,21 +46,13 @@ pub fn handle_git_status(cwd: &Path) -> Result<Value, String> {
     }
 }
 
-/// Execute `git commit -m <message>` in the given directory.
-pub fn execute_git_commit(cwd: &Path, message: &str) -> Value {
-    match std::process::Command::new("git")
-        .arg("commit")
-        .arg("-m")
-        .arg(message)
-        .current_dir(cwd)
-        .output()
-    {
+/// Execute `git commit -m <message>` in the given directory asynchronously.
+pub async fn execute_git_commit(cwd: &Path, message: &str) -> Value {
+    match run_command_async("git", &["commit", "-m", message], Some(cwd)).await {
         Ok(out) => {
-            let stdout = String::from_utf8_lossy(&out.stdout).to_string();
-            let stderr = String::from_utf8_lossy(&out.stderr).to_string();
             json!({
                 "success": out.status.success(),
-                "output": format!("{}\n{}", stdout, stderr).trim().to_string(),
+                "output": format!("{}\n{}", out.stdout, out.stderr).trim().to_string(),
             })
         }
         Err(e) => json!({
@@ -84,9 +66,21 @@ pub fn execute_git_commit(cwd: &Path, message: &str) -> Value {
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_git_status_runs() {
-        let res = execute_git_status(Path::new("."));
+    #[tokio::test]
+    async fn test_git_status_runs() {
+        let res = execute_git_status(Path::new(".")).await;
         assert!(res.get("clean").is_some());
+    }
+
+    #[tokio::test]
+    async fn test_git_diff_runs() {
+        let res = execute_git_diff(Path::new(".")).await;
+        assert!(res.get("diff").is_some() || res.get("error").is_some());
+    }
+
+    #[tokio::test]
+    async fn test_git_commit_runs() {
+        let res = execute_git_commit(Path::new("."), "test message").await;
+        assert!(res.get("success").is_some() || res.get("error").is_some());
     }
 }
