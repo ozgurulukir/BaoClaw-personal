@@ -163,6 +163,13 @@ mod tests {
     }
 
     fn test_context() -> ToolContext {
+        test_context_with_config(200_000, 0.7)
+    }
+
+    fn test_context_with_config(
+        context_window: u64,
+        auto_compact_threshold_ratio: f64,
+    ) -> ToolContext {
         let (_tx, rx) = tokio::sync::watch::channel(false);
         ToolContext {
             cwd: PathBuf::from("/tmp"),
@@ -170,12 +177,19 @@ mod tests {
             abort_signal: Arc::new(rx),
             file_cache: None,
             tool_result_store: None,
-            context_window: 1_000_000, // TODO: propagate from engine config
-            auto_compact_threshold_ratio: 0.7, // TODO: propagate from engine config
+            context_window,
+            auto_compact_threshold_ratio,
         }
     }
 
     // --- execute_tool_with_timeout tests ---
+
+    #[test]
+    fn test_context_with_config_propagation() {
+        let ctx = test_context_with_config(500_000, 0.8);
+        assert_eq!(ctx.context_window, 500_000);
+        assert_eq!(ctx.auto_compact_threshold_ratio, 0.8);
+    }
 
     #[tokio::test]
     async fn test_execute_tool_with_timeout_success() {
