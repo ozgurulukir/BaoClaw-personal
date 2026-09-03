@@ -149,9 +149,31 @@ impl TeamExecutor {
             default_cwd,
             default_model,
             default_policy: crate::engine::team::policy::TeamPolicy::default(),
-            context_window: 1_000_000, // TODO: propagate from engine config
-            auto_compact_threshold_ratio: 0.7, // TODO: propagate from engine config
+            context_window: 1_000_000, // Default context window
+            auto_compact_threshold_ratio: 0.7, // Default auto-compact threshold ratio
         }
+    }
+
+    /// Set the context window for sub-agent engines.
+    pub fn with_context_window(mut self, context_window: u64) -> Self {
+        self.context_window = context_window;
+        self
+    }
+
+    /// Set the auto-compact threshold ratio for sub-agent engines.
+    pub fn with_auto_compact_threshold_ratio(mut self, ratio: f64) -> Self {
+        self.auto_compact_threshold_ratio = ratio;
+        self
+    }
+
+    /// Get the configured context window.
+    pub fn context_window(&self) -> u64 {
+        self.context_window
+    }
+
+    /// Get the configured auto-compact threshold ratio.
+    pub fn auto_compact_threshold_ratio(&self) -> f64 {
+        self.auto_compact_threshold_ratio
     }
 
     /// Create a TeamExecutor with a custom default policy.
@@ -170,8 +192,8 @@ impl TeamExecutor {
             default_cwd,
             default_model,
             default_policy,
-            context_window: 1_000_000, // TODO: propagate from engine config
-            auto_compact_threshold_ratio: 0.7, // TODO: propagate from engine config
+            context_window: 1_000_000, // Default context window
+            auto_compact_threshold_ratio: 0.7, // Default auto-compact threshold ratio
         }
     }
 
@@ -1374,5 +1396,15 @@ mod tests {
         // Team is pending, not running, so abort should return false
         let aborted = executor.abort_team(&team_id).await;
         assert!(!aborted);
+    }
+
+    #[test]
+    fn test_team_executor_config_propagation() {
+        let executor = make_executor()
+            .with_context_window(200_000)
+            .with_auto_compact_threshold_ratio(0.85);
+
+        assert_eq!(executor.context_window(), 200_000);
+        assert!((executor.auto_compact_threshold_ratio() - 0.85).abs() < f64::EPSILON);
     }
 }
