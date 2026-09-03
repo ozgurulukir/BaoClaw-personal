@@ -551,8 +551,13 @@ impl SessionRegistry {
             sessions.keys().cloned().collect()
         };
 
-        for sid in &session_ids {
-            if let Err(e) = self.persist_session(sid).await {
+        let results = futures::future::join_all(
+            session_ids.iter().map(|sid| async move { (sid, self.persist_session(sid).await) }),
+        )
+        .await;
+
+        for (sid, res) in results {
+            if let Err(e) = res {
                 eprintln!(
                     "[session-registry] WARNING: persist_all failed for {}: {}",
                     sid, e
@@ -744,5 +749,20 @@ mod tests {
             .await
             .0;
         assert_eq!(target.client_count().await, 1);
+    }
+    #[tokio::test]
+    async fn persist_all_persists_multiple_sessions_in_parallel() {
+        let (_dir, registry, current_cwd, target_cwd) = make_registry();
+        let _s1 = registry
+            .get_or_create("s1", || make_engine(current_cwd.clone(), "s1"))
+            .await;
+        let _s2 = registry
+            .get_or_create("s2", || make_engine(target_cwd.clone(), "s2"))
+            .await;
+
+        registry.persist_all().await;
+
+        assert!(registry.load_persisted_session("s1").is_some());
+        assert!(registry.load_persisted_session("s2").is_some());
     }
 }
