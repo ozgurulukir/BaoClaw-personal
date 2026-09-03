@@ -162,7 +162,10 @@ mod tests {
         async fn send_progress(&self, _tool_use_id: &str, _data: Value) {}
     }
 
-    fn test_context() -> ToolContext {
+    pub(crate) fn test_context_with_config(
+        context_window: u64,
+        auto_compact_threshold_ratio: f64,
+    ) -> ToolContext {
         let (_tx, rx) = tokio::sync::watch::channel(false);
         ToolContext {
             cwd: PathBuf::from("/tmp"),
@@ -170,9 +173,20 @@ mod tests {
             abort_signal: Arc::new(rx),
             file_cache: None,
             tool_result_store: None,
-            context_window: 1_000_000, // TODO: propagate from engine config
-            auto_compact_threshold_ratio: 0.7, // TODO: propagate from engine config
+            context_window,
+            auto_compact_threshold_ratio,
         }
+    }
+
+    pub(crate) fn test_context_from_engine_config(
+        config: &crate::engine::query_engine::QueryEngineConfig,
+    ) -> ToolContext {
+        test_context_with_config(config.context_window, config.auto_compact_threshold_ratio)
+    }
+
+    pub(crate) fn test_context() -> ToolContext {
+        let cfg = crate::config::BaoclawConfig::default();
+        test_context_with_config(cfg.context_window, cfg.auto_compact_threshold_ratio)
     }
 
     // --- execute_tool_with_timeout tests ---
@@ -337,5 +351,53 @@ mod tests {
             RecoveryStrategy::Fatal(msg) => assert_eq!(msg, "something broke"),
             other => panic!("Expected Fatal, got {:?}", other),
         }
+    }
+}
+
+#[cfg(test)]
+mod propagation_tests {
+    use super::*;
+    use crate::api::client::ApiClientConfig;
+    use crate::api::unified::UnifiedClient;
+    use crate::engine::query_engine::QueryEngineConfig;
+    use crate::engine::query_engine::ThinkingConfig;
+    use std::path::PathBuf;
+    use std::sync::Arc;
+
+    #[test]
+    fn test_context_from_engine_config_propagates_values() {
+        let api_client = Arc::new(UnifiedClient::new_anthropic(ApiClientConfig {
+            api_key: "test-key".to_string(),
+            base_url: None,
+            max_retries: None,
+            api_path: None,
+        }));
+        let engine_config = QueryEngineConfig {
+            cwd: PathBuf::from("/tmp"),
+            tools: vec![],
+            api_client,
+            model: "claude-sonnet-4-20250514".to_string(),
+            thinking_config: ThinkingConfig::Disabled,
+            max_turns: None,
+            max_budget_usd: None,
+            verbose: false,
+            custom_system_prompt: None,
+            append_system_prompt: None,
+            session_id: None,
+            fallback_models: vec![],
+            max_retries_per_model: 2,
+            context_window: 150_000,
+            auto_compact_threshold_ratio: 0.85,
+            parent_turn_id: None,
+            agent_label: None,
+            session_memory: None,
+            file_cache: None,
+            tool_result_store: None,
+            hook_manager: None,
+        };
+
+        let ctx = tests::test_context_from_engine_config(&engine_config);
+        assert_eq!(ctx.context_window, 150_000);
+        assert_eq!(ctx.auto_compact_threshold_ratio, 0.85);
     }
 }
