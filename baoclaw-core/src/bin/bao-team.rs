@@ -107,7 +107,7 @@ fn match_intent(input: &str, registry: &[DagRegistryEntry]) -> Vec<MatchResult> 
         }
     }
 
-    results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap());
+    results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
     results
 }
 
@@ -321,7 +321,9 @@ fn cmd_validate(dag_path: &str) -> Result<(), String> {
     let sorted = scheduler.topological_sort().map_err(|e| e.to_string())?;
     println!("\n📋 Execution order (topological):");
     for (i, id) in sorted.iter().enumerate() {
-        let agent = team.get_agent(id).unwrap();
+        let agent = team
+            .get_agent(id)
+            .ok_or_else(|| format!("Agent '{}' not found in team", id))?;
         let dep_str = if agent.dependencies.is_empty() {
             "(root)".to_string()
         } else {
@@ -472,5 +474,123 @@ fn main() {
             eprintln!("\n❌ Error: {}", e);
             std::process::exit(1);
         }
+    }
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_resolve_dag_path_success() {
+        let path = resolve_dag_path("software_audit_dag.json");
+        assert!(path.is_ok());
+    }
+
+    #[test]
+    fn test_resolve_dag_path_not_found() {
+        let path = resolve_dag_path("definitely_non_existent_dag_file.json");
+        assert!(path.is_err());
+        assert!(path.unwrap_err().contains("Cannot find DAG file"));
+    }
+
+    #[test]
+    fn test_load_dag_success() {
+        let path = resolve_dag_path("software_audit_dag.json").unwrap();
+        let team = load_dag(&path);
+        assert!(team.is_ok());
+        let team = team.unwrap();
+        assert_eq!(team.mode, TeamMode::Dag);
+    }
+
+    #[test]
+    fn test_load_dag_not_found() {
+        let res = load_dag("non_existent_file.json");
+        assert!(res.is_err());
+        assert!(res.unwrap_err().contains("Cannot read"));
+    }
+
+    #[test]
+    fn test_load_dag_wrong_mode() {
+        use std::io::Write;
+        let mut temp_file = tempfile::NamedTempFile::new().unwrap();
+        let invalid_json = r#"{
+            "id": "test-team",
+            "mode": "sequence",
+            "created_at": "2025-01-01T00:00:00Z",
+            "task": "test task",
+            "agents": []
+        }"#;
+        temp_file.write_all(invalid_json.as_bytes()).unwrap();
+        let res = load_dag(temp_file.path().to_str().unwrap());
+        assert!(res.is_err());
+        let err = res.unwrap_err();
+        assert!(err.contains("Expected mode 'dag'"));
+    }
+
+    #[test]
+    fn test_load_dag_invalid_json() {
+        use std::io::Write;
+        let mut temp_file = tempfile::NamedTempFile::new().unwrap();
+        let invalid_json = r#"{ invalid json }"#;
+        temp_file.write_all(invalid_json.as_bytes()).unwrap();
+        let res = load_dag(temp_file.path().to_str().unwrap());
+        assert!(res.is_err());
+        assert!(res.unwrap_err().contains("Invalid DAG JSON"));
+    }
+
+    #[test]
+    fn test_match_intent() {
+        let registry = vec![
+            DagRegistryEntry {
+                intent: "code_audit".to_string(),
+                dag_file: "software_audit_dag.json".to_string(),
+                display_name: "Code Audit".to_string(),
+                description: "Audit code".to_string(),
+                trigger_phrases: vec!["audit code".to_string(), "审查代码".to_string()],
+                keywords: vec!["audit".to_string(), "review".to_string()],
+                expected_duration: "5m".to_string(),
+                estimated_cost: "$1".to_string(),
+            },
+        ];
+
+        let results = match_intent("审查代码", &registry);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].entry.intent, "code_audit");
+
+        let no_results = match_intent("completely unrelated query xyz", &registry);
+        assert!(no_results.is_empty());
+    }
+
+    #[test]
+    fn test_cmd_validate_success() {
+        let path = resolve_dag_path("software_audit_dag.json").unwrap();
+        let res = cmd_validate(&path);
+        assert!(res.is_ok());
+    }
+
+    #[test]
+    fn test_cmd_dot_success() {
+        let path = resolve_dag_path("software_audit_dag.json").unwrap();
+        let res = cmd_dot(&path);
+        assert!(res.is_ok());
+    }
+
+    #[test]
+    fn test_cmd_run_success() {
+        let path = resolve_dag_path("software_audit_dag.json").unwrap();
+        let res = cmd_run(&path);
+        assert!(res.is_ok());
+    }
+
+    #[test]
+    fn test_agent_error_when_missing() {
+        let path = resolve_dag_path("software_audit_dag.json").unwrap();
+        let team = load_dag(&path).unwrap();
+        let err = team.get_agent("missing-agent-id")
+            .ok_or_else(|| format!("Agent '{}' not found in team", "missing-agent-id"));
+        assert!(err.is_err());
+        assert_eq!(err.unwrap_err(), "Agent 'missing-agent-id' not found in team");
     }
 }
