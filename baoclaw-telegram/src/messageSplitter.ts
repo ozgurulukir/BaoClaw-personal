@@ -10,9 +10,12 @@ export function splitMessage(text: string, max = 4096): string[] {
     if (isHighSurrogate(text.charCodeAt(end - 1))) {
       end = end === offset + 1 ? end + 1 : end - 1;
     }
-    let splitAt = text.lastIndexOf("\n\n", end);
-    if (splitAt <= offset) splitAt = text.lastIndexOf("\n", end);
-    if (splitAt <= offset) splitAt = end;
+
+    let relSplit = text.slice(offset, end + 2).lastIndexOf("\n\n");
+    if (relSplit <= 0) {
+      relSplit = text.slice(offset, end + 1).lastIndexOf("\n");
+    }
+    const splitAt = relSplit > 0 ? offset + relSplit : end;
     chunks.push(text.slice(offset, splitAt));
     offset = splitAt;
   }
