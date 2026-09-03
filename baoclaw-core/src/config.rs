@@ -307,6 +307,11 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
+    /// Serializes tests that mutate process-global env vars: `std::env` is
+    /// process-wide, so parallel test threads would otherwise race and fail
+    /// intermittently.
+    static ENV_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     fn config_in(dir: &std::path::Path) -> PathBuf {
         dir.join("config.json")
     }
@@ -386,6 +391,7 @@ mod tests {
 
     #[test]
     fn test_env_override_model() {
+        let _guard = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         // Save and restore so we don't leak global state to other tests.
         let original = std::env::var("ANTHROPIC_MODEL").ok();
         std::env::set_var("ANTHROPIC_MODEL", "claude-opus-4-20250514");
@@ -400,10 +406,17 @@ mod tests {
 
     #[test]
     fn test_env_override_not_set() {
-        let mut config = BaoclawConfig::default();
+        let _guard = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // Save and restore so we don't leak global state to other tests.
+        let original = std::env::var("ANTHROPIC_MODEL").ok();
         std::env::remove_var("ANTHROPIC_MODEL");
+        let mut config = BaoclawConfig::default();
         apply_env_override(&mut config);
         assert_eq!(config.model, "claude-sonnet-4-20250514");
+        match original {
+            Some(v) => std::env::set_var("ANTHROPIC_MODEL", v),
+            None => std::env::remove_var("ANTHROPIC_MODEL"),
+        }
     }
 
     #[test]
