@@ -489,4 +489,35 @@ mod tests {
         assert_eq!(fb1.model, "claude-opus-4-20250514");
         assert_eq!(fb1.api_type, "anthropic");
     }
+
+    #[test]
+    fn test_invalid_path_is_directory() {
+        let dir = TempDir::new().unwrap();
+        // Path points to a directory, not a file. std::fs::read_to_string will fail with EISDIR/permission error.
+        let path = dir.path();
+
+        let config = load_config_from(path);
+        let mut expected = BaoclawConfig::default();
+        normalize_profiles(&mut expected);
+        sync_profiles_to_legacy(&mut expected);
+        assert_eq!(config, expected);
+    }
+
+    #[test]
+    fn test_invalid_path_unwritable_parent() {
+        let dir = TempDir::new().unwrap();
+        let dummy_file = dir.path().join("dummy_file");
+        std::fs::write(&dummy_file, "content").unwrap();
+
+        // Path is inside dummy_file (which is a file, not a directory)
+        let invalid_path = dummy_file.join("config.json");
+
+        // std::fs::read_to_string will return NotFound or NotADirectory depending on OS,
+        // and attempting to create/save default config will fail.
+        let config = load_config_from(&invalid_path);
+        let mut expected = BaoclawConfig::default();
+        normalize_profiles(&mut expected);
+        sync_profiles_to_legacy(&mut expected);
+        assert_eq!(config, expected);
+    }
 }
