@@ -41,19 +41,7 @@ pub struct TaskManager {
 
 impl TaskManager {
     /// Create a new TaskManager.
-    pub fn new(api_client: Arc<UnifiedClient>, tools: Vec<Arc<dyn Tool>>) -> Self {
-        Self {
-            tasks: Arc::new(RwLock::new(HashMap::new())),
-            abort_handles: Arc::new(RwLock::new(HashMap::new())),
-            api_client,
-            tools,
-            context_window: 1_000_000, // TODO: propagate from engine config
-            auto_compact_threshold_ratio: 0.7, // TODO: propagate from engine config
-        }
-    }
-
-    /// Create a new TaskManager with engine config values propagated.
-    pub fn new_with_config(
+    pub fn new(
         api_client: Arc<UnifiedClient>,
         tools: Vec<Arc<dyn Tool>>,
         context_window: u64,
@@ -67,6 +55,16 @@ impl TaskManager {
             context_window,
             auto_compact_threshold_ratio,
         }
+    }
+
+    /// Create a new TaskManager with engine config values propagated.
+    pub fn new_with_config(
+        api_client: Arc<UnifiedClient>,
+        tools: Vec<Arc<dyn Tool>>,
+        context_window: u64,
+        auto_compact_threshold_ratio: f64,
+    ) -> Self {
+        Self::new(api_client, tools, context_window, auto_compact_threshold_ratio)
     }
 
     /// Create and spawn a background task. Returns the task ID.
@@ -234,7 +232,7 @@ mod tests {
     async fn test_create_task_returns_id() {
         let api_client = make_api_client();
         let tools: Vec<Arc<dyn Tool>> = vec![];
-        let manager = TaskManager::new(api_client, tools);
+        let manager = TaskManager::new(api_client, tools, 200_000, 0.7);
 
         let task_id = manager
             .create_task(
@@ -253,7 +251,7 @@ mod tests {
     async fn test_list_tasks_after_create() {
         let api_client = make_api_client();
         let tools: Vec<Arc<dyn Tool>> = vec![];
-        let manager = TaskManager::new(api_client, tools);
+        let manager = TaskManager::new(api_client, tools, 200_000, 0.7);
 
         let task_id = manager
             .create_task(
@@ -274,7 +272,7 @@ mod tests {
     async fn test_get_task_status() {
         let api_client = make_api_client();
         let tools: Vec<Arc<dyn Tool>> = vec![];
-        let manager = TaskManager::new(api_client, tools);
+        let manager = TaskManager::new(api_client, tools, 200_000, 0.7);
 
         let task_id = manager
             .create_task(
@@ -296,7 +294,7 @@ mod tests {
     async fn test_get_task_status_not_found() {
         let api_client = make_api_client();
         let tools: Vec<Arc<dyn Tool>> = vec![];
-        let manager = TaskManager::new(api_client, tools);
+        let manager = TaskManager::new(api_client, tools, 200_000, 0.7);
 
         let task = manager.get_task_status("nonexistent").await;
         assert!(task.is_none());
@@ -306,7 +304,7 @@ mod tests {
     async fn test_stop_task() {
         let api_client = make_api_client();
         let tools: Vec<Arc<dyn Tool>> = vec![];
-        let manager = TaskManager::new(api_client, tools);
+        let manager = TaskManager::new(api_client, tools, 200_000, 0.7);
 
         let task_id = manager
             .create_task(
@@ -329,7 +327,7 @@ mod tests {
     async fn test_stop_nonexistent_task() {
         let api_client = make_api_client();
         let tools: Vec<Arc<dyn Tool>> = vec![];
-        let manager = TaskManager::new(api_client, tools);
+        let manager = TaskManager::new(api_client, tools, 200_000, 0.7);
 
         let stopped = manager.stop_task("nonexistent").await;
         assert!(!stopped);
@@ -339,7 +337,7 @@ mod tests {
     async fn test_list_empty_tasks() {
         let api_client = make_api_client();
         let tools: Vec<Arc<dyn Tool>> = vec![];
-        let manager = TaskManager::new(api_client, tools);
+        let manager = TaskManager::new(api_client, tools, 200_000, 0.7);
 
         let tasks = manager.list_tasks().await;
         assert!(tasks.is_empty());
