@@ -149,9 +149,21 @@ impl TeamExecutor {
             default_cwd,
             default_model,
             default_policy: crate::engine::team::policy::TeamPolicy::default(),
-            context_window: 1_000_000, // TODO: propagate from engine config
-            auto_compact_threshold_ratio: 0.7, // TODO: propagate from engine config
+            context_window: 1_000_000,
+            auto_compact_threshold_ratio: 0.7,
         }
+    }
+
+    /// Set the context window (in tokens) for sub-agent query engines.
+    pub fn with_context_window(mut self, context_window: u64) -> Self {
+        self.context_window = context_window;
+        self
+    }
+
+    /// Set the auto-compact threshold ratio for sub-agent query engines.
+    pub fn with_auto_compact_threshold_ratio(mut self, ratio: f64) -> Self {
+        self.auto_compact_threshold_ratio = ratio;
+        self
     }
 
     /// Create a TeamExecutor with a custom default policy.
@@ -170,8 +182,8 @@ impl TeamExecutor {
             default_cwd,
             default_model,
             default_policy,
-            context_window: 1_000_000, // TODO: propagate from engine config
-            auto_compact_threshold_ratio: 0.7, // TODO: propagate from engine config
+            context_window: 1_000_000,
+            auto_compact_threshold_ratio: 0.7,
         }
     }
 
@@ -1374,5 +1386,15 @@ mod tests {
         // Team is pending, not running, so abort should return false
         let aborted = executor.abort_team(&team_id).await;
         assert!(!aborted);
+    }
+
+    #[tokio::test]
+    async fn test_executor_context_window_builder() {
+        let executor = make_executor()
+            .with_context_window(500_000)
+            .with_auto_compact_threshold_ratio(0.8);
+
+        assert_eq!(executor.context_window, 500_000);
+        assert!((executor.auto_compact_threshold_ratio - 0.8).abs() < f64::EPSILON);
     }
 }

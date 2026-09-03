@@ -1966,7 +1966,9 @@ async fn handle_shared_client(
                                 shared.engine_tools.clone(),
                                 work_cwd.clone(),
                                 shared.state_manager.get().model.clone(),
-                            );
+                            )
+                            .with_context_window(shared.baoclaw_config.context_window)
+                            .with_auto_compact_threshold_ratio(shared.baoclaw_config.auto_compact_threshold_ratio);
 
                             match executor.create_team(task.clone(), config).await {
                                 Ok(mut team) => {
@@ -2139,7 +2141,9 @@ async fn handle_shared_client(
                                         shared.engine_tools.clone(),
                                         work_cwd.clone(),
                                         shared.state_manager.get().model.clone(),
-                                    );
+                                    )
+                                    .with_context_window(shared.baoclaw_config.context_window)
+                                    .with_auto_compact_threshold_ratio(shared.baoclaw_config.auto_compact_threshold_ratio);
 
                                     // Execute the team
                                     let result = executor.execute(team).await;
