@@ -9,6 +9,7 @@ import * as os from "os";
 import * as net from "net";
 import * as crypto from "crypto";
 import { WebSocketServer, WebSocket } from "ws";
+import { isOriginAllowed } from "./origin.js";
 
 function loadExpectedToken(): string {
   if (process.env.BAOCLAW_WEB_TOKEN) {
@@ -329,6 +330,22 @@ async function main() {
   const wss = new WebSocketServer({ noServer: true });
 
   server.on("upgrade", (req, socket, head) => {
+    if (
+      !isOriginAllowed(
+        req.headers.origin as string | undefined,
+        req.headers.host,
+      )
+    ) {
+      console.warn(
+        `[web-auth] 403 Forbidden WebSocket upgrade from ${req.socket.remoteAddress} (origin: ${req.headers.origin})`,
+      );
+      socket.write(
+        "HTTP/1.1 403 Forbidden\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\nForbidden: Cross-origin WebSocket connections are not allowed.\n",
+      );
+      socket.destroy();
+      return;
+    }
+
     const reqUrl = new URL(
       req.url || "/",
       `http://${req.headers.host || "127.0.0.1"}`,
