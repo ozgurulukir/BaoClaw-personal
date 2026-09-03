@@ -1966,6 +1966,10 @@ async fn handle_shared_client(
                                 shared.engine_tools.clone(),
                                 work_cwd.clone(),
                                 shared.state_manager.get().model.clone(),
+                            )
+                            .with_compact_config(
+                                shared.baoclaw_config.context_window,
+                                shared.baoclaw_config.auto_compact_threshold_ratio,
                             );
 
                             match executor.create_team(task.clone(), config).await {
@@ -2139,6 +2143,10 @@ async fn handle_shared_client(
                                         shared.engine_tools.clone(),
                                         work_cwd.clone(),
                                         shared.state_manager.get().model.clone(),
+                                    )
+                                    .with_compact_config(
+                                        shared.baoclaw_config.context_window,
+                                        shared.baoclaw_config.auto_compact_threshold_ratio,
                                     );
 
                                     // Execute the team

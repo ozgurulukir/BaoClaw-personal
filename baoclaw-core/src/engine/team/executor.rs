@@ -149,8 +149,8 @@ impl TeamExecutor {
             default_cwd,
             default_model,
             default_policy: crate::engine::team::policy::TeamPolicy::default(),
-            context_window: 1_000_000, // TODO: propagate from engine config
-            auto_compact_threshold_ratio: 0.7, // TODO: propagate from engine config
+            context_window: 1_000_000,
+            auto_compact_threshold_ratio: 0.7,
         }
     }
 
@@ -170,11 +170,22 @@ impl TeamExecutor {
             default_cwd,
             default_model,
             default_policy,
-            context_window: 1_000_000, // TODO: propagate from engine config
-            auto_compact_threshold_ratio: 0.7, // TODO: propagate from engine config
+            context_window: 1_000_000,
+            auto_compact_threshold_ratio: 0.7,
         }
     }
 
+
+    /// Set the context window and auto compact threshold ratio for team executions.
+    pub fn with_compact_config(
+        mut self,
+        context_window: u64,
+        auto_compact_threshold_ratio: f64,
+    ) -> Self {
+        self.context_window = context_window;
+        self.auto_compact_threshold_ratio = auto_compact_threshold_ratio;
+        self
+    }
     /// Create a new team with the given task and configuration.
     ///
     /// This creates the team structure but does not start execution.
@@ -1374,5 +1385,12 @@ mod tests {
         // Team is pending, not running, so abort should return false
         let aborted = executor.abort_team(&team_id).await;
         assert!(!aborted);
+    }
+    #[tokio::test]
+    async fn test_with_compact_config() {
+        let executor = make_executor().with_compact_config(200_000, 0.85);
+
+        assert_eq!(executor.context_window, 200_000);
+        assert_eq!(executor.auto_compact_threshold_ratio, 0.85);
     }
 }
