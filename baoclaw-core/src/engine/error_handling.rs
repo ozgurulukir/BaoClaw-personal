@@ -164,14 +164,15 @@ mod tests {
 
     fn test_context() -> ToolContext {
         let (_tx, rx) = tokio::sync::watch::channel(false);
+        let config = crate::config::BaoclawConfig::default();
         ToolContext {
             cwd: PathBuf::from("/tmp"),
             model: "test".to_string(),
             abort_signal: Arc::new(rx),
             file_cache: None,
             tool_result_store: None,
-            context_window: 1_000_000, // TODO: propagate from engine config
-            auto_compact_threshold_ratio: 0.7, // TODO: propagate from engine config
+            context_window: config.context_window,
+            auto_compact_threshold_ratio: config.auto_compact_threshold_ratio,
         }
     }
 
