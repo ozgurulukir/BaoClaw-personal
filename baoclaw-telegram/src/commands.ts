@@ -122,7 +122,7 @@ export const COMMAND_REGISTRY: Record<string, CommandDefinition> = {
   },
   "/task": { description: "后台任务: /task run|list|status|stop" },
   "/history": { description: "查看最近对话: /history [n]" },
-  "/export": { description: "导出对话历史为 Markdown 文件" },
+  "/export": { description: "导出对话历史为 Markdown 或 PDF 文件 (/export pdf)" },
   "/search": { description: "搜索对话历史: /search <关键词>" },
   "/spec": { description: "Spec 管理: /spec list|new|show|status|run|edit" },
 };
