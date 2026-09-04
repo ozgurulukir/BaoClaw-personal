@@ -333,10 +333,12 @@ pub async fn execute_tools(
         return vec![];
     }
 
+    let total = requests.len();
+
     // Build (original_index, request, tool_ref) tuples
-    let mut concurrent: Vec<(usize, &ToolUseRequest, &Arc<dyn Tool>)> = Vec::new();
-    let mut sequential: Vec<(usize, &ToolUseRequest, &Arc<dyn Tool>)> = Vec::new();
-    let mut not_found: Vec<(usize, &ToolUseRequest)> = Vec::new();
+    let mut concurrent: Vec<(usize, &ToolUseRequest, &Arc<dyn Tool>)> = Vec::with_capacity(total);
+    let mut sequential: Vec<(usize, &ToolUseRequest, &Arc<dyn Tool>)> = Vec::with_capacity(total);
+    let mut not_found: Vec<(usize, &ToolUseRequest)> = Vec::with_capacity(total);
 
     for (idx, req) in requests.iter().enumerate() {
         match find_tool(tools, &req.name) {
@@ -353,7 +355,6 @@ pub async fn execute_tools(
         }
     }
 
-    let total = requests.len();
     let mut results: Vec<Option<ToolExecutionResult>> = vec![None; total];
 
     // Execute concurrent-safe tools in parallel
