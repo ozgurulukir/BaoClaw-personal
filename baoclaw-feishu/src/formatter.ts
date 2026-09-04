@@ -22,6 +22,7 @@ const MAX_MSG_LEN = 15000;
  * Main entry: convert LLM output (Markdown + optional HTML) to Feishu-safe Markdown.
  */
 export function formatForFeishu(text: string): string {
+  if (!text) return "";
   let out = text;
 
   // 1. Handle HTML <details>/<summary> blocks → plain text with divider
@@ -160,7 +161,7 @@ function stripHtmlTags(text: string): string {
   out = out.replace(/<br\s*\/?>/gi, "\n");
 
   // Convert <li>...</li> to - ...
-  out = out.replace(/<li>([\s\S]*?)<\/li>/gi, "- $1");
+  out = out.replace(/<li>([\s\S]*?)<\/li>/gi, "- $1\n");
 
   // Convert <ol>/<ul> wrappers — just pass through content
   out = out.replace(/<\/?(?:ol|ul)[^>]*>/gi, "");
