@@ -42,14 +42,7 @@ pub struct TaskManager {
 impl TaskManager {
     /// Create a new TaskManager.
     pub fn new(api_client: Arc<UnifiedClient>, tools: Vec<Arc<dyn Tool>>) -> Self {
-        Self {
-            tasks: Arc::new(RwLock::new(HashMap::new())),
-            abort_handles: Arc::new(RwLock::new(HashMap::new())),
-            api_client,
-            tools,
-            context_window: 1_000_000, // TODO: propagate from engine config
-            auto_compact_threshold_ratio: 0.7, // TODO: propagate from engine config
-        }
+        Self::new_with_config(api_client, tools, 1_000_000, 0.7)
     }
 
     /// Create a new TaskManager with engine config values propagated.
@@ -343,6 +336,16 @@ mod tests {
 
         let tasks = manager.list_tasks().await;
         assert!(tasks.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_new_with_config() {
+        let api_client = make_api_client();
+        let tools: Vec<Arc<dyn Tool>> = vec![];
+        let manager = TaskManager::new_with_config(api_client, tools, 500_000, 0.85);
+
+        assert_eq!(manager.context_window, 500_000);
+        assert!((manager.auto_compact_threshold_ratio - 0.85).abs() < f64::EPSILON);
     }
 
     #[tokio::test]
