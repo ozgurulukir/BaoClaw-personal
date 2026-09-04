@@ -247,6 +247,10 @@ pub struct SubAgentExecutor {
     policy: AgentPolicy,
     /// Agent ID for tracking.
     agent_id: String,
+    /// Context window for sub-agent engine config.
+    context_window: u64,
+    /// Auto-compact threshold ratio for sub-agent engine config.
+    auto_compact_threshold_ratio: f64,
 }
 
 impl SubAgentExecutor {
@@ -266,7 +270,42 @@ impl SubAgentExecutor {
             model,
             policy,
             agent_id,
+            context_window: 200_000,
+            auto_compact_threshold_ratio: 0.7,
         }
+    }
+
+    /// Set the model context window (tokens) for this sub-agent.
+    pub fn with_context_window(mut self, context_window: u64) -> Self {
+        self.context_window = context_window;
+        self
+    }
+
+    /// Set the auto-compact threshold ratio for this sub-agent.
+    pub fn with_auto_compact_threshold_ratio(mut self, ratio: f64) -> Self {
+        self.auto_compact_threshold_ratio = ratio;
+        self
+    }
+
+    /// Set both context window and auto-compact threshold ratio for this sub-agent.
+    pub fn with_context_config(
+        mut self,
+        context_window: u64,
+        auto_compact_threshold_ratio: f64,
+    ) -> Self {
+        self.context_window = context_window;
+        self.auto_compact_threshold_ratio = auto_compact_threshold_ratio;
+        self
+    }
+
+    /// Get the context window (tokens).
+    pub fn context_window(&self) -> u64 {
+        self.context_window
+    }
+
+    /// Get the auto-compact threshold ratio.
+    pub fn auto_compact_threshold_ratio(&self) -> f64 {
+        self.auto_compact_threshold_ratio
     }
 
     /// Execute the sub-agent with the given prompt.
@@ -303,8 +342,8 @@ impl SubAgentExecutor {
             session_id: None,
             fallback_models: vec![],
             max_retries_per_model: 2,
-            context_window: 200_000,
-            auto_compact_threshold_ratio: 0.7,
+            context_window: self.context_window,
+            auto_compact_threshold_ratio: self.auto_compact_threshold_ratio,
             parent_turn_id: None,
             agent_label: Some("sub-agent".to_string()),
             session_memory: None,
@@ -552,5 +591,36 @@ mod tests {
         assert_eq!(usage.input_tokens, 100);
         assert_eq!(usage.output_tokens, 50);
         assert_eq!(usage.total(), 150);
+    }
+
+    fn make_api_client() -> Arc<UnifiedClient> {
+        use crate::api::client::ApiClientConfig;
+        Arc::new(UnifiedClient::new_anthropic(ApiClientConfig {
+            api_key: "test-key".to_string(),
+            base_url: None,
+            max_retries: None,
+            api_path: None,
+        }))
+    }
+
+    #[test]
+    fn test_sub_agent_executor_context_config_builder() {
+        let api_client = make_api_client();
+        let policy = AgentPolicy::from_team_policy(&TeamPolicy::default(), 1);
+        let executor = SubAgentExecutor::new(
+            api_client,
+            vec![],
+            PathBuf::from("/tmp"),
+            "claude-sonnet-4-20250514".to_string(),
+            policy,
+            "sub-1".to_string(),
+        );
+
+        assert_eq!(executor.context_window(), 200_000);
+        assert_eq!(executor.auto_compact_threshold_ratio(), 0.7);
+
+        let configured = executor.with_context_config(100_000, 0.85);
+        assert_eq!(configured.context_window(), 100_000);
+        assert_eq!(configured.auto_compact_threshold_ratio(), 0.85);
     }
 }
