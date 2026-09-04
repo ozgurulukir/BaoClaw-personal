@@ -68,18 +68,49 @@ describe("export module", () => {
   });
 
   describe("defaultExportFilename", () => {
-    test("returns filename matching baoclaw-export pattern", () => {
+    test("returns filename matching baoclaw-export pattern with default or specified format", () => {
       const filename = defaultExportFilename();
       assert.match(filename, /^baoclaw-export-\d{8}-\d{6}\.md$/);
+
+      const pdfFilename = defaultExportFilename("pdf");
+      assert.match(pdfFilename, /^baoclaw-export-\d{8}-\d{6}\.pdf$/);
     });
   });
 
   describe("markdownToPdf", () => {
-    test("encodes markdown string as UTF-8 buffer", () => {
-      const content = "# Test Document";
-      const buffer = markdownToPdf(content);
-      assert.ok(Buffer.isBuffer(buffer));
-      assert.equal(buffer.toString("utf-8"), content);
+    test("converts Markdown content to a valid PDF buffer", async () => {
+      const sampleMd = `# BaoClaw 对话导出
+**会话**: test-session
+**时间**: 2026-03-03 12:00:00
+**消息数**: 2
+
+---
+
+## 用户 (12:00:00)
+请为我生成 PDF。
+
+---
+
+## 助手 (12:00:01)
+好的，正在生成。
+
+### 工具调用
+- ⚡ generate_pdf: { format: "pdf" }
+
+\`\`\`json
+{ "status": "ok" }
+\`\`\`
+
+---
+`;
+
+      const pdfBuffer = await markdownToPdf(sampleMd);
+      assert.ok(Buffer.isBuffer(pdfBuffer));
+      assert.ok(pdfBuffer.length > 0);
+
+      // Verify PDF header magic bytes
+      const pdfHeader = pdfBuffer.subarray(0, 5).toString("ascii");
+      assert.equal(pdfHeader, "%PDF-");
     });
   });
 });

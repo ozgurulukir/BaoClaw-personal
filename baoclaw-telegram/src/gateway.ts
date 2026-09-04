@@ -28,7 +28,7 @@ import {
   buildDocumentBlock,
   buildImageBlock,
 } from "./docParser.js";
-import { formatTranscriptToMarkdown, defaultExportFilename } from "./export.js";
+import { formatTranscriptToMarkdown, defaultExportFilename, markdownToPdf } from "./export.js";
 import {
   SessionState,
   InitializeResult,
@@ -1095,7 +1095,7 @@ async function main() {
     }
   }
 
-  async function handleExport(chatId: number): Promise<string> {
+  async function handleExport(chatId: number, args?: string): Promise<string> {
     if (!ipcClient.connected) return formatDisconnected();
     try {
       const result = await ipcClient.request<{
@@ -1115,12 +1115,23 @@ async function main() {
       const markdown = formatTranscriptToMarkdown(entries, {
         sessionId: sessionState.sessionId,
       });
-      const filename = defaultExportFilename();
+
+      const isPdf = args?.trim().toLowerCase() === "pdf";
+      const format = isPdf ? "pdf" : "markdown";
+      const filename = defaultExportFilename(format);
       const filepath = path.join(os.tmpdir(), filename);
-      fs.writeFileSync(filepath, markdown, "utf-8");
+
+      if (isPdf) {
+        const pdfBuf = await markdownToPdf(markdown);
+        fs.writeFileSync(filepath, pdfBuf);
+      } else {
+        fs.writeFileSync(filepath, markdown, "utf-8");
+      }
 
       try {
-        await sendDocument(chatId, filepath, { caption: "📄 对话导出" });
+        await sendDocument(chatId, filepath, {
+          caption: isPdf ? "📄 对话导出 (PDF)" : "📄 对话导出",
+        });
       } finally {
         try {
           fs.unlinkSync(filepath);
@@ -1413,7 +1424,7 @@ async function main() {
     "/projects": (args) => handleProjects(args),
     "/task": (args) => handleTask(args),
     "/history": (args) => handleHistory(args),
-    "/export": async (_args, chatId) => handleExport(chatId),
+    "/export": async (args, chatId) => handleExport(chatId, args),
     "/search": (args) => handleSearch(args),
     "/spec": (args) => handleSpec(args),
   };
