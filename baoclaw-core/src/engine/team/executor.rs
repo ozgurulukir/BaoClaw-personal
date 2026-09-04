@@ -166,6 +166,17 @@ impl TeamExecutor {
         self
     }
 
+    /// Set both context window and auto-compact threshold ratio for sub-agents.
+    pub fn with_context_config(
+        mut self,
+        context_window: u64,
+        auto_compact_threshold_ratio: f64,
+    ) -> Self {
+        self.context_window = context_window;
+        self.auto_compact_threshold_ratio = auto_compact_threshold_ratio;
+        self
+    }
+
     /// Get the configured context window.
     pub fn context_window(&self) -> u64 {
         self.context_window
@@ -1406,5 +1417,23 @@ mod tests {
 
         assert_eq!(executor.context_window(), 200_000);
         assert!((executor.auto_compact_threshold_ratio() - 0.85).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_team_executor_context_config_builder() {
+        let executor = make_executor();
+        assert_eq!(executor.context_window(), 1_000_000);
+        assert_eq!(executor.auto_compact_threshold_ratio(), 0.7);
+
+        let custom = executor
+            .with_context_window(128_000)
+            .with_auto_compact_threshold_ratio(0.8);
+
+        assert_eq!(custom.context_window(), 128_000);
+        assert_eq!(custom.auto_compact_threshold_ratio(), 0.8);
+
+        let configured = custom.with_context_config(500_000, 0.65);
+        assert_eq!(configured.context_window(), 500_000);
+        assert_eq!(configured.auto_compact_threshold_ratio(), 0.65);
     }
 }
