@@ -727,4 +727,23 @@ mod tests {
         assert_eq!(client.api_key, "test-key");
         assert_eq!(client.base_url, "https://api.openai.com");
     }
+
+    #[test]
+    #[test]
+    fn content_chunk_without_role_translates_to_text_delta() {
+        let mut stream = OpenAiSseStream::new(futures::stream::empty());
+        let data = r#"{"choices":[{"delta":{"content":"chunk 0 "},"finish_reason":null,"index":0}],"created":0,"id":"mock","model":"mock","object":"chat.completion.chunk"}"#;
+        let events = stream.translate_chunk(data);
+        assert_eq!(events.len(), 3);
+        assert!(matches!(
+            &events[1],
+            Ok(ApiStreamEvent::ContentBlockStart { content_block, .. })
+                if content_block["type"] == "text"
+        ));
+        assert!(matches!(
+            &events[2],
+            Ok(ApiStreamEvent::ContentBlockDelta { delta, .. })
+                if delta["text"] == "chunk 0 "
+        ));
+    }
 }
