@@ -552,7 +552,9 @@ impl SessionRegistry {
         };
 
         let results = futures::future::join_all(
-            session_ids.iter().map(|sid| async move { (sid, self.persist_session(sid).await) }),
+            session_ids
+                .iter()
+                .map(|sid| async move { (sid, self.persist_session(sid).await) }),
         )
         .await;
 
@@ -614,6 +616,7 @@ mod tests {
             file_cache: None,
             tool_result_store: None,
             hook_manager: None,
+            permission: None,
         })
     }
 

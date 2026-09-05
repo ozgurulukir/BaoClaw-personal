@@ -28,6 +28,7 @@ use ipc::protocol::JsonRpcMessage;
 use ipc::router::{parse_client_method, ClientMethod};
 use ipc::server::{IpcConnection, IpcError, IpcServer};
 use permissions::gate::{PermissionDecision, PermissionGate};
+use permissions::PermissionBridge;
 use state::manager::{CoreState, StateManager};
 use tools::builtins::{
     AgentTool, BashTool, FileEditTool, FileReadTool, FileWriteTool, ImageEditTool, ImageGenTool,
@@ -270,6 +271,11 @@ fn build_shared_engine(
             engine::tool_result_store::ToolResultStore::for_session(&session_id),
         )),
         hook_manager: Some(Arc::clone(&shared.hook_manager)),
+        permission: Some(PermissionBridge {
+            manager: Arc::clone(&shared.permission_manager),
+            gate: shared.permission_gate.clone(),
+            ask_timeout: permissions::DEFAULT_ASK_TIMEOUT,
+        }),
     })
 }
 
@@ -4251,6 +4257,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     file_cache: Some(file_cache),
                     tool_result_store,
                     hook_manager: Some(hook_manager),
+                    // Headless cron jobs must never hang on an interactive
+                    // permission prompt — mutating tools fail closed instead.
+                    permission: None,
                 });
 
                 let mut rx = engine.submit_message(prompt).await;

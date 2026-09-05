@@ -19,7 +19,9 @@ use baoclaw_core::permissions::gate::PermissionGate;
 use baoclaw_core::permissions::manager::{
     PermissionManager, PermissionMode, PermissionRule, ToolPermissionContext,
 };
-use baoclaw_core::tools::executor::{execute_tool_with_permission, ToolUseRequest};
+use baoclaw_core::tools::executor::{
+    execute_tool_with_permission, PermissionChannels, ToolUseRequest,
+};
 use baoclaw_core::tools::trait_def::*;
 
 /// A mock tool that tracks whether call() was invoked.
@@ -160,13 +162,18 @@ proptest! {
                 input,
             };
 
+            let bridge = baoclaw_core::permissions::PermissionBridge {
+                manager: Arc::new(tokio::sync::RwLock::new(permission_manager)),
+                gate: permission_gate,
+                ask_timeout: baoclaw_core::permissions::DEFAULT_ASK_TIMEOUT,
+            };
+            let permission_channels = PermissionChannels::new(bridge, event_tx);
+
             let result = execute_tool_with_permission(
                 &tool,
                 &request,
                 &tool_context,
-                &permission_manager,
-                &permission_gate,
-                &event_tx,
+                &permission_channels,
                 &progress,
             )
             .await;

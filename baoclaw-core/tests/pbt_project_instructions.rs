@@ -76,6 +76,7 @@ proptest! {
             adaptive_compact: baoclaw_core::engine::query_engine::AdaptiveCompactTracker::new(),
             tool_health: baoclaw_core::engine::tool_health::ToolHealthTracker::new(),
             hook_manager: None,
+            permission: None,
         };
 
         let system = build_system_prompt(&config);

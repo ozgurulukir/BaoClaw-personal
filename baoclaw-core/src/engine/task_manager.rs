@@ -64,7 +64,12 @@ impl TaskManager {
         context_window: u64,
         auto_compact_threshold_ratio: f64,
     ) -> Self {
-        Self::new(api_client, tools, context_window, auto_compact_threshold_ratio)
+        Self::new(
+            api_client,
+            tools,
+            context_window,
+            auto_compact_threshold_ratio,
+        )
     }
 
     /// Create and spawn a background task. Returns the task ID.
@@ -132,6 +137,7 @@ impl TaskManager {
                 file_cache: None,
                 tool_result_store: None,
                 hook_manager: None,
+                permission: None,
             };
 
             let mut engine = QueryEngine::new(config);

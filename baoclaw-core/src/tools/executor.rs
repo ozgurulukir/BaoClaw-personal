@@ -1,12 +1,11 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::sync::Arc;
-use std::time::Duration;
 
 use super::trait_def::*;
 use crate::engine::query_engine::EngineEvent;
-use crate::permissions::gate::{PermissionDecision, PermissionGate};
-use crate::permissions::manager::{PermissionManager, PermissionResult};
+use crate::permissions::gate::PermissionDecision;
+use crate::permissions::manager::PermissionResult;
 
 /// A ProgressSender that forwards progress events through an mpsc channel as EngineEvents.
 pub struct ChannelProgressSender {
@@ -29,6 +28,24 @@ impl ProgressSender for ChannelProgressSender {
                 data,
             })
             .await;
+    }
+}
+
+/// Working handle for interactive permission checks inside the executor: the
+/// engine's PermissionBridge joined with the event channel of the turn
+/// currently being executed.
+#[derive(Clone)]
+pub struct PermissionChannels {
+    pub bridge: crate::permissions::PermissionBridge,
+    pub event_tx: tokio::sync::mpsc::Sender<EngineEvent>,
+}
+
+impl PermissionChannels {
+    pub fn new(
+        bridge: crate::permissions::PermissionBridge,
+        event_tx: tokio::sync::mpsc::Sender<EngineEvent>,
+    ) -> Self {
+        Self { bridge, event_tx }
     }
 }
 
@@ -103,28 +120,7 @@ pub async fn execute_tool(
     }
 
     // Step 3: Call the tool with abort awareness
-    // Wrap tool call with a timeout and abort check
-    let abort_signal = context.abort_signal.clone();
-    let call_result = tokio::select! {
-        r = tool.call(request.input.clone(), context, progress) => r,
-        _ = async {
-            let mut rx = abort_signal.as_ref().clone();
-            // Only abort if the value actually changed to true.
-            // A dropped sender with value=false is not an abort.
-            loop {
-                if *rx.borrow() {
-                    break; // abort signal received
-                }
-                if rx.changed().await.is_err() {
-                    // Sender dropped without setting to true — don't abort
-                    // Wait indefinitely (this branch should never resolve)
-                    std::future::pending::<()>().await;
-                }
-            }
-        } => {
-            Err(ToolError::Aborted)
-        }
-    };
+    let call_result = call_tool_with_abort(tool, request, context, progress).await;
     match call_result {
         Ok(result) => {
             let max_size = tool.max_result_size_chars();
@@ -145,17 +141,49 @@ pub async fn execute_tool(
     }
 }
 
+/// Call a tool, cancelling with `ToolError::Aborted` as soon as the context's
+/// abort signal fires. Shared by the direct and permission-gated paths so
+/// abort behaves identically mid-tool regardless of how the call was approved.
+async fn call_tool_with_abort(
+    tool: &dyn Tool,
+    request: &ToolUseRequest,
+    context: &ToolContext,
+    progress: &dyn ProgressSender,
+) -> Result<ToolResult, ToolError> {
+    let abort_signal = context.abort_signal.clone();
+    tokio::select! {
+        r = tool.call(request.input.clone(), context, progress) => r,
+        _ = async {
+            let mut rx = abort_signal.as_ref().clone();
+            // Only abort if the value actually changed to true.
+            // A dropped sender with value=false is not an abort.
+            loop {
+                if *rx.borrow() {
+                    break; // abort signal received
+                }
+                if rx.changed().await.is_err() {
+                    // Sender dropped without setting to true — don't abort
+                    // Wait indefinitely (this branch should never resolve)
+                    std::future::pending::<()>().await;
+                }
+            }
+        } => {
+            Err(ToolError::Aborted)
+        }
+    }
+}
+
 /// Execute a single tool with permission checking via PermissionManager and PermissionGate.
 ///
-/// Flow: validate → check PermissionManager → Allow/Deny/Ask branch → call tool
-/// Ask branch: sends PermissionRequest event via IPC, waits on PermissionGate with 5min timeout.
+/// Flow: validate → check PermissionManager → Allow/Deny/Ask branch → call tool.
+/// Ask branch: read-only tools proceed without prompting (same as the direct
+/// path); mutating tools send a PermissionRequest event and wait on the gate
+/// for the user's decision, auto-denying after `ask_timeout`.
 pub async fn execute_tool_with_permission(
     tool: &dyn Tool,
     request: &ToolUseRequest,
     context: &ToolContext,
-    permission_manager: &PermissionManager,
-    permission_gate: &PermissionGate,
-    event_tx: &tokio::sync::mpsc::Sender<EngineEvent>,
+    permission: &PermissionChannels,
     progress: &dyn ProgressSender,
 ) -> ToolExecutionResult {
     let tool_name = tool.name().to_string();
@@ -172,9 +200,14 @@ pub async fn execute_tool_with_permission(
         };
     }
 
-    // Step 2: Check permissions via PermissionManager
+    // Step 2: Check permissions via PermissionManager.
+    // The read guard is scoped so it is never held across the await below —
+    // the permission/* IPC handlers need the manager's write lock meanwhile.
     let input_description = serde_json::to_string(&request.input).ok();
-    let perm_result = permission_manager.check_permission(&tool_name, input_description.as_deref());
+    let perm_result = {
+        let manager = permission.bridge.manager.read().await;
+        manager.check_permission(&tool_name, input_description.as_deref())
+    };
 
     match perm_result {
         PermissionResult::Allow => {
@@ -188,8 +221,20 @@ pub async fn execute_tool_with_permission(
             is_error: true,
         },
         PermissionResult::Ask { .. } => {
-            // Send PermissionRequest event to CLI
-            let _ = event_tx
+            // Read-only tools are never worth a prompt: the manager defaults
+            // to Ask for everything, and prompting for reads would regress
+            // the daemon UX (the direct path lets read-only Ask through too).
+            if tool.is_read_only(&request.input) {
+                eprintln!(
+                    "[permissions] WARN: Ask permission on read-only tool '{}'; proceeding without confirmation",
+                    tool_name
+                );
+                return call_tool_and_wrap(tool, request, context, progress).await;
+            }
+
+            // Send PermissionRequest event to clients
+            let _ = permission
+                .event_tx
                 .send(EngineEvent::PermissionRequest {
                     tool_name: tool_name.clone(),
                     input: request.input.clone(),
@@ -197,9 +242,9 @@ pub async fn execute_tool_with_permission(
                 })
                 .await;
 
-            // Wait for user response with 5 minute timeout
-            let rx = permission_gate.request(&tool_use_id);
-            let decision = match tokio::time::timeout(Duration::from_secs(300), rx).await {
+            // Wait for user response, auto-denying after the timeout
+            let rx = permission.bridge.gate.request(&tool_use_id);
+            let decision = match tokio::time::timeout(permission.bridge.ask_timeout, rx).await {
                 Ok(Ok(decision)) => decision,
                 Ok(Err(_)) => PermissionDecision::Deny, // channel closed
                 Err(_) => PermissionDecision::Deny,     // timeout → auto-deny
@@ -210,7 +255,12 @@ pub async fn execute_tool_with_permission(
                     call_tool_and_wrap(tool, request, context, progress).await
                 }
                 PermissionDecision::AllowAlways { rule } => {
-                    permission_manager.add_allow_always_rule("user", &tool_name, rule);
+                    permission
+                        .bridge
+                        .manager
+                        .write()
+                        .await
+                        .add_allow_always_rule("user", &tool_name, rule);
                     call_tool_and_wrap(tool, request, context, progress).await
                 }
                 PermissionDecision::Deny => ToolExecutionResult {
@@ -225,6 +275,7 @@ pub async fn execute_tool_with_permission(
 }
 
 /// Helper: call a tool and wrap the result into ToolExecutionResult.
+/// Abort-aware mid-call, matching the direct path's behavior.
 async fn call_tool_and_wrap(
     tool: &dyn Tool,
     request: &ToolUseRequest,
@@ -244,7 +295,7 @@ async fn call_tool_and_wrap(
         };
     }
 
-    let call_result = tool.call(request.input.clone(), context, progress).await;
+    let call_result = call_tool_with_abort(tool, request, context, progress).await;
     match call_result {
         Ok(result) => {
             let max_size = tool.max_result_size_chars();
@@ -321,6 +372,21 @@ fn maybe_persist_or_truncate(
     ))
 }
 
+/// Execute a single tool via the gated path when permission channels are
+/// available, otherwise the direct fail-closed path.
+async fn dispatch_tool(
+    tool: &dyn Tool,
+    request: &ToolUseRequest,
+    context: &ToolContext,
+    progress: &dyn ProgressSender,
+    permission: Option<&PermissionChannels>,
+) -> ToolExecutionResult {
+    match permission {
+        Some(p) => execute_tool_with_permission(tool, request, context, p, progress).await,
+        None => execute_tool(tool, request, context, progress).await,
+    }
+}
+
 /// Execute multiple tools, running concurrency-safe tools in parallel
 /// and non-concurrency-safe tools sequentially.
 pub async fn execute_tools(
@@ -328,6 +394,7 @@ pub async fn execute_tools(
     requests: &[ToolUseRequest],
     context: &ToolContext,
     progress: &dyn ProgressSender,
+    permission: Option<&PermissionChannels>,
 ) -> Vec<ToolExecutionResult> {
     if requests.is_empty() {
         return vec![];
@@ -361,7 +428,7 @@ pub async fn execute_tools(
     if !concurrent.is_empty() {
         let futures: Vec<_> = concurrent
             .iter()
-            .map(|(_, req, tool)| execute_tool(tool.as_ref(), req, context, progress))
+            .map(|(_, req, tool)| dispatch_tool(tool.as_ref(), req, context, progress, permission))
             .collect();
         let concurrent_results = futures::future::join_all(futures).await;
         for ((idx, _, _), result) in concurrent.iter().zip(concurrent_results) {
@@ -371,7 +438,7 @@ pub async fn execute_tools(
 
     // Execute sequential tools one by one
     for (idx, req, tool) in &sequential {
-        let result = execute_tool(tool.as_ref(), req, context, progress).await;
+        let result = dispatch_tool(tool.as_ref(), req, context, progress, permission).await;
         results[*idx] = Some(result);
     }
 
@@ -405,9 +472,14 @@ pub fn find_tool<'a>(tools: &'a [Arc<dyn Tool>], name: &str) -> Option<&'a Arc<d
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::permissions::gate::PermissionGate;
+    use crate::permissions::manager::{
+        PermissionManager, PermissionMode, PermissionRule, ToolPermissionContext,
+    };
     use serde_json::json;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Duration;
 
     // --- Mock implementations ---
 
@@ -772,7 +844,7 @@ mod tests {
         let ctx = make_context();
         let progress = MockProgressSender;
 
-        let results = execute_tools(&tools, &requests, &ctx, &progress).await;
+        let results = execute_tools(&tools, &requests, &ctx, &progress, None).await;
         assert!(results.is_empty());
     }
 
@@ -783,7 +855,7 @@ mod tests {
         let ctx = make_context();
         let progress = MockProgressSender;
 
-        let results = execute_tools(&tools, &requests, &ctx, &progress).await;
+        let results = execute_tools(&tools, &requests, &ctx, &progress, None).await;
         assert_eq!(results.len(), 1);
         assert!(results[0].is_error);
         assert!(results[0].output.as_str().unwrap().contains("not found"));
@@ -804,7 +876,7 @@ mod tests {
         let ctx = make_context();
         let progress = MockProgressSender;
 
-        let results = execute_tools(&tools, &requests, &ctx, &progress).await;
+        let results = execute_tools(&tools, &requests, &ctx, &progress, None).await;
 
         assert_eq!(results.len(), 3);
         assert_eq!(results[0].tool_use_id, "req-1");
@@ -828,7 +900,7 @@ mod tests {
         let ctx = make_context();
         let progress = MockProgressSender;
 
-        let results = execute_tools(&tools, &requests, &ctx, &progress).await;
+        let results = execute_tools(&tools, &requests, &ctx, &progress, None).await;
 
         assert_eq!(results.len(), 2);
         assert!(!results[0].is_error);
@@ -850,5 +922,253 @@ mod tests {
         let result = truncate_if_needed(data, 20);
         let s = result.as_str().unwrap();
         assert!(s.contains("[Result truncated"));
+    }
+
+    // ── Interactive permission gate (execute_tool_with_permission) ──
+
+    fn make_manager_ctx() -> ToolPermissionContext {
+        ToolPermissionContext {
+            mode: PermissionMode::Default,
+            additional_working_directories: std::collections::HashMap::new(),
+            always_allow_rules: std::collections::HashMap::new(),
+            always_deny_rules: std::collections::HashMap::new(),
+            always_ask_rules: std::collections::HashMap::new(),
+            is_bypass_permissions_mode_available: false,
+        }
+    }
+
+    fn make_channels(
+        manager: PermissionManager,
+        gate: PermissionGate,
+        ask_timeout: Duration,
+    ) -> (PermissionChannels, tokio::sync::mpsc::Receiver<EngineEvent>) {
+        let (event_tx, event_rx) = tokio::sync::mpsc::channel::<EngineEvent>(16);
+        let bridge = crate::permissions::PermissionBridge {
+            manager: Arc::new(tokio::sync::RwLock::new(manager)),
+            gate,
+            ask_timeout,
+        };
+        (PermissionChannels::new(bridge, event_tx), event_rx)
+    }
+
+    #[tokio::test]
+    async fn test_gated_ask_allow_executes_tool() {
+        let tool = MockTool::new("BashTool");
+        let ctx = make_context();
+        let progress = MockProgressSender;
+        let request = make_request("req-gate-1", "BashTool");
+        let (channels, mut event_rx) = make_channels(
+            PermissionManager::new(make_manager_ctx()),
+            PermissionGate::new(),
+            Duration::from_secs(5),
+        );
+
+        let gate = channels.bridge.gate.clone();
+        let responder = tokio::spawn(async move {
+            let event = tokio::time::timeout(Duration::from_secs(2), event_rx.recv())
+                .await
+                .expect("timed out waiting for PermissionRequest")
+                .expect("event channel closed");
+            match event {
+                EngineEvent::PermissionRequest { tool_use_id, .. } => {
+                    gate.respond(&tool_use_id, PermissionDecision::Allow);
+                }
+                other => panic!("unexpected event: {other:?}"),
+            }
+        });
+
+        let result =
+            execute_tool_with_permission(&tool, &request, &ctx, &channels, &progress).await;
+        responder.await.unwrap();
+
+        assert!(!result.is_error);
+        assert_eq!(tool.call_count.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn test_gated_ask_deny_blocks_tool() {
+        let tool = MockTool::new("BashTool");
+        let ctx = make_context();
+        let progress = MockProgressSender;
+        let request = make_request("req-gate-2", "BashTool");
+        let (channels, mut event_rx) = make_channels(
+            PermissionManager::new(make_manager_ctx()),
+            PermissionGate::new(),
+            Duration::from_secs(5),
+        );
+
+        let gate = channels.bridge.gate.clone();
+        let responder = tokio::spawn(async move {
+            let event = tokio::time::timeout(Duration::from_secs(2), event_rx.recv())
+                .await
+                .expect("timed out waiting for PermissionRequest")
+                .expect("event channel closed");
+            if let EngineEvent::PermissionRequest { tool_use_id, .. } = event {
+                gate.respond(&tool_use_id, PermissionDecision::Deny);
+            }
+        });
+
+        let result =
+            execute_tool_with_permission(&tool, &request, &ctx, &channels, &progress).await;
+        responder.await.unwrap();
+
+        assert!(result.is_error);
+        assert_eq!(result.output.as_str().unwrap(), "Permission denied by user");
+        assert_eq!(tool.call_count.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn test_gated_ask_timeout_auto_denies() {
+        let tool = MockTool::new("BashTool");
+        let ctx = make_context();
+        let progress = MockProgressSender;
+        let request = make_request("req-gate-3", "BashTool");
+        let (channels, _event_rx) = make_channels(
+            PermissionManager::new(make_manager_ctx()),
+            PermissionGate::new(),
+            Duration::from_millis(50),
+        );
+
+        let result =
+            execute_tool_with_permission(&tool, &request, &ctx, &channels, &progress).await;
+
+        assert!(result.is_error);
+        assert_eq!(result.output.as_str().unwrap(), "Permission denied by user");
+        assert_eq!(tool.call_count.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn test_gated_allow_always_persists_rule() {
+        let tool = MockTool::new("Bash");
+        let ctx = make_context();
+        let progress = MockProgressSender;
+        let request = make_request("req-gate-4", "Bash");
+        let (channels, mut event_rx) = make_channels(
+            PermissionManager::new(make_manager_ctx()),
+            PermissionGate::new(),
+            Duration::from_secs(5),
+        );
+
+        let gate = channels.bridge.gate.clone();
+        let responder = tokio::spawn(async move {
+            let event = tokio::time::timeout(Duration::from_secs(2), event_rx.recv())
+                .await
+                .expect("timed out waiting for PermissionRequest")
+                .expect("event channel closed");
+            if let EngineEvent::PermissionRequest { tool_use_id, .. } = event {
+                gate.respond(
+                    &tool_use_id,
+                    PermissionDecision::AllowAlways {
+                        rule: Some("*".to_string()),
+                    },
+                );
+            }
+        });
+
+        let result =
+            execute_tool_with_permission(&tool, &request, &ctx, &channels, &progress).await;
+        responder.await.unwrap();
+        assert!(!result.is_error);
+
+        // The AllowAlways rule must make the next check skip the prompt.
+        let manager = channels.bridge.manager.read().await;
+        assert!(matches!(
+            manager.check_permission("Bash", Some("anything")),
+            PermissionResult::Allow
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_gated_manager_deny_never_prompts() {
+        let mut deny_rules = std::collections::HashMap::new();
+        deny_rules.insert(
+            "system".to_string(),
+            vec![PermissionRule {
+                tool_name: "BashTool".to_string(),
+                rule_content: None,
+            }],
+        );
+        let ctx = ToolPermissionContext {
+            always_deny_rules: deny_rules,
+            ..make_manager_ctx()
+        };
+
+        let tool = MockTool::new("BashTool");
+        let tool_ctx = make_context();
+        let progress = MockProgressSender;
+        let request = make_request("req-gate-5", "BashTool");
+        let (channels, mut event_rx) = make_channels(
+            PermissionManager::new(ctx),
+            PermissionGate::new(),
+            Duration::from_secs(5),
+        );
+
+        let result =
+            execute_tool_with_permission(&tool, &request, &tool_ctx, &channels, &progress).await;
+
+        assert!(result.is_error);
+        assert!(result
+            .output
+            .as_str()
+            .unwrap()
+            .contains("Permission denied"));
+        assert_eq!(tool.call_count.load(Ordering::SeqCst), 0);
+        // No prompt may be emitted for a rule-based denial.
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), event_rx.recv())
+                .await
+                .is_err(),
+            "no PermissionRequest event should be sent for Deny"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_gated_read_only_ask_does_not_prompt() {
+        let tool = MockTool::new("FileReadTool").with_read_only(true);
+        let ctx = make_context();
+        let progress = MockProgressSender;
+        let request = make_request("req-gate-6", "FileReadTool");
+        let (channels, mut event_rx) = make_channels(
+            PermissionManager::new(make_manager_ctx()),
+            PermissionGate::new(),
+            Duration::from_millis(50),
+        );
+
+        let result =
+            execute_tool_with_permission(&tool, &request, &ctx, &channels, &progress).await;
+
+        assert!(!result.is_error);
+        assert_eq!(tool.call_count.load(Ordering::SeqCst), 1);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), event_rx.recv())
+                .await
+                .is_err(),
+            "read-only tools must not prompt"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_execute_tools_none_fails_closed_for_mutating_ask() {
+        let tool = Arc::new(MockTool::new("BashTool").with_permission(
+            ToolPermissionCheckResult::Ask {
+                message: "BashTool requires user confirmation".to_string(),
+                updated_input: Value::Null,
+            },
+        ));
+        let tools: Vec<Arc<dyn Tool>> = vec![tool.clone()];
+        let ctx = make_context();
+        let progress = MockProgressSender;
+        let requests = vec![make_request("req-gate-7", "BashTool")];
+
+        let results = execute_tools(&tools, &requests, &ctx, &progress, None).await;
+
+        assert_eq!(results.len(), 1);
+        assert!(results[0].is_error);
+        assert!(results[0]
+            .output
+            .as_str()
+            .unwrap()
+            .contains("interactive permission channel not available"));
+        assert_eq!(tool.call_count.load(Ordering::SeqCst), 0);
     }
 }

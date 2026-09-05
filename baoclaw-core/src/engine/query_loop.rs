@@ -360,6 +360,7 @@ pub async fn run_query_loop(
             adaptive_compact: AdaptiveCompactTracker::new(),
             tool_health: crate::engine::tool_health::ToolHealthTracker::new(),
             hook_manager: config.hook_manager.clone(),
+            permission: config.permission.clone(),
             context_window: config.context_window,
             auto_compact_threshold_ratio: config.auto_compact_threshold_ratio,
         };
@@ -1160,7 +1161,24 @@ pub async fn run_query_loop(
             auto_compact_threshold_ratio: config.auto_compact_threshold_ratio,
         };
         let progress = NoopProgressSender;
-        let tool_results = execute_tools(&config.tools, &tool_uses, &tool_context, &progress).await;
+        // With a permission bridge, mutating tools prompt the user instead of
+        // failing closed; the PermissionRequest event rides the same `tx`.
+        let permission_channels =
+            config
+                .permission
+                .as_ref()
+                .map(|p| crate::tools::executor::PermissionChannels {
+                    bridge: p.clone(),
+                    event_tx: tx.clone(),
+                });
+        let tool_results = execute_tools(
+            &config.tools,
+            &tool_uses,
+            &tool_context,
+            &progress,
+            permission_channels.as_ref(),
+        )
+        .await;
 
         // Emit ToolResult events
         for result in &tool_results {

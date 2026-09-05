@@ -149,7 +149,7 @@ impl TeamExecutor {
             default_cwd,
             default_model,
             default_policy: crate::engine::team::policy::TeamPolicy::default(),
-            context_window: 1_000_000, // Default context window
+            context_window: 1_000_000,         // Default context window
             auto_compact_threshold_ratio: 0.7, // Default auto-compact threshold ratio
         }
     }
@@ -203,7 +203,7 @@ impl TeamExecutor {
             default_cwd,
             default_model,
             default_policy,
-            context_window: 1_000_000, // Default context window
+            context_window: 1_000_000,         // Default context window
             auto_compact_threshold_ratio: 0.7, // Default auto-compact threshold ratio
         }
     }
@@ -953,6 +953,7 @@ impl TeamExecutor {
             file_cache: None,
             tool_result_store: None,
             hook_manager: None,
+            permission: None,
         };
 
         let mut engine = QueryEngine::new(config);

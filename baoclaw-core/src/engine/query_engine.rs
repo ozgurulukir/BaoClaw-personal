@@ -57,6 +57,10 @@ pub struct QueryEngineConfig {
     pub tool_result_store: Option<Arc<crate::engine::tool_result_store::ToolResultStore>>,
     /// Hook manager for triggering actions on events.
     pub hook_manager: Option<Arc<HookManager>>,
+    /// Interactive permission gate + manager. When present, mutating tools
+    /// prompt the user instead of failing closed; None keeps the direct
+    /// fail-closed behavior (cron, sub-agents, tests).
+    pub permission: Option<crate::permissions::PermissionBridge>,
 }
 
 /// Thinking mode configuration for the LLM.
@@ -1073,6 +1077,7 @@ impl QueryEngine {
             adaptive_compact: AdaptiveCompactTracker::new(),
             tool_health: crate::engine::tool_health::ToolHealthTracker::new(),
             hook_manager: self.hook_manager.clone(),
+            permission: self.config.permission.clone(),
             context_window: self.config.context_window,
             auto_compact_threshold_ratio: self.config.auto_compact_threshold_ratio,
         };
@@ -1147,6 +1152,8 @@ pub struct QueryLoopConfig {
     pub tool_health: crate::engine::tool_health::ToolHealthTracker,
     /// Hook manager for triggering actions on events.
     pub hook_manager: Option<Arc<HookManager>>,
+    /// Interactive permission gate + manager (cloned from the engine config).
+    pub permission: Option<crate::permissions::PermissionBridge>,
     /// Model context window (tokens) — propagated to ToolContext for sub-agents.
     pub context_window: u64,
     /// Auto-compact threshold ratio — propagated to ToolContext for sub-agents.
@@ -1270,6 +1277,7 @@ mod tests {
             file_cache: None,
             tool_result_store: None,
             hook_manager: None,
+            permission: None,
         }
     }
 
@@ -1752,6 +1760,7 @@ mod tests {
             adaptive_compact: AdaptiveCompactTracker::new(),
             tool_health: crate::engine::tool_health::ToolHealthTracker::new(),
             hook_manager: None,
+            permission: None,
             context_window: 200_000,
             auto_compact_threshold_ratio: 0.7,
         };
@@ -1806,6 +1815,7 @@ mod tests {
             adaptive_compact: AdaptiveCompactTracker::new(),
             tool_health: crate::engine::tool_health::ToolHealthTracker::new(),
             hook_manager: None,
+            permission: None,
             context_window: 200_000,
             auto_compact_threshold_ratio: 0.7,
         };
@@ -1857,6 +1867,7 @@ mod tests {
             adaptive_compact: AdaptiveCompactTracker::new(),
             tool_health: crate::engine::tool_health::ToolHealthTracker::new(),
             hook_manager: None,
+            permission: None,
             context_window: 200_000,
             auto_compact_threshold_ratio: 0.7,
         };
@@ -1999,6 +2010,7 @@ mod tests {
             adaptive_compact: AdaptiveCompactTracker::new(),
             tool_health: crate::engine::tool_health::ToolHealthTracker::new(),
             hook_manager: None,
+            permission: None,
             context_window: 200_000,
             auto_compact_threshold_ratio: 0.7,
         };
@@ -2050,6 +2062,7 @@ mod tests {
             adaptive_compact: AdaptiveCompactTracker::new(),
             tool_health: crate::engine::tool_health::ToolHealthTracker::new(),
             hook_manager: None,
+            permission: None,
             context_window: 200_000,
             auto_compact_threshold_ratio: 0.7,
         };
@@ -2254,6 +2267,7 @@ mod tests {
             adaptive_compact: AdaptiveCompactTracker::new(),
             tool_health: crate::engine::tool_health::ToolHealthTracker::new(),
             hook_manager: None,
+            permission: None,
             context_window: 200_000,
             auto_compact_threshold_ratio: 0.7,
         }
