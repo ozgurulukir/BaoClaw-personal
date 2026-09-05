@@ -34,6 +34,22 @@ export function getSocketDir(): string {
   return path.join(os.tmpdir(), "baoclaw-sockets");
 }
 
+/**
+ * Build the initialize params `DaemonConnector.connect` sends. Control
+ * channels must reuse this so both connections derive the same session key.
+ */
+export function buildDaemonInitParams(
+  info: DaemonInfo,
+  sharedSessionId: string,
+): Record<string, unknown> {
+  return {
+    cwd: info.cwd,
+    settings: {},
+    protocol_version: "1",
+    shared_session_id: sharedSessionId,
+  };
+}
+
 export function resolveFixedSocket(): string | null {
   if (process.platform === "linux") {
     const runtimeDir = process.env.XDG_RUNTIME_DIR;
@@ -129,12 +145,10 @@ export class DaemonConnector {
       this.reconnectCountValue++;
       this.lastDisconnectErrorValue = error;
     });
-    const initParams: Record<string, unknown> = {
-      cwd: info.cwd,
-      settings: {},
-      protocol_version: "1",
-    };
-    initParams.shared_session_id = sharedSessionId ?? this.sessionTag;
+    const initParams = buildDaemonInitParams(
+      info,
+      sharedSessionId ?? this.sessionTag,
+    );
     await client.request("initialize", initParams);
     return client;
   }

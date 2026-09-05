@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { IpcClient } from "./client.js";
+import type { ControlChannel } from "./controlChannel.js";
 import { StatePatch, QueryResult, ErrorInfo } from "./types.js";
 import {
   setupStreamHandlers,
@@ -34,8 +35,16 @@ export interface UseRustEngineReturn {
 /**
  * React hook that manages communication with the Rust core engine.
  * Handles stream events, state patches, and message accumulation.
+ *
+ * Pass a ControlChannel (attachControlChannel) so abort is delivered on a
+ * dedicated connection; without one, abort degrades to the main connection
+ * with its timeout disabled (the daemon's serial loop can only answer it
+ * once the turn drains).
  */
-export function useRustEngine(client: IpcClient | null): UseRustEngineReturn {
+export function useRustEngine(
+  client: IpcClient | null,
+  control?: ControlChannel | null,
+): UseRustEngineReturn {
   // State
   const [messages, setMessages] = useState<Message[]>([]);
   const [isProcessing, setIsProcessing] = useState(false);
@@ -166,9 +175,13 @@ export function useRustEngine(client: IpcClient | null): UseRustEngineReturn {
 
   // Abort current query
   const abort = useCallback(async () => {
+    if (control) {
+      await control.request("abort");
+      return;
+    }
     if (!client) return;
-    await client.request("abort");
-  }, [client]);
+    await client.request("abort", undefined, 0);
+  }, [client, control]);
 
   return {
     state: {

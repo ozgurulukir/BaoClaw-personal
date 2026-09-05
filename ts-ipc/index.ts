@@ -1,7 +1,13 @@
 export { IpcClient, type IpcClientOptions } from "./client.js";
+export {
+  attachControlChannel,
+  type ControlChannel,
+  type ControlChannelOptions,
+} from "./controlChannel.js";
 export type { DaemonInfo, DaemonConnectorOptions } from "./daemon.js";
 export {
   DaemonConnector,
+  buildDaemonInitParams,
   discoverLegacyDaemons,
   selectNewestDaemon,
   getSocketDir,
