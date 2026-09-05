@@ -69,11 +69,18 @@ mod tests {
 
     async fn setup_temp_repo() -> Option<tempfile::TempDir> {
         let tmp = tempdir().ok()?;
-        let init = run_command_async("git", &["init"], Some(tmp.path())).await.ok()?;
+        let init = run_command_async("git", &["init"], Some(tmp.path()))
+            .await
+            .ok()?;
         if !init.success() {
             return None;
         }
-        let _ = run_command_async("git", &["config", "user.email", "test@test.com"], Some(tmp.path())).await;
+        let _ = run_command_async(
+            "git",
+            &["config", "user.email", "test@test.com"],
+            Some(tmp.path()),
+        )
+        .await;
         let _ = run_command_async("git", &["config", "user.name", "Test"], Some(tmp.path())).await;
         Some(tmp)
     }

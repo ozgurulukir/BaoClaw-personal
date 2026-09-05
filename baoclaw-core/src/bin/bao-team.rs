@@ -107,7 +107,11 @@ fn match_intent(input: &str, registry: &[DagRegistryEntry]) -> Vec<MatchResult> 
         }
     }
 
-    results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+    results.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     results
 }
 
@@ -477,7 +481,6 @@ fn main() {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -542,18 +545,16 @@ mod tests {
 
     #[test]
     fn test_match_intent() {
-        let registry = vec![
-            DagRegistryEntry {
-                intent: "code_audit".to_string(),
-                dag_file: "software_audit_dag.json".to_string(),
-                display_name: "Code Audit".to_string(),
-                description: "Audit code".to_string(),
-                trigger_phrases: vec!["audit code".to_string(), "审查代码".to_string()],
-                keywords: vec!["audit".to_string(), "review".to_string()],
-                expected_duration: "5m".to_string(),
-                estimated_cost: "$1".to_string(),
-            },
-        ];
+        let registry = vec![DagRegistryEntry {
+            intent: "code_audit".to_string(),
+            dag_file: "software_audit_dag.json".to_string(),
+            display_name: "Code Audit".to_string(),
+            description: "Audit code".to_string(),
+            trigger_phrases: vec!["audit code".to_string(), "审查代码".to_string()],
+            keywords: vec!["audit".to_string(), "review".to_string()],
+            expected_duration: "5m".to_string(),
+            estimated_cost: "$1".to_string(),
+        }];
 
         let results = match_intent("审查代码", &registry);
         assert_eq!(results.len(), 1);
@@ -588,9 +589,13 @@ mod tests {
     fn test_agent_error_when_missing() {
         let path = resolve_dag_path("software_audit_dag.json").unwrap();
         let team = load_dag(&path).unwrap();
-        let err = team.get_agent("missing-agent-id")
+        let err = team
+            .get_agent("missing-agent-id")
             .ok_or_else(|| format!("Agent '{}' not found in team", "missing-agent-id"));
         assert!(err.is_err());
-        assert_eq!(err.unwrap_err(), "Agent 'missing-agent-id' not found in team");
+        assert_eq!(
+            err.unwrap_err(),
+            "Agent 'missing-agent-id' not found in team"
+        );
     }
 }
