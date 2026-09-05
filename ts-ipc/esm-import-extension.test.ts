@@ -107,7 +107,7 @@ const ALL_SOURCE_FILES = [
  * never have .js appended.
  */
 const KNOWN_BARE_SPECIFIERS: Record<string, string[]> = {
-  "cli.ts": ["net", "readline", "path", "child_process", "fs", "os", "crypto"],
+  "cli.ts": ["readline", "path", "child_process", "fs", "os", "crypto"],
   "client.ts": ["net"],
   "index.ts": [],
   "markdownRenderer.ts": [],

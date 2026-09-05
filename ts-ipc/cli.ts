@@ -3,12 +3,13 @@
  * BaoClaw CLI — Rich terminal interface powered by Rust core engine.
  * Visual style inspired by BaoClaw TUI.
  */
-import * as net from "net";
 import * as readline from "readline";
 import * as path from "path";
 import * as crypto from "crypto";
 import { spawn, ChildProcess } from "child_process";
 import { renderMarkdown } from "./markdownRenderer.js";
+import { IpcClient } from "./client.js";
+import { attachControlChannel, type ControlChannel } from "./controlChannel.js";
 import * as fs from "fs";
 import * as os from "os";
 // @ts-ignore — pdf-parse and mammoth loaded dynamically for CJS compat
@@ -572,102 +573,6 @@ function formatResultText(
     .split("\n")
     .map((l) => `  ${color}  ${l}${RESET}`)
     .join("\n")}`;
-}
-
-// Minimal IPC client (inline to avoid ESM import issues)
-// ═══════════════════════════════════════════════════════════════
-class IpcClient {
-  private socket: net.Socket | null = null;
-  private buffer = "";
-  private nextId = 1;
-  private pending = new Map<
-    number,
-    { resolve: (v: unknown) => void; reject: (e: Error) => void }
-  >();
-  private notifHandlers = new Map<string, ((params: unknown) => void)[]>();
-
-  async connect(socketPath: string): Promise<void> {
-    return new Promise((resolve, reject) => {
-      const sock = net.createConnection(socketPath, () => {
-        this.socket = sock;
-        resolve();
-      });
-      sock.on("data", (d: Buffer) => this.onData(d));
-      sock.on("error", (e) => {
-        if (!this.socket) reject(e);
-      });
-      sock.on("close", () => this.onClose());
-    });
-  }
-
-  async request<T = unknown>(method: string, params?: unknown): Promise<T> {
-    if (!this.socket) throw new Error("Not connected");
-    const id = this.nextId++;
-    const msg: Record<string, unknown> = { jsonrpc: "2.0", method, id };
-    if (params !== undefined) msg.params = params;
-    return new Promise((resolve, reject) => {
-      this.pending.set(id, {
-        resolve: resolve as (v: unknown) => void,
-        reject,
-      });
-      this.socket!.write(JSON.stringify(msg) + "\n");
-    });
-  }
-
-  onNotification(method: string, handler: (params: unknown) => void): void {
-    const list = this.notifHandlers.get(method) ?? [];
-    list.push(handler);
-    this.notifHandlers.set(method, list);
-  }
-
-  async disconnect(): Promise<void> {
-    if (this.socket) {
-      this.socket.end();
-      this.socket = null;
-    }
-  }
-
-  private onData(data: Buffer) {
-    this.buffer += data.toString("utf-8");
-    let idx: number;
-    while ((idx = this.buffer.indexOf("\n")) !== -1) {
-      const line = this.buffer.slice(0, idx).trim();
-      this.buffer = this.buffer.slice(idx + 1);
-      if (line) this.handleLine(line);
-    }
-  }
-
-  private handleLine(json: string) {
-    let p: Record<string, unknown>;
-    try {
-      p = JSON.parse(json);
-    } catch {
-      return;
-    }
-    if ("id" in p && p.id != null) {
-      const req = this.pending.get(p.id as number);
-      if (req) {
-        this.pending.delete(p.id as number);
-        if ("error" in p)
-          req.reject(new Error((p.error as { message: string }).message));
-        else req.resolve(p.result);
-      }
-      return;
-    }
-    if ("method" in p) {
-      const handlers = this.notifHandlers.get(p.method as string);
-      if (handlers)
-        for (const h of handlers)
-          try {
-            h(p.params);
-          } catch {}
-    }
-  }
-
-  private onClose() {
-    for (const [, p] of this.pending) p.reject(new Error("Connection closed"));
-    this.pending.clear();
-  }
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -1323,20 +1228,12 @@ async function readAllStdin(): Promise<string> {
 
 async function executeOneShot(
   client: IpcClient,
+  initParams: Record<string, unknown>,
+  control: ControlChannel,
   prompt: string,
-  effectiveCwd: string,
   jsonMode: boolean,
-  thinkingEnabled: boolean,
-  thinkingBudget: number,
 ): Promise<void> {
-  const thinkingSettings = thinkingEnabled
-    ? { thinking: { mode: "enabled", budget_tokens: thinkingBudget } }
-    : {};
-  await client.request("initialize", {
-    cwd: effectiveCwd,
-    settings: { ...thinkingSettings },
-    shared_session_id: "default",
-  });
+  await client.request("initialize", initParams);
 
   let fullResponse = "";
   const toolsUsed: Array<{ name: string; input?: unknown }> = [];
@@ -1355,7 +1252,7 @@ async function executeOneShot(
       }
     } else if (params.type === "permission_request") {
       try {
-        await client.request("permissionResponse", {
+        await control.request("permissionResponse", {
           tool_use_id: params.tool_use_id,
           decision: "allow",
         });
@@ -1386,6 +1283,7 @@ async function executeOneShot(
         process.stdout.write("\n");
       }
     }
+    await control.close().catch(() => {});
     await client.disconnect().catch(() => {});
     process.exit(0);
   } catch (err: any) {
@@ -1396,6 +1294,7 @@ async function executeOneShot(
     } else {
       console.error(`${FG_RED}Error:${RESET} ${err?.message || err}`);
     }
+    await control.close().catch(() => {});
     await client.disconnect().catch(() => {});
     process.exit(1);
   }
@@ -1531,6 +1430,16 @@ async function main() {
   let child: ChildProcess | null = null;
   let isReconnect = false;
   const effectiveCwd = process.cwd();
+  const thinkingSettings = thinkingEnabled
+    ? { thinking: { mode: "enabled", budget_tokens: thinkingBudget } }
+    : {};
+  // One object reused by both connections: the control channel only joins
+  // the main connection's session if cwd + shared_session_id match exactly.
+  const initParams = {
+    cwd: effectiveCwd,
+    settings: { ...thinkingSettings },
+    shared_session_id: "default",
+  };
 
   // 1. Try fixed socket first
   if (fixed && fs.existsSync(fixed)) {
@@ -1550,8 +1459,9 @@ async function main() {
     socketPath = await startNewDaemon(binaryPath, sandboxMode);
   }
 
-  // Connect IPC
-  const client = new IpcClient();
+  // Connect IPC. The old inline client had no timeouts; requestTimeoutMs: 0
+  // preserves that for the long submitMessage await.
+  const client = new IpcClient({ requestTimeoutMs: 0 });
   if (!isOneShot) {
     startSpinner("Connecting to engine (loading MCP servers)...");
   }
@@ -1574,34 +1484,28 @@ async function main() {
     }
   }
 
+  // Abort/permission responses must not queue behind an in-flight turn on
+  // the serial main connection — deliver them via the control channel.
+  const control = await attachControlChannel({
+    socketPath,
+    initParams,
+    fallbackClient: client,
+  });
+
   // If one-shot prompt, execute and exit immediately
   if (isOneShot) {
-    await executeOneShot(
-      client,
-      finalPrompt,
-      effectiveCwd,
-      jsonMode,
-      thinkingEnabled,
-      thinkingBudget,
-    );
+    await executeOneShot(client, initParams, control, finalPrompt, jsonMode);
     return;
   }
 
   // Initialize
-  const thinkingSettings = thinkingEnabled
-    ? { thinking: { mode: "enabled", budget_tokens: thinkingBudget } }
-    : {};
   const initResult = await client.request<{
     capabilities: Record<string, unknown>;
     session_id: string;
     reconnected?: boolean;
     message_count?: number;
     shared?: boolean;
-  }>("initialize", {
-    cwd: effectiveCwd,
-    settings: { ...thinkingSettings },
-    shared_session_id: "default",
-  });
+  }>("initialize", initParams);
 
   stopSpinner();
 
@@ -1975,7 +1879,7 @@ async function main() {
               break;
           }
           try {
-            await client.request("permissionResponse", {
+            await control.request("permissionResponse", {
               tool_use_id: pr.tool_use_id,
               decision,
               rule,
@@ -2235,8 +2139,8 @@ async function main() {
       readline.clearLine(process.stdout, 0);
       process.stdout.write("\r");
       console.log(`${FG_YELLOW}⚠ Aborted${RESET}\n`);
-      // Fire-and-forget: don't await the abort RPC (it may hang if daemon is stuck)
-      client.request("abort").catch(() => {});
+      // Fire-and-forget; the control channel answers mid-turn.
+      control.request("abort").catch(() => {});
       // Reset state immediately — don't wait for daemon's result event
       currentText = "";
       isStreaming = false;
@@ -2250,6 +2154,7 @@ async function main() {
       ctrlCCount++;
       if (ctrlCCount >= 2) {
         console.log(`\n${DIM}Disconnected (daemon stays running).${RESET}`);
+        await control.close().catch(() => {});
         await client.disconnect();
         process.exit(0);
       }
@@ -2448,6 +2353,7 @@ async function main() {
   async function handleLine(input: string) {
     if (input === "/quit" || input === "/exit" || input === "/q") {
       console.log(`\n${DIM}Disconnecting (daemon stays running)...${RESET}`);
+      await control.close().catch(() => {});
       await client.disconnect();
       process.exit(0);
     }
@@ -2474,6 +2380,7 @@ async function main() {
       try {
         await client.request("shutdown");
       } catch {}
+      await control.close().catch(() => {});
       await client.disconnect();
       // Wait for daemon to exit gracefully, then force-kill if needed
       if (daemonPid) {
@@ -2497,7 +2404,7 @@ async function main() {
     if (input === "/abort") {
       stopSpinner();
       try {
-        await client.request("abort");
+        await control.request("abort");
       } catch {}
       currentText = "";
       isStreaming = false;
@@ -5737,6 +5644,7 @@ async function main() {
   rl.on("close", async () => {
     stopSpinner();
     console.log(`\n${DIM}Disconnected (daemon stays running).${RESET}`);
+    await control.close().catch(() => {});
     await client.disconnect();
     process.exit(0);
   });
