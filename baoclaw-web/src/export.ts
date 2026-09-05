@@ -1,6 +1,7 @@
 /**
  * BaoClaw 对话导出模块 — 将 talkTail RPC 返回的对话条目格式化为 Markdown 及 PDF。
- * 逻辑与 baoclaw-core/src/engine/export.rs 和 baoclaw-web/src/export.ts 保持一致。
+ * 逻辑与 baoclaw-core/src/engine/export.rs 保持一致。
+ * baoclaw-telegram/src/export.ts 是本模块的 re-export shim，请勿在两边各自修改。
  */
 
 import fs from "fs";
@@ -107,6 +108,11 @@ function tryApplyFont(doc: InstanceType<typeof PDFDocument>): boolean {
     "C:\\Windows\\Fonts\\msyh.ttc",
     "C:\\Windows\\Fonts\\simhei.ttf",
     "C:\\Windows\\Fonts\\simsun.ttc",
+    // Non-CJK Unicode fallbacks (Latin-Extended for Turkish etc.) — only
+    // reached when no CJK font exists, so CJK coverage keeps priority.
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+    "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+    "/usr/share/fonts/truetype/freefont/FreeSans.ttf",
   ];
 
   for (const fontPath of candidateFonts) {
@@ -121,7 +127,7 @@ function tryApplyFont(doc: InstanceType<typeof PDFDocument>): boolean {
   }
 
   console.warn(
-    "[baoclaw-web] Warning: No CJK candidate font found on system; PDF text rendering may omit non-Latin characters.",
+    "[baoclaw-export] Warning: No CJK or Unicode fallback font found on system; PDF text rendering may omit non-Latin characters.",
   );
   return false;
 }
@@ -151,23 +157,27 @@ export async function markdownToPdf(markdown: string): Promise<Buffer> {
     let inCodeBlock = false;
     let codeBuffer: string[] = [];
 
+    // Emit buffered code-block lines and reset the buffer. Also called after
+    // the loop so an unterminated ``` fence cannot silently drop its content.
+    const flushCodeBuffer = () => {
+      if (codeBuffer.length === 0) return;
+      doc.moveDown(0.3);
+      doc.fontSize(9).fillColor("#333333").text(codeBuffer.join("\n"), {
+        indent: 10,
+        lineGap: 2,
+      });
+      doc.fillColor("#000000").fontSize(10);
+      doc.moveDown(0.3);
+      codeBuffer = [];
+    };
+
     for (let i = 0; i < lines.length; i++) {
       const line = lines[i];
 
       if (line.trim().startsWith("```")) {
         if (inCodeBlock) {
           inCodeBlock = false;
-          if (codeBuffer.length > 0) {
-            doc.moveDown(0.3);
-            const codeText = codeBuffer.join("\n");
-            doc.fontSize(9).fillColor("#333333").text(codeText, {
-              indent: 10,
-              lineGap: 2,
-            });
-            doc.fillColor("#000000").fontSize(10);
-            doc.moveDown(0.3);
-            codeBuffer = [];
-          }
+          flushCodeBuffer();
         } else {
           inCodeBlock = true;
           codeBuffer = [];
@@ -249,6 +259,8 @@ export async function markdownToPdf(markdown: string): Promise<Buffer> {
         lineGap: 3,
       });
     }
+
+    if (inCodeBlock) flushCodeBuffer();
 
     doc.end();
   });

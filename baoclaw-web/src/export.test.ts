@@ -112,5 +112,12 @@ describe("export module", () => {
       const pdfHeader = pdfBuffer.subarray(0, 5).toString("ascii");
       assert.equal(pdfHeader, "%PDF-");
     });
+
+    test("flushes an unterminated code block instead of dropping it", async () => {
+      const pdfBuffer = await markdownToPdf("```\nnever terminated code line");
+      assert.ok(Buffer.isBuffer(pdfBuffer));
+      assert.ok(pdfBuffer.length > 0);
+      assert.equal(pdfBuffer.subarray(0, 5).toString("ascii"), "%PDF-");
+    });
   });
 });
