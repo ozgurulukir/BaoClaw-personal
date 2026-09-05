@@ -349,16 +349,19 @@ export class WhatsAppGateway {
 
         // Permission reply check (before command check)
         if (this.ipcClient?.connected) {
-          const wasPermissionReply =
-            await this.permissionManager.handleResponse(
-              senderPhone,
-              text,
-              // Via the control channel so the gate resolves mid-turn.
-              this.control!,
-            );
-          if (wasPermissionReply) {
+          const permissionReply = await this.permissionManager.handleResponse(
+            senderPhone,
+            text,
+            // Via the control channel so the gate resolves mid-turn.
+            this.control!,
+          );
+          if (permissionReply) {
             try {
-              await sock.sendMessage(replyJid, { text: "✅ 已处理。" });
+              await sock.sendMessage(replyJid, {
+                text: permissionReply.delivered
+                  ? "✅ 已处理。"
+                  : "⚠️ 该请求已过期。",
+              });
             } catch {}
             continue;
           }
@@ -434,6 +437,21 @@ export class WhatsAppGateway {
     while (this.messageQueue.hasQueued(sender)) {
       const entry = this.messageQueue.dequeue(sender);
       if (!entry) break;
+
+      // Single-slot rule: never steal the active slot from a sender whose
+      // turn is still in flight (e.g. parked on a permission prompt) — that
+      // sender's stream events would be dropped and its queue wedged forever.
+      if (this.activeSender !== null && this.activeSender !== sender) {
+        const busyJid = this.senderTracker.getJid(sender);
+        if (busyJid) {
+          try {
+            await sock.sendMessage(busyJid, {
+              text: "⏳ 另一个会话正在处理中，请稍后再试。",
+            });
+          } catch {}
+        }
+        continue;
+      }
 
       // Clear accumulator for new response
       this.senderTracker.clearAccumulator(sender);
@@ -552,13 +570,19 @@ export class WhatsAppGateway {
           const pr = event as {
             tool_use_id: string;
             tool_name: string;
+            input?: unknown;
             description?: string;
           };
           if (jid) {
+            // The daemon event carries the raw tool `input`, not a
+            // description — render a truncated preview so the user isn't
+            // approving blind.
+            const desc =
+              pr.description || JSON.stringify(pr.input ?? {}).slice(0, 200);
             const text = this.permissionManager.formatPermissionRequest(
               pr.tool_use_id,
               pr.tool_name,
-              pr.description,
+              desc,
             );
             try {
               await sock.sendMessage(jid, { text });
@@ -568,15 +592,25 @@ export class WhatsAppGateway {
               pr.tool_use_id,
               pr.tool_name,
               pr.description || "",
-              async (phone, toolUseId) => {
-                // Timeout callback: notify user
-                const j = this.senderTracker.getJid(phone);
-                if (j) {
-                  try {
-                    await sock.sendMessage(j, {
-                      text: "⏰ 权限请求已超时，自动拒绝。",
-                    });
-                  } catch {}
+              async (phone, toolUseId, reason) => {
+                // Timeout/supersede must deny with the daemon too — otherwise
+                // the gate stays parked until its own 300 s auto-deny and the
+                // turn hangs. User notification only for a real expiry.
+                try {
+                  await this.control!.request("permissionResponse", {
+                    tool_use_id: toolUseId,
+                    decision: "deny",
+                  });
+                } catch {}
+                if (reason === "timeout") {
+                  const j = this.senderTracker.getJid(phone);
+                  if (j) {
+                    try {
+                      await sock.sendMessage(j, {
+                        text: "⏰ 权限请求已超时，自动拒绝。",
+                      });
+                    } catch {}
+                  }
                 }
               },
             );

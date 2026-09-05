@@ -100,27 +100,35 @@ export class PermissionManager {
    *
    * Steps:
    *  1. If the sender already has a **pending** request, cancel its timer and
-   *     invoke `onTimeout(phone, oldToolUseId)` so the caller can deny the
-   *     stale request with the daemon.
+   *     invoke `onTimeout(phone, oldToolUseId, "superseded")` so the caller
+   *     can deny the stale request with the daemon.
    *  2. Create a `PermissionRequest` object with an expiry timestamp
    *     (`Date.now() + 60_000`).
    *  3. Store it via `SenderTracker.setPendingPermission`.
    *  4. Start a 60-second timer that, on expiry, clears the pending permission
-   *     and invokes `onTimeout(phone, toolUseId)`.
+   *     and invokes `onTimeout(phone, toolUseId, "timeout")`.
    *
    * @param phone       Sender phone (E.164).
    * @param toolUseId   Unique ID from the daemon.
    * @param toolName    Tool name for the request record.
    * @param description Human-readable description.
    * @param onTimeout   Callback invoked when the request expires without a
-   *                    reply **or** when superseded by a newer request.
+   *                    reply (`"timeout"`) **or** when superseded by a newer
+   *                    request (`"superseded"`). Callers must deny the request
+   *                    with the daemon in both cases.
+   * @param timeoutMs   Auto-expiry window; overridable for tests.
    */
   registerRequest(
     phone: string,
     toolUseId: string,
     toolName: string,
     description: string,
-    onTimeout: (phone: string, toolUseId: string) => void,
+    onTimeout: (
+      phone: string,
+      toolUseId: string,
+      reason: "timeout" | "superseded",
+    ) => void,
+    timeoutMs: number = PERMISSION_TIMEOUT_MS,
   ): void {
     // 1. Evict any existing pending request for this sender.
     const existing = this.senderTracker.getPendingPermission(phone);
@@ -131,7 +139,7 @@ export class PermissionManager {
         this.timers.delete(phone);
       }
       // Notify caller about the superseded request so it can deny it.
-      onTimeout(phone, existing.tool_use_id);
+      onTimeout(phone, existing.tool_use_id, "superseded");
     }
 
     // 2. Build the new request.
@@ -139,7 +147,7 @@ export class PermissionManager {
       tool_use_id: toolUseId,
       tool_name: toolName,
       description,
-      expiresAt: Date.now() + PERMISSION_TIMEOUT_MS,
+      expiresAt: Date.now() + timeoutMs,
     };
 
     // 3. Persist in the tracker.
@@ -149,8 +157,8 @@ export class PermissionManager {
     const timer = setTimeout(() => {
       this.senderTracker.clearPendingPermission(phone);
       this.timers.delete(phone);
-      onTimeout(phone, toolUseId);
-    }, PERMISSION_TIMEOUT_MS);
+      onTimeout(phone, toolUseId, "timeout");
+    }, timeoutMs);
 
     // Prevent the timer from keeping the Node.js event loop alive during
     // a clean shutdown (cleanup() will handle it explicitly).
@@ -165,7 +173,7 @@ export class PermissionManager {
    * Process an inbound WhatsApp text message as a potential permission reply.
    *
    * The method is **idempotent** — if no permission is pending for the sender
-   * it simply returns `false` and the caller can treat the message as a normal
+   * it simply returns `null` and the caller can treat the message as a normal
    * chat prompt.
    *
    * Recognised keywords (case-insensitive, trimmed):
@@ -174,29 +182,31 @@ export class PermissionManager {
    *
    * When a valid keyword is detected:
    *   1. The decision is forwarded to the daemon via
-   *      `ipcClient.request('permissionResponse', { tool_use_id, decision })`.
+   *      `client.request('permissionResponse', { tool_use_id, decision })`.
    *   2. The pending permission and its timer are cleared.
-   *   3. Returns `true`.
+   *   3. Returns `{ decision, delivered }` — `delivered` is false when the
+   *      daemon no longer knows the request (already timed out or answered
+   *      elsewhere), so the caller can adjust its acknowledgement.
    *
    * If the text does **not** match any keyword but a permission **is** pending,
-   * the method still returns `false` — the caller should handle the text as a
+   * the method still returns `null` — the caller should handle the text as a
    * regular message (and may optionally warn the user).
    *
    * @param phone      Sender phone (E.164).
    * @param text       Raw message text from WhatsApp.
    * @param client     Connected IPC client or control channel for the daemon.
-   * @returns `true` if this message was a permission reply (fully handled),
-   *          `false` otherwise.
+   * @returns The decision + daemon delivery flag, or `null` when the message
+   *          was not a permission reply.
    */
   async handleResponse(
     phone: string,
     text: string,
     client: Pick<IpcClient, "request">,
-  ): Promise<boolean> {
+  ): Promise<{ decision: "allow" | "deny"; delivered: boolean } | null> {
     // 1. Check for a pending request.
     const pending = this.senderTracker.getPendingPermission(phone);
     if (!pending) {
-      return false;
+      return null;
     }
 
     // 2. Parse the reply.
@@ -211,15 +221,17 @@ export class PermissionManager {
 
     // 3. Not a recognised keyword — leave the request pending.
     if (decision === null) {
-      return false;
+      return null;
     }
 
     // 4. Forward the decision to the daemon.
+    let delivered = false;
     try {
-      await client.request("permissionResponse", {
+      const res = await client.request("permissionResponse", {
         tool_use_id: pending.tool_use_id,
         decision,
       });
+      delivered = (res as { delivered?: boolean })?.delivered === true;
     } catch (err) {
       // Swallow IPC errors — the daemon may have disconnected. We still
       // clean up the local state so the user is not stuck.
@@ -237,7 +249,7 @@ export class PermissionManager {
     }
 
     // 6. Signal that the message was handled.
-    return true;
+    return { decision, delivered };
   }
 
   // ── Lifecycle ─────────────────────────────────────────────────────────────
