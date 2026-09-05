@@ -255,12 +255,16 @@ pub async fn execute_tool_with_permission(
                     call_tool_and_wrap(tool, request, context, progress).await
                 }
                 PermissionDecision::AllowAlways { rule } => {
-                    permission
-                        .bridge
-                        .manager
-                        .write()
-                        .await
-                        .add_allow_always_rule("user", &tool_name, rule);
+                    {
+                        let manager = permission.bridge.manager.write().await;
+                        manager.add_allow_always_rule("user", &tool_name, rule);
+                        // The write guard doubles as the serialization point
+                        // against the permission.* RPC handlers that save
+                        // the same file.
+                        if permission.bridge.persist_grants {
+                            crate::permissions::persist_context_to_config(&manager.get_context());
+                        }
+                    }
                     call_tool_and_wrap(tool, request, context, progress).await
                 }
                 PermissionDecision::Deny => ToolExecutionResult {
@@ -947,6 +951,7 @@ mod tests {
             manager: Arc::new(tokio::sync::RwLock::new(manager)),
             gate,
             ask_timeout,
+            persist_grants: false,
         };
         (PermissionChannels::new(bridge, event_tx), event_rx)
     }

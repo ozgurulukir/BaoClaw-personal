@@ -166,6 +166,7 @@ proptest! {
                 manager: Arc::new(tokio::sync::RwLock::new(permission_manager)),
                 gate: permission_gate,
                 ask_timeout: baoclaw_core::permissions::DEFAULT_ASK_TIMEOUT,
+                persist_grants: false,
             };
             let permission_channels = PermissionChannels::new(bridge, event_tx);
 

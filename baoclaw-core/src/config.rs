@@ -271,12 +271,16 @@ pub fn save_config_to(
         }
     }
     let json = serde_json::to_string_pretty(config).map_err(std::io::Error::other)?;
-    std::fs::write(path, json)?;
+    // Write via temp file + rename: a crash mid-write must not truncate the
+    // real config (it carries the plaintext api_key and permission rules).
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, json)?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+        let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600));
     }
+    std::fs::rename(&tmp, path)?;
     Ok(())
 }
 
@@ -532,5 +536,28 @@ mod tests {
         normalize_profiles(&mut expected);
         sync_profiles_to_legacy(&mut expected);
         assert_eq!(config, expected);
+    }
+
+    #[test]
+    fn save_config_is_atomic_and_leaves_no_temp_file() {
+        let dir = std::env::temp_dir().join("baoclaw-config-atomic-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.json");
+
+        let mut cfg = BaoclawConfig::default();
+        cfg.extra.insert(
+            "permissions".to_string(),
+            serde_json::json!({"mode": "Default", "always_allow_rules": {"user": []}}),
+        );
+        cfg.save_to(&path).expect("save succeeds");
+        cfg.save_to(&path).expect("re-save succeeds");
+
+        // The temp file must be renamed away, never left behind.
+        assert!(!dir.join("config.json.tmp").exists());
+        let on_disk: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(on_disk["permissions"]["mode"], "Default");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

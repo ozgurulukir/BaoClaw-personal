@@ -275,6 +275,7 @@ fn build_shared_engine(
             manager: Arc::clone(&shared.permission_manager),
             gate: shared.permission_gate.clone(),
             ask_timeout: permissions::DEFAULT_ASK_TIMEOUT,
+            persist_grants: true,
         }),
     })
 }

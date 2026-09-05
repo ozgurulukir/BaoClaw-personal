@@ -2,8 +2,9 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::RwLock;
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub enum PermissionMode {
+    #[default]
     Default,
     Plan,
     BypassPermissions,
@@ -18,7 +19,11 @@ pub struct PermissionRule {
 
 pub type ToolPermissionRulesBySource = HashMap<String, Vec<PermissionRule>>;
 
+/// Deserialized from config `extra["permissions"]`. Field defaults let
+/// hand-edited or partial JSON load instead of silently falling back to a
+/// fresh context (losing every rule).
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default)]
 pub struct ToolPermissionContext {
     pub mode: PermissionMode,
     pub additional_working_directories: HashMap<String, String>,
@@ -205,13 +210,20 @@ impl PermissionManager {
         rule_content: Option<String>,
     ) {
         let mut ctx = self.context.write().unwrap();
-        ctx.always_allow_rules
+        let rules = ctx
+            .always_allow_rules
             .entry(source.to_string())
-            .or_default()
-            .push(PermissionRule {
+            .or_default();
+        // Repeated grants of the same rule must not accumulate forever.
+        if !rules
+            .iter()
+            .any(|r| r.tool_name == tool_name && r.rule_content == rule_content)
+        {
+            rules.push(PermissionRule {
                 tool_name: tool_name.to_string(),
                 rule_content,
             });
+        }
     }
 
     /// Add a rule to the specified category ("allow", "deny", "ask").
@@ -721,5 +733,36 @@ mod tests {
         let manager = PermissionManager::new(ctx);
         let retrieved = manager.get_context();
         assert_eq!(retrieved.mode, PermissionMode::Plan);
+    }
+
+    #[test]
+    fn add_allow_always_rule_dedupes_identical_rules() {
+        let manager = PermissionManager::new(ToolPermissionContext::default());
+        manager.add_allow_always_rule("user", "Bash", Some("git *".to_string()));
+        manager.add_allow_always_rule("user", "Bash", Some("git *".to_string()));
+        manager.add_allow_always_rule("user", "Bash", None);
+
+        let ctx = manager.get_context();
+        let rules = &ctx.always_allow_rules["user"];
+        assert_eq!(rules.len(), 2, "identical rules must not accumulate");
+        assert!(rules
+            .iter()
+            .any(|r| r.rule_content == Some("git *".to_string())));
+        assert!(rules.iter().any(|r| r.rule_content.is_none()));
+    }
+
+    #[test]
+    fn context_deserializes_from_partial_json() {
+        // Hand-edited or partial config must not silently drop every rule.
+        let ctx: ToolPermissionContext = serde_json::from_value(serde_json::json!({
+            "always_allow_rules": {
+                "user": [{"tool_name": "Bash", "rule_content": "git *"}]
+            }
+        }))
+        .expect("partial context must deserialize");
+        assert_eq!(ctx.mode, PermissionMode::Default);
+        assert!(ctx.additional_working_directories.is_empty());
+        assert_eq!(ctx.always_allow_rules["user"].len(), 1);
+        assert!(!ctx.is_bypass_permissions_mode_available);
     }
 }
