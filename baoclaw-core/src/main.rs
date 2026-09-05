@@ -4204,7 +4204,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         if let Ok(ctx) =
             serde_json::from_value::<permissions::manager::ToolPermissionContext>(perms_val.clone())
         {
-            let mgr = permission_manager.blocking_write();
+            // main() runs inside the tokio runtime — blocking_write() here
+            // panics ("Cannot block the current thread from within a
+            // runtime"). Startup has no contenders, so a plain async write
+            // is safe.
+            let mgr = permission_manager.write().await;
             mgr.update_context(|c| *c = ctx);
         }
     }

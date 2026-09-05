@@ -101,11 +101,19 @@ fn matches_rule(rule: &PermissionRule, tool_name: &str, input_description: Optio
         return false;
     }
 
-    // If rule has content, input_description must match the glob pattern
-    match (&rule.rule_content, input_description) {
-        (Some(pattern), Some(desc)) => glob_matches(pattern, desc),
-        (Some(_), None) => false,
-        (None, _) => true,
+    let Some(pattern) = &rule.rule_content else {
+        // No content — the rule covers every invocation of the tool.
+        return true;
+    };
+    // Interactive allow-always grants record the tool name as the rule
+    // content; that means "this whole tool", not a glob over the input JSON.
+    if pattern.eq_ignore_ascii_case(tool_name) {
+        return true;
+    }
+    // Otherwise the content is a glob pattern over the serialized tool input.
+    match input_description {
+        Some(desc) => glob_matches(pattern, desc),
+        None => false,
     }
 }
 
@@ -671,6 +679,33 @@ mod tests {
         // Without matching content, still asks
         assert!(matches!(
             manager.check_permission("Bash", Some("npm install")),
+            PermissionResult::Ask { .. }
+        ));
+    }
+
+    #[test]
+    fn test_allow_always_grant_with_tool_name_matches_any_input() {
+        // The CLI's interactive [a] Always answer sends rule = tool name.
+        // The executor checks against the serialized tool input JSON, so the
+        // grant must match regardless of the input (regression: it stored
+        // rule_content "Bash" and globbed it against the input, never
+        // matching, so every subsequent call re-prompted).
+        let ctx = empty_context();
+        let manager = PermissionManager::new(ctx);
+
+        manager.add_allow_always_rule("user", "Bash", Some("Bash".to_string()));
+
+        assert_eq!(
+            manager.check_permission("Bash", Some(r#"{"command":"echo hi"}"#)),
+            PermissionResult::Allow
+        );
+        assert_eq!(
+            manager.check_permission("Bash", None),
+            PermissionResult::Allow
+        );
+        // Other tools are unaffected
+        assert!(matches!(
+            manager.check_permission("FileWrite", Some(r#"{"path":"x"}"#)),
             PermissionResult::Ask { .. }
         ));
     }
