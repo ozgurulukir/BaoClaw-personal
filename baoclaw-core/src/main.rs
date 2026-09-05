@@ -26,7 +26,7 @@ use engine::task_manager::TaskManager;
 use ipc::events::{engine_event_to_notification, send_engine_event};
 use ipc::protocol::JsonRpcMessage;
 use ipc::router::{parse_client_method, ClientMethod};
-use ipc::server::{IpcConnection, IpcError, IpcServer};
+use ipc::server::{IpcConnection, IpcError, IpcServer, IpcWriter};
 use permissions::gate::{PermissionDecision, PermissionGate};
 use permissions::PermissionBridge;
 use state::manager::{CoreState, StateManager};
@@ -281,7 +281,7 @@ fn build_shared_engine(
 }
 
 fn spawn_shared_broadcast(
-    conn: Arc<TokioMutex<IpcConnection>>,
+    writer: Arc<TokioMutex<IpcWriter>>,
     session: Arc<SharedSession>,
     client_id: ClientId,
     mut rx: tokio::sync::broadcast::Receiver<EngineEvent>,
@@ -296,7 +296,7 @@ fn spawn_shared_broadcast(
                     let notif = engine_event_to_notification(&event);
                     let params =
                         serde_json::to_value(&notif.params).unwrap_or(serde_json::Value::Null);
-                    let mut conn_guard = conn.lock().await;
+                    let mut conn_guard = writer.lock().await;
                     if conn_guard
                         .send_notification(&notif.method, params)
                         .await
@@ -316,7 +316,7 @@ fn spawn_shared_broadcast(
 
 async fn switch_shared_client(
     shared: &SharedState,
-    conn: &Arc<TokioMutex<IpcConnection>>,
+    writer: &Arc<TokioMutex<IpcWriter>>,
     session: &mut Arc<SharedSession>,
     client_id: &mut ClientId,
     broadcast_handle: &mut tokio::task::JoinHandle<()>,
@@ -367,14 +367,39 @@ async fn switch_shared_client(
     *client_id = new_client_id;
     *session_id = target_id;
     *work_cwd = target_cwd.clone();
-    *broadcast_handle =
-        spawn_shared_broadcast(conn.clone(), session.clone(), *client_id, new_broadcast_rx);
+    *broadcast_handle = spawn_shared_broadcast(
+        writer.clone(),
+        session.clone(),
+        *client_id,
+        new_broadcast_rx,
+    );
     shared.memory_store.switch_project(&target_cwd).await;
     shared
         .project_registry
         .ensure_registered(&target_cwd.to_string_lossy(), None)
         .await;
     Ok(session.engine_read().await.get_messages().len())
+}
+
+/// Releases the session submitter when the spawned turn drain ends —
+/// including on panic. `armed` is cleared once the normal release path has
+/// run, so the guard only acts as a safety net.
+struct SubmitterGuard {
+    session: Arc<SharedSession>,
+    client_id: ClientId,
+    armed: bool,
+}
+
+impl Drop for SubmitterGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            let session = self.session.clone();
+            let client_id = self.client_id;
+            tokio::spawn(async move {
+                session.release_submitter(client_id).await;
+            });
+        }
+    }
 }
 
 async fn handle_shared_client(
@@ -386,17 +411,19 @@ async fn handle_shared_client(
     mut work_cwd: PathBuf,
     mut session_id: String,
 ) -> (Arc<SharedSession>, ClientId, String, PathBuf) {
-    // Wrap conn in Arc<TokioMutex> so the broadcast receiver task can also send
-    let conn = Arc::new(TokioMutex::new(conn));
+    // Split reader/writer: the request loop owns the reader and parks on it
+    // waiting for the next request, while spawned turn drains, broadcasts and
+    // cron events write through the shared writer without contention.
+    let (mut reader, writer) = conn.into_split();
 
     // Spawn background task to forward broadcast events to this client (Task 5.2)
     let mut broadcast_handle =
-        spawn_shared_broadcast(conn.clone(), session.clone(), client_id, broadcast_rx);
+        spawn_shared_broadcast(writer.clone(), session.clone(), client_id, broadcast_rx);
 
     // Spawn background task to forward cron results to this client.
     // Cron jobs run independently (not tied to any session), so their
     // results are delivered via a separate broadcast channel.
-    let conn_for_cron = Arc::clone(&conn);
+    let conn_for_cron = Arc::clone(&writer);
     let mut cron_rx = shared.cron_manager.subscribe();
     let cron_broadcast_handle = tokio::spawn(async move {
         loop {
@@ -435,8 +462,7 @@ async fn handle_shared_client(
         }
 
         let msg = {
-            let mut conn_guard = conn.lock().await;
-            match conn_guard.recv_message().await {
+            match reader.recv_message().await {
                 Ok(msg) => msg,
                 Err(IpcError::ConnectionClosed) => {
                     eprintln!("Shared client {} disconnected", client_id);
@@ -460,8 +486,10 @@ async fn handle_shared_client(
                             attachments,
                             ..
                         } => {
+                            // The submitter lock is taken on the loop itself so
+                            // a second submit still gets -32001 immediately.
                             if !session.try_acquire_submitter(client_id).await {
-                                let mut conn_guard = conn.lock().await;
+                                let mut conn_guard = writer.lock().await;
                                 let _ = conn_guard.send_error(Some(id), -32001,
                                     "session busy: another client is currently submitting a message".into()).await;
                                 continue;
@@ -473,99 +501,128 @@ async fn handle_shared_client(
                                 None => serde_json::to_string(&prompt).unwrap_or_default(),
                             };
 
-                            let mut rx = {
-                                let mut engine = session.engine_write().await;
-                                engine
-                                    .submit_message_with_attachments(prompt_str, attachments)
-                                    .await
-                            };
+                            // The drain runs in its own task so this
+                            // connection's serial loop keeps serving requests
+                            // while the turn streams — previously every request
+                            // on this connection (including abort and
+                            // permission responses) waited for the turn to end.
+                            let task_shared = shared.clone();
+                            let task_session = session.clone();
+                            let task_writer = writer.clone();
+                            let task_session_id = session_id.clone();
+                            let task_client_id = client_id;
+                            tokio::spawn(async move {
+                                // Declared first so it drops last: releases
+                                // the submitter even if the drain panics.
+                                let mut submitter_guard = SubmitterGuard {
+                                    session: task_session.clone(),
+                                    client_id: task_client_id,
+                                    armed: true,
+                                };
+                                let mut rx = {
+                                    let mut engine = task_session.engine_write().await;
+                                    engine
+                                        .submit_message_with_attachments(prompt_str, attachments)
+                                        .await
+                                };
 
-                            let mut disconnected = false;
-                            let mut turn_finished = false;
-                            while let Some(event) = rx.recv().await {
-                                // Render Loop Headers to TUI on turn events
-                                match &event {
-                                    EngineEvent::TurnStart {
-                                        turn_id,
-                                        agent_label,
-                                        ..
-                                    } => {
-                                        render_loop_header(*turn_id, agent_label.as_deref());
+                                let mut disconnected = false;
+                                let mut turn_finished = false;
+                                while let Some(event) = rx.recv().await {
+                                    // Render Loop Headers to TUI on turn events
+                                    match &event {
+                                        EngineEvent::TurnStart {
+                                            turn_id,
+                                            agent_label,
+                                            ..
+                                        } => {
+                                            render_loop_header(*turn_id, agent_label.as_deref());
+                                        }
+                                        EngineEvent::TurnEnd {
+                                            turn_id,
+                                            tool_count,
+                                            duration_ms,
+                                            ..
+                                        } => {
+                                            update_loop_header(*turn_id, *tool_count, *duration_ms);
+                                        }
+                                        _ => {}
                                     }
-                                    EngineEvent::TurnEnd {
-                                        turn_id,
-                                        tool_count,
-                                        duration_ms,
-                                        ..
-                                    } => {
-                                        update_loop_header(*turn_id, *tool_count, *duration_ms);
+
+                                    let terminal_event = matches!(
+                                        &event,
+                                        EngineEvent::Result(_) | EngineEvent::Error(_)
+                                    );
+                                    // Broadcast to all clients
+                                    task_session.broadcast(event.clone());
+
+                                    // Also send directly to the submitting client
+                                    {
+                                        let mut conn_guard = task_writer.lock().await;
+                                        if send_engine_event(&mut conn_guard, &event).await.is_err()
+                                        {
+                                            disconnected = true;
+                                            turn_finished = terminal_event;
+                                            break;
+                                        }
                                     }
-                                    _ => {}
-                                }
 
-                                let terminal_event = matches!(
-                                    &event,
-                                    EngineEvent::Result(_) | EngineEvent::Error(_)
-                                );
-                                // Broadcast to all clients
-                                session.broadcast(event.clone());
-
-                                // Also send directly to the submitting client
-                                {
-                                    let mut conn_guard = conn.lock().await;
-                                    if send_engine_event(&mut conn_guard, &event).await.is_err() {
-                                        disconnected = true;
-                                        turn_finished = terminal_event;
+                                    if terminal_event {
+                                        turn_finished = true;
                                         break;
                                     }
                                 }
 
-                                if terminal_event {
-                                    turn_finished = true;
-                                    break;
+                                if turn_finished {
+                                    let mut engine = task_session.engine_write().await;
+                                    engine.sync_messages().await;
+                                    drop(engine);
+                                    // Persist before releasing the submitter or handling disconnect.
+                                    if let Err(e) = task_shared
+                                        .session_registry
+                                        .persist_session(&task_session_id)
+                                        .await
+                                    {
+                                        eprintln!(
+                                            "[daemon] session {} persistence warning: {}",
+                                            task_session_id, e
+                                        );
+                                    }
                                 }
-                            }
 
-                            if turn_finished {
-                                let mut engine = session.engine_write().await;
-                                engine.sync_messages().await;
-                                drop(engine);
-                                // Persist before releasing the submitter or handling disconnect.
-                                if let Err(e) =
-                                    shared.session_registry.persist_session(&session_id).await
-                                {
-                                    eprintln!(
-                                        "[daemon] session {} persistence warning: {}",
-                                        session_id, e
-                                    );
+                                // Release submitter AFTER the loop ends to prevent
+                                // the broadcast task from re-delivering the Result event.
+                                task_session.release_submitter(task_client_id).await;
+                                submitter_guard.armed = false;
+
+                                if disconnected {
+                                    // The loop will notice the dead socket on its
+                                    // next recv and run the disconnect cleanup.
+                                    return;
                                 }
-                            }
 
-                            // Release submitter AFTER the loop ends to prevent
-                            // the broadcast task from re-delivering the Result event.
-                            session.release_submitter(client_id).await;
-
-                            if disconnected {
-                                break;
-                            }
-
-                            let mut conn_guard = conn.lock().await;
-                            let _ = conn_guard
-                                .send_response(id, serde_json::json!({"status": "complete"}))
-                                .await;
+                                let mut conn_guard = task_writer.lock().await;
+                                let _ = conn_guard
+                                    .send_response(id, serde_json::json!({"status": "complete"}))
+                                    .await;
+                            });
                         }
 
                         // ── Task 5.3: abort — any client can call ──
+                        // Known window: an abort landing while a submit's
+                        // setup is running (which resets the abort watch) can
+                        // be wiped; the window is sub-millisecond outside
+                        // auto-compact and predates the concurrent loop.
                         ClientMethod::Abort => {
                             let engine = session.engine_read().await;
                             engine.abort();
-                            let mut conn_guard = conn.lock().await;
+                            let mut conn_guard = writer.lock().await;
                             let _ = conn_guard.send_response(id, serde_json::json!("ok")).await;
                         }
 
                         // ── Task 6.2: shutdown in shared mode ──
                         ClientMethod::Shutdown => {
-                            let mut conn_guard = conn.lock().await;
+                            let mut conn_guard = writer.lock().await;
                             let _ = conn_guard.send_response(id, serde_json::json!("ok")).await;
                             // Shutdown terminates the daemon for all clients
                             eprintln!("Shutdown requested — setting should_exit flag");
@@ -599,7 +656,7 @@ async fn handle_shared_client(
                                     }
                                 }
                             }
-                            let mut conn_guard = conn.lock().await;
+                            let mut conn_guard = writer.lock().await;
                             let _ = conn_guard.send_response(id, serde_json::json!("ok")).await;
                         }
 
@@ -615,14 +672,14 @@ async fn handle_shared_client(
                             };
                             let delivered =
                                 shared.permission_gate.respond(&tool_use_id, perm_decision);
-                            let mut conn_guard = conn.lock().await;
+                            let mut conn_guard = writer.lock().await;
                             let _ = conn_guard
                                 .send_response(id, serde_json::json!({"delivered": delivered}))
                                 .await;
                         }
 
                         ClientMethod::Initialize { .. } => {
-                            let mut conn_guard = conn.lock().await;
+                            let mut conn_guard = writer.lock().await;
                             let _ = conn_guard
                                 .send_error(Some(id), -32600, "Already initialized".into())
                                 .await;
@@ -633,7 +690,7 @@ async fn handle_shared_client(
                             let tl: Vec<serde_json::Value> = shared.engine_tools.iter().map(|t| {
                                 serde_json::json!({"name": t.name(), "description": t.prompt(), "type": "builtin"})
                             }).collect();
-                            let mut conn_guard = conn.lock().await;
+                            let mut conn_guard = writer.lock().await;
                             let _ = conn_guard
                                 .send_response(
                                     id,
@@ -643,7 +700,7 @@ async fn handle_shared_client(
                         }
                         ClientMethod::ListMcpServers => {
                             let s = discovery::mcp_config::discover_mcp_servers(&work_cwd).await;
-                            let mut conn_guard = conn.lock().await;
+                            let mut conn_guard = writer.lock().await;
                             let _ = conn_guard
                                 .send_response(
                                     id,
@@ -653,7 +710,7 @@ async fn handle_shared_client(
                         }
                         ClientMethod::ListSkills => {
                             let s = discovery::skills::discover_skills(&work_cwd).await;
-                            let mut conn_guard = conn.lock().await;
+                            let mut conn_guard = writer.lock().await;
                             let _ = conn_guard
                                 .send_response(
                                     id,
@@ -663,7 +720,7 @@ async fn handle_shared_client(
                         }
                         ClientMethod::ListPlugins => {
                             let p = discovery::plugins::discover_plugins(&work_cwd).await;
-                            let mut conn_guard = conn.lock().await;
+                            let mut conn_guard = writer.lock().await;
                             let _ = conn_guard
                                 .send_response(
                                     id,
@@ -672,7 +729,7 @@ async fn handle_shared_client(
                                 .await;
                         }
                         ClientMethod::GitStatus => {
-                            let mut conn_guard = conn.lock().await;
+                            let mut conn_guard = writer.lock().await;
                             match ipc::handlers::git::handle_git_status(std::path::Path::new(
                                 &work_cwd,
                             )) {
@@ -690,7 +747,7 @@ async fn handle_shared_client(
                                 .current_dir(&work_cwd)
                                 .output()
                                 .await;
-                            let mut conn_guard = conn.lock().await;
+                            let mut conn_guard = writer.lock().await;
                             match output {
                                 Ok(o) if o.status.success() => {
                                     let stdout = String::from_utf8_lossy(&o.stdout).to_string();
@@ -731,7 +788,7 @@ async fn handle_shared_client(
                         // ── Task 5.3: Write operations — blocked if ActiveSubmitter exists ──
                         ClientMethod::Compact => {
                             if session.has_active_submitter().await {
-                                let mut conn_guard = conn.lock().await;
+                                let mut conn_guard = writer.lock().await;
                                 let _ = conn_guard.send_error(Some(id), -32002,
                                     "session busy: cannot compact while a message is being processed".into()).await;
                                 continue;
@@ -739,7 +796,7 @@ async fn handle_shared_client(
                             let mut engine = session.engine_write().await;
                             match engine.compact().await {
                                 Ok(result) => {
-                                    let mut conn_guard = conn.lock().await;
+                                    let mut conn_guard = writer.lock().await;
                                     let _ = conn_guard
                                         .send_response(
                                             id,
@@ -753,7 +810,7 @@ async fn handle_shared_client(
                                         .await;
                                 }
                                 Err(e) => {
-                                    let mut conn_guard = conn.lock().await;
+                                    let mut conn_guard = writer.lock().await;
                                     let _ =
                                         conn_guard.send_error(Some(id), -32000, e.message).await;
                                 }
@@ -761,7 +818,7 @@ async fn handle_shared_client(
                         }
                         ClientMethod::SwitchModel { model: new_model } => {
                             if session.has_active_submitter().await {
-                                let mut conn_guard = conn.lock().await;
+                                let mut conn_guard = writer.lock().await;
                                 let _ = conn_guard.send_error(Some(id), -32002,
                                     "session busy: cannot switch model while a message is being processed".into()).await;
                                 continue;
@@ -771,7 +828,7 @@ async fn handle_shared_client(
                             shared.state_manager.update(|s| {
                                 s.model = new_model.clone();
                             });
-                            let mut conn_guard = conn.lock().await;
+                            let mut conn_guard = writer.lock().await;
                             let _ = conn_guard
                                 .send_response(id, serde_json::json!({"model": new_model}))
                                 .await;
@@ -783,7 +840,7 @@ async fn handle_shared_client(
                                 work_cwd.join(new_cwd)
                             };
                             if !abs_cwd.is_dir() {
-                                let mut conn_guard = conn.lock().await;
+                                let mut conn_guard = writer.lock().await;
                                 let _ = conn_guard
                                     .send_error(
                                         Some(id),
@@ -795,7 +852,7 @@ async fn handle_shared_client(
                             }
                             match switch_shared_client(
                                 &shared,
-                                &conn,
+                                &writer,
                                 &mut session,
                                 &mut client_id,
                                 &mut broadcast_handle,
@@ -806,7 +863,7 @@ async fn handle_shared_client(
                             .await
                             {
                                 Ok(message_count) => {
-                                    let mut conn_guard = conn.lock().await;
+                                    let mut conn_guard = writer.lock().await;
                                     let _ = conn_guard
                                         .send_response(
                                             id,
@@ -819,7 +876,7 @@ async fn handle_shared_client(
                                         .await;
                                 }
                                 Err(error) => {
-                                    let mut conn_guard = conn.lock().await;
+                                    let mut conn_guard = writer.lock().await;
                                     let _ = conn_guard.send_error(Some(id), -32003, error).await;
                                 }
                             }
@@ -831,7 +888,7 @@ async fn handle_shared_client(
                                 .current_dir(&work_cwd)
                                 .output()
                                 .await;
-                            let mut conn_guard = conn.lock().await;
+                            let mut conn_guard = writer.lock().await;
                             match add_result {
                                 Ok(o) if o.status.success() => {
                                     let commit_result = tokio::process::Command::new("git")
@@ -904,13 +961,13 @@ async fn handle_shared_client(
                         }
 
                         ClientMethod::ListMcpResources => {
-                            let mut conn_guard = conn.lock().await;
+                            let mut conn_guard = writer.lock().await;
                             let _ = conn_guard
                                 .send_response(id, serde_json::json!({"resources": [], "count": 0}))
                                 .await;
                         }
                         ClientMethod::ReadMcpResource { server_name, uri } => {
-                            let mut conn_guard = conn.lock().await;
+                            let mut conn_guard = writer.lock().await;
                             let _ = conn_guard
                                 .send_error(
                                     Some(id),
@@ -935,14 +992,14 @@ async fn handle_shared_client(
                                     shared.state_manager.get().model,
                                 )
                                 .await;
-                            let mut conn_guard = conn.lock().await;
+                            let mut conn_guard = writer.lock().await;
                             let _ = conn_guard
                                 .send_response(id, serde_json::json!({"task_id": task_id}))
                                 .await;
                         }
                         ClientMethod::TaskList => {
                             let tasks = shared.task_manager.list_tasks().await;
-                            let mut conn_guard = conn.lock().await;
+                            let mut conn_guard = writer.lock().await;
                             let _ = conn_guard
                                 .send_response(
                                     id,
@@ -953,12 +1010,12 @@ async fn handle_shared_client(
                         ClientMethod::TaskStatus { task_id } => {
                             match shared.task_manager.get_task_status(&task_id).await {
                                 Some(task) => {
-                                    let mut conn_guard = conn.lock().await;
+                                    let mut conn_guard = writer.lock().await;
                                     let _ =
                                         conn_guard.send_response(id, serde_json::json!(task)).await;
                                 }
                                 None => {
-                                    let mut conn_guard = conn.lock().await;
+                                    let mut conn_guard = writer.lock().await;
                                     let _ = conn_guard
                                         .send_error(
                                             Some(id),
@@ -971,14 +1028,14 @@ async fn handle_shared_client(
                         }
                         ClientMethod::TaskStop { task_id } => {
                             let stopped = shared.task_manager.stop_task(&task_id).await;
-                            let mut conn_guard = conn.lock().await;
+                            let mut conn_guard = writer.lock().await;
                             let _ = conn_guard
                                 .send_response(id, serde_json::json!({"stopped": stopped}))
                                 .await;
                         }
                         ClientMethod::MemoryList => {
                             let entries = shared.memory_store.list().await;
-                            let mut conn_guard = conn.lock().await;
+                            let mut conn_guard = writer.lock().await;
                             let _ = conn_guard.send_response(id, serde_json::json!({"memories": entries, "count": entries.len()})).await;
                         }
                         ClientMethod::MemoryAdd { content, category } => {
@@ -987,7 +1044,7 @@ async fn handle_shared_client(
                                 .memory_store
                                 .add(content, cat, "user".to_string())
                                 .await;
-                            let mut conn_guard = conn.lock().await;
+                            let mut conn_guard = writer.lock().await;
                             match result {
                                 Ok(entry) => {
                                     let _ = conn_guard
@@ -1008,7 +1065,7 @@ async fn handle_shared_client(
                         }
                         ClientMethod::MemoryDelete { id: mem_id } => {
                             let result = shared.memory_store.delete(&mem_id).await;
-                            let mut conn_guard = conn.lock().await;
+                            let mut conn_guard = writer.lock().await;
                             match result {
                                 Ok(deleted) => {
                                     let _ = conn_guard
@@ -1029,7 +1086,7 @@ async fn handle_shared_client(
                         }
                         ClientMethod::MemoryClear => {
                             let result = shared.memory_store.clear().await;
-                            let mut conn_guard = conn.lock().await;
+                            let mut conn_guard = writer.lock().await;
                             match result {
                                 Ok(count) => {
                                     let _ = conn_guard
@@ -1050,7 +1107,7 @@ async fn handle_shared_client(
                         }
                         ClientMethod::MemoryStats => {
                             let stats = shared.memory_store.stats().await;
-                            let mut conn_guard = conn.lock().await;
+                            let mut conn_guard = writer.lock().await;
                             let _ = conn_guard.send_response(id, serde_json::json!(stats)).await;
                         }
                         ClientMethod::MemoryArchive { id: mem_id } => {
@@ -1058,7 +1115,7 @@ async fn handle_shared_client(
                                 .memory_store
                                 .archive_by_id(&mem_id, &shared.memory_archive)
                                 .await;
-                            let mut conn_guard = conn.lock().await;
+                            let mut conn_guard = writer.lock().await;
                             match archived {
                                 Some(entry) => {
                                     let _ = conn_guard
@@ -1081,7 +1138,7 @@ async fn handle_shared_client(
                                 .memory_store
                                 .restore_from_archive(&mem_id, &shared.memory_archive)
                                 .await;
-                            let mut conn_guard = conn.lock().await;
+                            let mut conn_guard = writer.lock().await;
                             match restored {
                                 Some(entry) => {
                                     let _ = conn_guard
@@ -1101,12 +1158,12 @@ async fn handle_shared_client(
                         }
                         ClientMethod::MemoryArchiveList => {
                             let archived = shared.memory_archive.list_archived().await;
-                            let mut conn_guard = conn.lock().await;
+                            let mut conn_guard = writer.lock().await;
                             let _ = conn_guard.send_response(id, serde_json::json!({"archived": archived, "count": archived.len()})).await;
                         }
                         ClientMethod::MemoryCleanup => {
                             let result = shared.memory_cleanup.run_now().await;
-                            let mut conn_guard = conn.lock().await;
+                            let mut conn_guard = writer.lock().await;
                             let _ = conn_guard
                                 .send_response(
                                     id,
@@ -1125,7 +1182,7 @@ async fn handle_shared_client(
                             schedule,
                             cwd,
                         } => {
-                            let mut conn_guard = conn.lock().await;
+                            let mut conn_guard = writer.lock().await;
                             match shared
                                 .cron_manager
                                 .add_job(name, prompt, schedule, cwd)
@@ -1143,13 +1200,13 @@ async fn handle_shared_client(
                         }
                         ClientMethod::CronRemove { id: job_id } => {
                             let removed = shared.cron_manager.remove_job(&job_id).await;
-                            let mut conn_guard = conn.lock().await;
+                            let mut conn_guard = writer.lock().await;
                             let _ = conn_guard
                                 .send_response(id, serde_json::json!({"removed": removed}))
                                 .await;
                         }
                         ClientMethod::CronToggle { id: job_id } => {
-                            let mut conn_guard = conn.lock().await;
+                            let mut conn_guard = writer.lock().await;
                             match shared.cron_manager.toggle_job(&job_id).await {
                                 Some(enabled) => {
                                     let _ = conn_guard
@@ -1165,7 +1222,7 @@ async fn handle_shared_client(
                         }
                         ClientMethod::CronList => {
                             let jobs = shared.cron_manager.list_jobs().await;
-                            let mut conn_guard = conn.lock().await;
+                            let mut conn_guard = writer.lock().await;
                             let _ = conn_guard
                                 .send_response(
                                     id,
@@ -1186,7 +1243,7 @@ async fn handle_shared_client(
                                 })
                                 .collect();
                             let count = enriched.len();
-                            let mut conn_guard = conn.lock().await;
+                            let mut conn_guard = writer.lock().await;
                             let _ = conn_guard
                                 .send_response(
                                     id,
@@ -1195,7 +1252,7 @@ async fn handle_shared_client(
                                 .await;
                         }
                         ClientMethod::ProjectsSwitch { id_prefix } => {
-                            let mut conn_guard = conn.lock().await;
+                            let mut conn_guard = writer.lock().await;
                             match shared.project_registry.find_by_prefix(&id_prefix).await {
                                 Ok(project) => {
                                     let abs_cwd = std::path::PathBuf::from(&project.cwd);
@@ -1214,7 +1271,7 @@ async fn handle_shared_client(
                                         drop(conn_guard);
                                         match switch_shared_client(
                                             &shared,
-                                            &conn,
+                                            &writer,
                                             &mut session,
                                             &mut client_id,
                                             &mut broadcast_handle,
@@ -1226,7 +1283,7 @@ async fn handle_shared_client(
                                         {
                                             Ok(message_count) => {
                                                 shared.project_registry.touch(&project.cwd).await;
-                                                let mut conn_guard = conn.lock().await;
+                                                let mut conn_guard = writer.lock().await;
                                                 let _ = conn_guard
                                                     .send_response(
                                                         id,
@@ -1239,7 +1296,7 @@ async fn handle_shared_client(
                                                     .await;
                                             }
                                             Err(error) => {
-                                                let mut conn_guard = conn.lock().await;
+                                                let mut conn_guard = writer.lock().await;
                                                 let _ = conn_guard
                                                     .send_error(Some(id), -32003, error)
                                                     .await;
@@ -1263,7 +1320,7 @@ async fn handle_shared_client(
                             };
                             let abs_path = std::path::PathBuf::from(&expanded);
                             if !abs_path.is_dir() {
-                                let mut conn_guard = conn.lock().await;
+                                let mut conn_guard = writer.lock().await;
                                 let _ = conn_guard
                                     .send_error(
                                         Some(id),
@@ -1278,7 +1335,7 @@ async fn handle_shared_client(
                                         .map(|n| n.to_string_lossy().to_string())
                                         .unwrap_or_else(|| expanded.clone())
                                 });
-                                let mut conn_guard = conn.lock().await;
+                                let mut conn_guard = writer.lock().await;
                                 match shared
                                     .project_registry
                                     .register(expanded.clone(), desc)
@@ -1316,7 +1373,7 @@ async fn handle_shared_client(
                                         drop(conn_guard);
                                         match switch_shared_client(
                                             &shared,
-                                            &conn,
+                                            &writer,
                                             &mut session,
                                             &mut client_id,
                                             &mut broadcast_handle,
@@ -1327,7 +1384,7 @@ async fn handle_shared_client(
                                         .await
                                         {
                                             Ok(message_count) => {
-                                                let mut conn_guard = conn.lock().await;
+                                                let mut conn_guard = writer.lock().await;
                                                 let _ = conn_guard
                                                     .send_response(
                                                         id,
@@ -1341,7 +1398,7 @@ async fn handle_shared_client(
                                                     .await;
                                             }
                                             Err(error) => {
-                                                let mut conn_guard = conn.lock().await;
+                                                let mut conn_guard = writer.lock().await;
                                                 let _ = conn_guard
                                                     .send_error(Some(id), -32003, error)
                                                     .await;
@@ -1358,7 +1415,7 @@ async fn handle_shared_client(
                             id_prefix,
                             description,
                         } => {
-                            let mut conn_guard = conn.lock().await;
+                            let mut conn_guard = writer.lock().await;
                             match shared
                                 .project_registry
                                 .update_description(&id_prefix, description)
@@ -1414,7 +1471,7 @@ async fn handle_shared_client(
                                 })
                                 .collect();
                             let total = messages.len();
-                            let mut conn_guard = conn.lock().await;
+                            let mut conn_guard = writer.lock().await;
                             let _ = conn_guard
                                 .send_response(
                                     id,
@@ -1501,7 +1558,7 @@ async fn handle_shared_client(
                                 }
                             }
 
-                            let mut conn_guard = conn.lock().await;
+                            let mut conn_guard = writer.lock().await;
                             let _ = conn_guard
                                 .send_response(
                                     id,
@@ -1515,7 +1572,7 @@ async fn handle_shared_client(
                         }
                         ClientMethod::DocUpload { file_path } => {
                             let path = std::path::Path::new(&file_path);
-                            let mut conn_guard = conn.lock().await;
+                            let mut conn_guard = writer.lock().await;
                             match doc_upload::build_attachment_from_file(path) {
                                 Ok(attachment) => {
                                     let _ = conn_guard
@@ -1569,7 +1626,7 @@ async fn handle_shared_client(
                                 .collect();
 
                             if export_entries.is_empty() {
-                                let mut conn_guard = conn.lock().await;
+                                let mut conn_guard = writer.lock().await;
                                 let _ = conn_guard
                                     .send_error(Some(id), -32000, "当前会话无对话记录".to_string())
                                     .await;
@@ -1583,7 +1640,7 @@ async fn handle_shared_client(
                                         .to_string()
                                 });
 
-                                let mut conn_guard = conn.lock().await;
+                                let mut conn_guard = writer.lock().await;
                                 match std::fs::write(&file_path, &markdown) {
                                     Ok(()) => {
                                         let _ = conn_guard
@@ -1626,7 +1683,7 @@ async fn handle_shared_client(
                                 Some("bugfix") => engine::spec_engine::SpecType::Bugfix,
                                 _ => engine::spec_engine::SpecType::Feature,
                             };
-                            let mut conn_guard = conn.lock().await;
+                            let mut conn_guard = writer.lock().await;
                             match spec_engine.create_spec(&feature_name, wf, st) {
                                 Ok(config) => {
                                     let _ = conn_guard.send_response(id, serde_json::json!({
@@ -1645,7 +1702,7 @@ async fn handle_shared_client(
                         ClientMethod::SpecList => {
                             let spec_engine =
                                 engine::spec_engine::SpecEngine::new(work_cwd.clone());
-                            let mut conn_guard = conn.lock().await;
+                            let mut conn_guard = writer.lock().await;
                             match spec_engine.list_specs() {
                                 Ok(specs) => {
                                     let _ = conn_guard
@@ -1662,7 +1719,7 @@ async fn handle_shared_client(
                         ClientMethod::SpecShow { feature_name } => {
                             let spec_engine =
                                 engine::spec_engine::SpecEngine::new(work_cwd.clone());
-                            let mut conn_guard = conn.lock().await;
+                            let mut conn_guard = writer.lock().await;
                             match spec_engine.get_spec(&feature_name) {
                                 Ok(summary) => {
                                     let _ = conn_guard
@@ -1682,7 +1739,7 @@ async fn handle_shared_client(
                         ClientMethod::SpecStatus { feature_name } => {
                             let spec_engine =
                                 engine::spec_engine::SpecEngine::new(work_cwd.clone());
-                            let mut conn_guard = conn.lock().await;
+                            let mut conn_guard = writer.lock().await;
                             match spec_engine.get_status(&feature_name) {
                                 Ok(progress) => {
                                     let _ = conn_guard
@@ -1705,7 +1762,7 @@ async fn handle_shared_client(
                         } => {
                             let spec_engine =
                                 engine::spec_engine::SpecEngine::new(work_cwd.clone());
-                            let mut conn_guard = conn.lock().await;
+                            let mut conn_guard = writer.lock().await;
                             let task = if let Some(_tid) = &task_id {
                                 // Find specific task
                                 match spec_engine.next_task(&feature_name) {
@@ -1760,7 +1817,7 @@ async fn handle_shared_client(
                         } => {
                             let spec_engine =
                                 engine::spec_engine::SpecEngine::new(work_cwd.clone());
-                            let mut conn_guard = conn.lock().await;
+                            let mut conn_guard = writer.lock().await;
                             match spec_engine.read_phase_doc(&feature_name, &phase) {
                                 Ok(content) => {
                                     let _ = conn_guard
@@ -1788,7 +1845,7 @@ async fn handle_shared_client(
                                 .iter()
                                 .map(|h| serde_json::to_value(h).unwrap_or_default())
                                 .collect();
-                            let mut conn_guard = conn.lock().await;
+                            let mut conn_guard = writer.lock().await;
                             let _ = conn_guard
                                 .send_response(
                                     id,
@@ -1815,7 +1872,7 @@ async fn handle_shared_client(
                             let trigger_type = match TriggerType::from_str(&trigger) {
                                 Ok(t) => t,
                                 Err(e) => {
-                                    let mut conn_guard = conn.lock().await;
+                                    let mut conn_guard = writer.lock().await;
                                     let _ = conn_guard.send_error(Some(id), -32602, e).await;
                                     continue;
                                 }
@@ -1825,7 +1882,7 @@ async fn handle_shared_client(
                             let hook_action: Action = match serde_json::from_value(action) {
                                 Ok(a) => a,
                                 Err(e) => {
-                                    let mut conn_guard = conn.lock().await;
+                                    let mut conn_guard = writer.lock().await;
                                     let _ = conn_guard
                                         .send_error(
                                             Some(id),
@@ -1842,7 +1899,7 @@ async fn handle_shared_client(
                                 Some(f) => match serde_json::from_value(f) {
                                     Ok(f) => Some(f),
                                     Err(e) => {
-                                        let mut conn_guard = conn.lock().await;
+                                        let mut conn_guard = writer.lock().await;
                                         let _ = conn_guard
                                             .send_error(
                                                 Some(id),
@@ -1868,7 +1925,7 @@ async fn handle_shared_client(
                             // Add the hook
                             match shared.hook_manager.add_hook(hook.clone()).await {
                                 Ok(()) => {
-                                    let mut conn_guard = conn.lock().await;
+                                    let mut conn_guard = writer.lock().await;
                                     let _ = conn_guard
                                         .send_response(
                                             id,
@@ -1880,7 +1937,7 @@ async fn handle_shared_client(
                                         .await;
                                 }
                                 Err(e) => {
-                                    let mut conn_guard = conn.lock().await;
+                                    let mut conn_guard = writer.lock().await;
                                     let _ = conn_guard.send_error(Some(id), -32000, e).await;
                                 }
                             }
@@ -1888,7 +1945,7 @@ async fn handle_shared_client(
                         ClientMethod::HooksToggle { id: hook_id } => {
                             match shared.hook_manager.toggle_hook(&hook_id).await {
                                 Some(new_enabled) => {
-                                    let mut conn_guard = conn.lock().await;
+                                    let mut conn_guard = writer.lock().await;
                                     let _ = conn_guard.send_response(id, serde_json::json!({
                                         "id": hook_id,
                                         "enabled": new_enabled,
@@ -1896,7 +1953,7 @@ async fn handle_shared_client(
                                     })).await;
                                 }
                                 None => {
-                                    let mut conn_guard = conn.lock().await;
+                                    let mut conn_guard = writer.lock().await;
                                     let _ = conn_guard
                                         .send_error(
                                             Some(id),
@@ -1909,7 +1966,7 @@ async fn handle_shared_client(
                         }
                         ClientMethod::HooksRemove { id: hook_id } => {
                             let removed = shared.hook_manager.remove_hook(&hook_id).await;
-                            let mut conn_guard = conn.lock().await;
+                            let mut conn_guard = writer.lock().await;
                             let _ = conn_guard.send_response(id, serde_json::json!({
                                 "id": hook_id,
                                 "removed": removed,
@@ -1933,7 +1990,7 @@ async fn handle_shared_client(
                             let team_mode = match EngineTeamMode::from_str(&mode) {
                                 Ok(m) => m,
                                 Err(e) => {
-                                    let mut conn_guard = conn.lock().await;
+                                    let mut conn_guard = writer.lock().await;
                                     let _ = conn_guard.send_error(Some(id), -32602, e).await;
                                     continue;
                                 }
@@ -1944,7 +2001,7 @@ async fn handle_shared_client(
                                 Some(p) => match serde_json::from_value(p) {
                                     Ok(policy) => Some(policy),
                                     Err(e) => {
-                                        let mut conn_guard = conn.lock().await;
+                                        let mut conn_guard = writer.lock().await;
                                         let _ = conn_guard
                                             .send_error(
                                                 Some(id),
@@ -1991,7 +2048,7 @@ async fn handle_shared_client(
                                             )
                                             .await
                                         {
-                                            let mut conn_guard = conn.lock().await;
+                                            let mut conn_guard = writer.lock().await;
                                             let _ = conn_guard
                                                 .send_error(
                                                     Some(id),
@@ -2009,7 +2066,7 @@ async fn handle_shared_client(
                                     // Store the team
                                     shared.team_executor.store_team(team).await;
 
-                                    let mut conn_guard = conn.lock().await;
+                                    let mut conn_guard = writer.lock().await;
                                     let _ = conn_guard
                                         .send_response(
                                             id,
@@ -2022,7 +2079,7 @@ async fn handle_shared_client(
                                         .await;
                                 }
                                 Err(e) => {
-                                    let mut conn_guard = conn.lock().await;
+                                    let mut conn_guard = writer.lock().await;
                                     let _ =
                                         conn_guard.send_error(Some(id), -32000, e.message).await;
                                 }
@@ -2031,7 +2088,7 @@ async fn handle_shared_client(
                         ClientMethod::TeamList => {
                             let teams = shared.team_executor.list_teams().await;
                             let count = teams.len();
-                            let mut conn_guard = conn.lock().await;
+                            let mut conn_guard = writer.lock().await;
                             let _ = conn_guard
                                 .send_response(
                                     id,
@@ -2046,7 +2103,7 @@ async fn handle_shared_client(
                             match shared.team_executor.get_team(&team_id).await {
                                 Some(team) => {
                                     let summary = team.summary();
-                                    let mut conn_guard = conn.lock().await;
+                                    let mut conn_guard = writer.lock().await;
                                     let _ = conn_guard
                                         .send_response(
                                             id,
@@ -2058,7 +2115,7 @@ async fn handle_shared_client(
                                         .await;
                                 }
                                 None => {
-                                    let mut conn_guard = conn.lock().await;
+                                    let mut conn_guard = writer.lock().await;
                                     let _ = conn_guard
                                         .send_error(
                                             Some(id),
@@ -2087,7 +2144,7 @@ async fn handle_shared_client(
                                             })
                                         })
                                         .collect();
-                                    let mut conn_guard = conn.lock().await;
+                                    let mut conn_guard = writer.lock().await;
                                     let _ = conn_guard
                                         .send_response(
                                             id,
@@ -2103,7 +2160,7 @@ async fn handle_shared_client(
                                         .await;
                                 }
                                 None => {
-                                    let mut conn_guard = conn.lock().await;
+                                    let mut conn_guard = writer.lock().await;
                                     let _ = conn_guard
                                         .send_error(
                                             Some(id),
@@ -2117,7 +2174,7 @@ async fn handle_shared_client(
                         ClientMethod::TeamAbort { team_id } => {
                             match shared.team_executor.abort_team(&team_id).await {
                                 Some(team) => {
-                                    let mut conn_guard = conn.lock().await;
+                                    let mut conn_guard = writer.lock().await;
                                     let _ = conn_guard
                                         .send_response(
                                             id,
@@ -2130,7 +2187,7 @@ async fn handle_shared_client(
                                         .await;
                                 }
                                 None => {
-                                    let mut conn_guard = conn.lock().await;
+                                    let mut conn_guard = writer.lock().await;
                                     let _ = conn_guard
                                         .send_error(
                                             Some(id),
@@ -2159,7 +2216,7 @@ async fn handle_shared_client(
                                     // Execute the team
                                     let result = executor.execute(team).await;
 
-                                    let mut conn_guard = conn.lock().await;
+                                    let mut conn_guard = writer.lock().await;
                                     let _ = conn_guard
                                         .send_response(
                                             id,
@@ -2176,7 +2233,7 @@ async fn handle_shared_client(
                                         .await;
                                 }
                                 None => {
-                                    let mut conn_guard = conn.lock().await;
+                                    let mut conn_guard = writer.lock().await;
                                     let _ = conn_guard
                                         .send_error(
                                             Some(id),
@@ -2208,7 +2265,7 @@ async fn handle_shared_client(
                                     })
                                 })
                                 .collect();
-                            let mut conn_guard = conn.lock().await;
+                            let mut conn_guard = writer.lock().await;
                             let _ = conn_guard
                                 .send_response(
                                     id,
@@ -2221,11 +2278,11 @@ async fn handle_shared_client(
                             match serde_json::from_str::<engine::template::types::Template>(&json) {
                                 Ok(template) => match engine.create_template(&template) {
                                     Ok(()) => {
-                                        let mut conn_guard = conn.lock().await;
+                                        let mut conn_guard = writer.lock().await;
                                         let _ = conn_guard.send_response(id, serde_json::json!({"success": true, "name": template.name})).await;
                                     }
                                     Err(e) => {
-                                        let mut conn_guard = conn.lock().await;
+                                        let mut conn_guard = writer.lock().await;
                                         let _ = conn_guard
                                             .send_error(
                                                 Some(id),
@@ -2236,7 +2293,7 @@ async fn handle_shared_client(
                                     }
                                 },
                                 Err(e) => {
-                                    let mut conn_guard = conn.lock().await;
+                                    let mut conn_guard = writer.lock().await;
                                     let _ = conn_guard
                                         .send_error(
                                             Some(id),
@@ -2251,7 +2308,7 @@ async fn handle_shared_client(
                             let mut engine = engine::template::engine::TemplateEngine::new();
                             match engine.delete_template(&name) {
                                 Ok(()) => {
-                                    let mut conn_guard = conn.lock().await;
+                                    let mut conn_guard = writer.lock().await;
                                     let _ = conn_guard
                                         .send_response(
                                             id,
@@ -2260,7 +2317,7 @@ async fn handle_shared_client(
                                         .await;
                                 }
                                 Err(e) => {
-                                    let mut conn_guard = conn.lock().await;
+                                    let mut conn_guard = writer.lock().await;
                                     let _ = conn_guard
                                         .send_error(
                                             Some(id),
@@ -2275,11 +2332,11 @@ async fn handle_shared_client(
                             let engine = engine::template::engine::TemplateEngine::new();
                             match engine.export_template(&name) {
                                 Ok(json_str) => {
-                                    let mut conn_guard = conn.lock().await;
+                                    let mut conn_guard = writer.lock().await;
                                     let _ = conn_guard.send_response(id, serde_json::json!({"name": name, "template": serde_json::from_str::<serde_json::Value>(&json_str).unwrap_or_default()})).await;
                                 }
                                 Err(e) => {
-                                    let mut conn_guard = conn.lock().await;
+                                    let mut conn_guard = writer.lock().await;
                                     let _ = conn_guard
                                         .send_error(
                                             Some(id),
@@ -2294,11 +2351,11 @@ async fn handle_shared_client(
                             let mut engine = engine::template::engine::TemplateEngine::new();
                             match engine.import_template_url(&url).await {
                                 Ok(template) => {
-                                    let mut conn_guard = conn.lock().await;
+                                    let mut conn_guard = writer.lock().await;
                                     let _ = conn_guard.send_response(id, serde_json::json!({"success": true, "name": template.name, "trigger": template.trigger})).await;
                                 }
                                 Err(e) => {
-                                    let mut conn_guard = conn.lock().await;
+                                    let mut conn_guard = writer.lock().await;
                                     let _ = conn_guard
                                         .send_error(
                                             Some(id),
@@ -2337,7 +2394,7 @@ async fn handle_shared_client(
                                 }
                                 Err(e) => serde_json::json!({"error": format!("{}", e)}),
                             };
-                            let mut conn_guard = conn.lock().await;
+                            let mut conn_guard = writer.lock().await;
                             let _ = conn_guard.send_response(id, result).await;
                         }
                         ClientMethod::GitPrCreate {
@@ -2371,7 +2428,7 @@ async fn handle_shared_client(
                                     serde_json::json!({"success": false, "error": format!("{}", e)})
                                 }
                             };
-                            let mut conn_guard = conn.lock().await;
+                            let mut conn_guard = writer.lock().await;
                             let _ = conn_guard.send_response(id, result).await;
                         }
                         ClientMethod::GitBranchList => {
@@ -2398,7 +2455,7 @@ async fn handle_shared_client(
                                     }
                                     Err(e) => serde_json::json!({"error": format!("{}", e)}),
                                 };
-                            let mut conn_guard = conn.lock().await;
+                            let mut conn_guard = writer.lock().await;
                             let _ = conn_guard.send_response(id, result).await;
                         }
                         ClientMethod::GitBranchCreate { name } => {
@@ -2413,7 +2470,7 @@ async fn handle_shared_client(
                                         serde_json::json!({"success": false, "error": format!("{}", e)})
                                     }
                                 };
-                            let mut conn_guard = conn.lock().await;
+                            let mut conn_guard = writer.lock().await;
                             let _ = conn_guard.send_response(id, result).await;
                         }
                         ClientMethod::GitConflictCheck => {
@@ -2429,7 +2486,7 @@ async fn handle_shared_client(
                                 }
                                 Err(e) => serde_json::json!({"error": format!("{}", e)}),
                             };
-                            let mut conn_guard = conn.lock().await;
+                            let mut conn_guard = writer.lock().await;
                             let _ = conn_guard.send_response(id, result).await;
                         }
                         ClientMethod::GitCommitAmend => {
@@ -2442,7 +2499,7 @@ async fn handle_shared_client(
                                         serde_json::json!({"success": false, "error": format!("{}", e)})
                                     }
                                 };
-                            let mut conn_guard = conn.lock().await;
+                            let mut conn_guard = writer.lock().await;
                             let _ = conn_guard.send_response(id, result).await;
                         }
                         ClientMethod::GitUndo => {
@@ -2455,29 +2512,29 @@ async fn handle_shared_client(
                                         serde_json::json!({"success": false, "error": format!("{}", e)})
                                     }
                                 };
-                            let mut conn_guard = conn.lock().await;
+                            let mut conn_guard = writer.lock().await;
                             let _ = conn_guard.send_response(id, result).await;
                         }
 
                         // ── Model Router handlers ──
                         ClientMethod::ModelList => {
                             let result = ipc::handlers::model::handle_model_list();
-                            let mut conn_guard = conn.lock().await;
+                            let mut conn_guard = writer.lock().await;
                             let _ = conn_guard.send_response(id, result).await;
                         }
                         ClientMethod::ModelRoute { task } => {
                             let result = ipc::handlers::model::handle_model_route(&task);
-                            let mut conn_guard = conn.lock().await;
+                            let mut conn_guard = writer.lock().await;
                             let _ = conn_guard.send_response(id, result).await;
                         }
                         ClientMethod::ModelBudget => {
                             let result = ipc::handlers::model::handle_model_budget();
-                            let mut conn_guard = conn.lock().await;
+                            let mut conn_guard = writer.lock().await;
                             let _ = conn_guard.send_response(id, result).await;
                         }
                         ClientMethod::ModelStats => {
                             let result = ipc::handlers::model::handle_model_stats();
-                            let mut conn_guard = conn.lock().await;
+                            let mut conn_guard = writer.lock().await;
                             let _ = conn_guard.send_response(id, result).await;
                         }
 
@@ -2487,7 +2544,7 @@ async fn handle_shared_client(
                                 match engine::telemetry::collector::TelemetryCollector::new() {
                                     Ok(c) => c,
                                     Err(e) => {
-                                        let mut conn_guard = conn.lock().await;
+                                        let mut conn_guard = writer.lock().await;
                                         let _ = conn_guard
                                             .send_error(
                                                 Some(id),
@@ -2500,7 +2557,7 @@ async fn handle_shared_client(
                                 };
                             match collector.get_stats() {
                                 Ok(stats) => {
-                                    let mut conn_guard = conn.lock().await;
+                                    let mut conn_guard = writer.lock().await;
                                     let _ = conn_guard
                                         .send_response(
                                             id,
@@ -2518,7 +2575,7 @@ async fn handle_shared_client(
                                         .await;
                                 }
                                 Err(e) => {
-                                    let mut conn_guard = conn.lock().await;
+                                    let mut conn_guard = writer.lock().await;
                                     let _ = conn_guard
                                         .send_error(
                                             Some(id),
@@ -2534,7 +2591,7 @@ async fn handle_shared_client(
                                 match engine::telemetry::collector::TelemetryCollector::new() {
                                     Ok(c) => c,
                                     Err(e) => {
-                                        let mut conn_guard = conn.lock().await;
+                                        let mut conn_guard = writer.lock().await;
                                         let _ = conn_guard
                                             .send_error(
                                                 Some(id),
@@ -2548,7 +2605,7 @@ async fn handle_shared_client(
                             let daily = match collector.get_daily_stats(days) {
                                 Ok(d) => d,
                                 Err(e) => {
-                                    let mut conn_guard = conn.lock().await;
+                                    let mut conn_guard = writer.lock().await;
                                     let _ = conn_guard
                                         .send_error(
                                             Some(id),
@@ -2572,7 +2629,7 @@ async fn handle_shared_client(
                                     })
                                 })
                                 .collect();
-                            let mut conn_guard = conn.lock().await;
+                            let mut conn_guard = writer.lock().await;
                             let _ = conn_guard.send_response(id, serde_json::json!({"days": days, "daily": daily_list, "count": daily_list.len()})).await;
                         }
                         ClientMethod::TelemetryExport { format } => {
@@ -2580,7 +2637,7 @@ async fn handle_shared_client(
                                 match engine::telemetry::collector::TelemetryCollector::new() {
                                     Ok(c) => c,
                                     Err(e) => {
-                                        let mut conn_guard = conn.lock().await;
+                                        let mut conn_guard = writer.lock().await;
                                         let _ = conn_guard
                                             .send_error(
                                                 Some(id),
@@ -2604,7 +2661,7 @@ async fn handle_shared_client(
                             };
                             match result {
                                 Ok(data) => {
-                                    let mut conn_guard = conn.lock().await;
+                                    let mut conn_guard = writer.lock().await;
                                     let _ = conn_guard
                                         .send_response(
                                             id,
@@ -2613,7 +2670,7 @@ async fn handle_shared_client(
                                         .await;
                                 }
                                 Err(e) => {
-                                    let mut conn_guard = conn.lock().await;
+                                    let mut conn_guard = writer.lock().await;
                                     let _ = conn_guard
                                         .send_error(
                                             Some(id),
@@ -2644,7 +2701,7 @@ async fn handle_shared_client(
                                     })
                                 })
                                 .collect();
-                            let mut conn_guard = conn.lock().await;
+                            let mut conn_guard = writer.lock().await;
                             let _ = conn_guard.send_response(id, serde_json::json!({"rules": rule_list, "count": rule_list.len()})).await;
                         }
                         ClientMethod::PermissionGrant {
@@ -2675,7 +2732,7 @@ async fn handle_shared_client(
                                     }
                                 }
                             }
-                            let mut conn_guard = conn.lock().await;
+                            let mut conn_guard = writer.lock().await;
                             let _ = conn_guard
                                 .send_response(
                                     id,
@@ -2712,7 +2769,7 @@ async fn handle_shared_client(
                                 }
                                 count
                             };
-                            let mut conn_guard = conn.lock().await;
+                            let mut conn_guard = writer.lock().await;
                             let _ = conn_guard
                                 .send_response(
                                     id,
@@ -2731,7 +2788,7 @@ async fn handle_shared_client(
                                 "always_deny_rules": {},
                                 "always_ask_rules": {}
                             }));
-                            let mut conn_guard = conn.lock().await;
+                            let mut conn_guard = writer.lock().await;
                             let _ = conn_guard.send_response(id, perms).await;
                         }
                         ClientMethod::PermissionsAddRule {
@@ -2749,7 +2806,7 @@ async fn handle_shared_client(
                                     let _ = cfg.save();
                                 }
                             }
-                            let mut conn_guard = conn.lock().await;
+                            let mut conn_guard = writer.lock().await;
                             let _ = conn_guard
                                 .send_response(
                                     id,
@@ -2785,7 +2842,7 @@ async fn handle_shared_client(
                                 }
                                 count
                             };
-                            let mut conn_guard = conn.lock().await;
+                            let mut conn_guard = writer.lock().await;
                             let _ = conn_guard
                                 .send_response(
                                     id,
@@ -2818,7 +2875,7 @@ async fn handle_shared_client(
                                     let _ = cfg.save();
                                 }
                             }
-                            let mut conn_guard = conn.lock().await;
+                            let mut conn_guard = writer.lock().await;
                             let _ = conn_guard
                                 .send_response(
                                     id,
@@ -2866,7 +2923,7 @@ async fn handle_shared_client(
                                 "message_count": messages.len(),
                                 "model": shared.baoclaw_config.model,
                             });
-                            let mut conn_guard = conn.lock().await;
+                            let mut conn_guard = writer.lock().await;
                             let _ = conn_guard.send_response(id, result).await;
                         }
                         ClientMethod::SessionCost => {
@@ -2892,7 +2949,7 @@ async fn handle_shared_client(
                                 "model": model,
                                 "pricing_configured": true,
                             });
-                            let mut conn_guard = conn.lock().await;
+                            let mut conn_guard = writer.lock().await;
                             let _ = conn_guard.send_response(id, result).await;
                         }
                         ClientMethod::SessionInfo => {
@@ -2911,7 +2968,7 @@ async fn handle_shared_client(
                                 "created_at": created_at,
                                 "last_active": last_active,
                             });
-                            let mut conn_guard = conn.lock().await;
+                            let mut conn_guard = writer.lock().await;
                             let _ = conn_guard.send_response(id, result).await;
                         }
                         ClientMethod::ConfigModel => {
@@ -3025,7 +3082,7 @@ async fn handle_shared_client(
                                 "fallback_chain": fallback_chain,
                                 "max_retries_per_model": cfg.max_retries_per_model,
                             });
-                            let mut conn_guard = conn.lock().await;
+                            let mut conn_guard = writer.lock().await;
                             let _ = conn_guard.send_response(id, result).await;
                         }
                         ClientMethod::ConfigShow => {
@@ -3060,7 +3117,7 @@ async fn handle_shared_client(
                                 }
                             }
 
-                            let mut conn_guard = conn.lock().await;
+                            let mut conn_guard = writer.lock().await;
                             let _ = conn_guard
                                 .send_response(id, serde_json::json!({"config": config_json}))
                                 .await;
@@ -3068,7 +3125,7 @@ async fn handle_shared_client(
                     }
                 }
                 Err(e) => {
-                    let mut conn_guard = conn.lock().await;
+                    let mut conn_guard = writer.lock().await;
                     let _ = conn_guard
                         .send_error(Some(id), -32601, format!("{}", e))
                         .await;
@@ -3369,6 +3426,15 @@ async fn handle_client(mut conn: IpcConnection, shared: SharedState) {
         )
         .await;
         let hook_cwd = work_cwd.to_string_lossy().to_string();
+
+        // The submit drain runs in a spawned task and owns the submitter
+        // until the turn's sync+persist completes. remove_client would
+        // auto-release it mid-turn, letting a second turn start while the
+        // first drain is still writing — wait for the drain instead. It
+        // notices a dead socket on its next event, so this is short-lived.
+        while session.is_active_submitter(client_id).await {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
 
         // Client disconnect handling (Task 6.1)
         let is_last = session.remove_client(client_id).await;

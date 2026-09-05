@@ -2,7 +2,6 @@ use serde_json::Value;
 
 use crate::engine::query_engine::EngineEvent;
 use crate::ipc::protocol::JsonRpcNotification;
-use crate::state::manager::StatePatch;
 
 /// Convert an EngineEvent to a JSON-RPC notification for the "stream/event" method.
 pub fn engine_event_to_notification(event: &EngineEvent) -> JsonRpcNotification {
@@ -12,37 +11,14 @@ pub fn engine_event_to_notification(event: &EngineEvent) -> JsonRpcNotification 
     )
 }
 
-/// Convert a batch of StatePatches to a JSON-RPC notification for the "state/patch" method.
-pub fn state_patches_to_notification(patches: &[StatePatch]) -> JsonRpcNotification {
-    JsonRpcNotification::new(
-        "state/patch",
-        serde_json::json!({
-            "patches": serde_json::to_value(patches).unwrap_or(Value::Array(vec![])),
-        }),
-    )
-}
-
-/// Helper to send an EngineEvent over an IpcConnection.
+/// Helper to send an EngineEvent over a connection's write half.
 pub async fn send_engine_event(
-    conn: &mut crate::ipc::server::IpcConnection,
+    writer: &mut crate::ipc::server::IpcWriter,
     event: &EngineEvent,
 ) -> std::io::Result<()> {
     let notif = engine_event_to_notification(event);
     let params = serde_json::to_value(&notif.params).unwrap_or(Value::Null);
-    conn.send_notification(&notif.method, params).await
-}
-
-/// Helper to send StatePatches over an IpcConnection.
-pub async fn send_state_patches(
-    conn: &mut crate::ipc::server::IpcConnection,
-    patches: &[StatePatch],
-) -> std::io::Result<()> {
-    if patches.is_empty() {
-        return Ok(());
-    }
-    let notif = state_patches_to_notification(patches);
-    let params = serde_json::to_value(&notif.params).unwrap_or(Value::Null);
-    conn.send_notification(&notif.method, params).await
+    writer.send_notification(&notif.method, params).await
 }
 
 #[cfg(test)]
@@ -181,66 +157,6 @@ mod tests {
         assert_eq!(notif.params["code"], "rate_limit");
         assert_eq!(notif.params["message"], "Too many requests");
         assert_eq!(notif.params["details"]["retry_after"], 30);
-    }
-
-    // --- state_patches_to_notification tests ---
-
-    #[test]
-    fn test_state_patches_notification_method() {
-        let patches = vec![StatePatch {
-            path: "/model".to_string(),
-            op: PatchOp::Replace {
-                value: Value::String("claude-4".to_string()),
-            },
-        }];
-        let notif = state_patches_to_notification(&patches);
-        assert_eq!(notif.method, "state/patch");
-        assert_eq!(notif.jsonrpc, "2.0");
-    }
-
-    #[test]
-    fn test_state_patches_notification_structure() {
-        let patches = vec![
-            StatePatch {
-                path: "/model".to_string(),
-                op: PatchOp::Replace {
-                    value: Value::String("claude-4".to_string()),
-                },
-            },
-            StatePatch {
-                path: "/tasks/b12345678".to_string(),
-                op: PatchOp::Add {
-                    value: json!({"id": "b12345678", "status": "running"}),
-                },
-            },
-        ];
-        let notif = state_patches_to_notification(&patches);
-        let patches_arr = notif.params["patches"].as_array().unwrap();
-        assert_eq!(patches_arr.len(), 2);
-        assert_eq!(patches_arr[0]["path"], "/model");
-        assert_eq!(patches_arr[1]["path"], "/tasks/b12345678");
-    }
-
-    #[test]
-    fn test_state_patches_empty_array() {
-        let patches: Vec<StatePatch> = vec![];
-        let notif = state_patches_to_notification(&patches);
-        assert_eq!(notif.method, "state/patch");
-        let patches_arr = notif.params["patches"].as_array().unwrap();
-        assert!(patches_arr.is_empty());
-    }
-
-    #[test]
-    fn test_state_patches_remove_op() {
-        let patches = vec![StatePatch {
-            path: "/tasks/b99999999".to_string(),
-            op: PatchOp::Remove,
-        }];
-        let notif = state_patches_to_notification(&patches);
-        let patches_arr = notif.params["patches"].as_array().unwrap();
-        assert_eq!(patches_arr.len(), 1);
-        assert_eq!(patches_arr[0]["path"], "/tasks/b99999999");
-        assert_eq!(patches_arr[0]["op"], json!({"op": "remove"}));
     }
 
     // --- assistant_chunk with tool_use_id ---

@@ -1,4 +1,5 @@
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use serde_json::Value;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter};
@@ -26,6 +27,18 @@ pub struct IpcServer {
 /// A single IPC connection with buffered read/write
 pub struct IpcConnection {
     reader: BufReader<tokio::net::unix::OwnedReadHalf>,
+    writer: BufWriter<tokio::net::unix::OwnedWriteHalf>,
+}
+
+/// The read half of a split connection — owned exclusively by whichever task
+/// reads requests, so it never contends with event writers.
+pub struct IpcReader {
+    reader: BufReader<tokio::net::unix::OwnedReadHalf>,
+}
+
+/// The write half of a split connection, meant to live behind a shared mutex
+/// and be used by request responses, turn-event streams and broadcasts alike.
+pub struct IpcWriter {
     writer: BufWriter<tokio::net::unix::OwnedWriteHalf>,
 }
 
@@ -94,13 +107,21 @@ impl Drop for IpcServer {
 }
 
 impl IpcConnection {
+    /// Split into an exclusively-owned reader and a shared, mutex-guarded
+    /// writer: request reading then never blocks event writers (the reader
+    /// parks while a turn streams, writers keep flowing).
+    pub fn into_split(self) -> (IpcReader, Arc<tokio::sync::Mutex<IpcWriter>>) {
+        let IpcConnection { reader, writer } = self;
+        (
+            IpcReader { reader },
+            Arc::new(tokio::sync::Mutex::new(IpcWriter { writer })),
+        )
+    }
+
     /// Send a JSON-RPC success response as NDJSON.
     pub async fn send_response(&mut self, id: RequestId, result: Value) -> std::io::Result<()> {
         let response = JsonRpcResponse::success(id, result);
-        let bytes = encode_ndjson(&response)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-        self.writer.write_all(&bytes).await?;
-        self.writer.flush().await
+        send_json(&mut self.writer, &response).await
     }
 
     /// Send a JSON-RPC error response as NDJSON.
@@ -111,19 +132,13 @@ impl IpcConnection {
         message: String,
     ) -> std::io::Result<()> {
         let error_response = JsonRpcErrorResponse::new(id, code, message);
-        let bytes = encode_ndjson(&error_response)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-        self.writer.write_all(&bytes).await?;
-        self.writer.flush().await
+        send_json(&mut self.writer, &error_response).await
     }
 
     /// Send a JSON-RPC notification as NDJSON.
     pub async fn send_notification(&mut self, method: &str, params: Value) -> std::io::Result<()> {
         let notification = JsonRpcNotification::new(method, params);
-        let bytes = encode_ndjson(&notification)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-        self.writer.write_all(&bytes).await?;
-        self.writer.flush().await
+        send_json(&mut self.writer, &notification).await
     }
 
     /// Read one NDJSON line and parse it as a JsonRpcMessage.
@@ -136,11 +151,55 @@ impl IpcConnection {
         let message = decode_ndjson_line(&line)?;
         Ok(message)
     }
+}
 
-    /// Flush the write buffer.
-    pub async fn flush(&mut self) -> std::io::Result<()> {
-        self.writer.flush().await
+impl IpcReader {
+    /// Read one NDJSON line and parse it as a JsonRpcMessage.
+    pub async fn recv_message(&mut self) -> Result<JsonRpcMessage, IpcError> {
+        let mut line = String::new();
+        let bytes_read = self.reader.read_line(&mut line).await?;
+        if bytes_read == 0 {
+            return Err(IpcError::ConnectionClosed);
+        }
+        let message = decode_ndjson_line(&line)?;
+        Ok(message)
     }
+}
+
+impl IpcWriter {
+    /// Send a JSON-RPC success response as NDJSON.
+    pub async fn send_response(&mut self, id: RequestId, result: Value) -> std::io::Result<()> {
+        let response = JsonRpcResponse::success(id, result);
+        send_json(&mut self.writer, &response).await
+    }
+
+    /// Send a JSON-RPC error response as NDJSON.
+    pub async fn send_error(
+        &mut self,
+        id: Option<RequestId>,
+        code: i32,
+        message: String,
+    ) -> std::io::Result<()> {
+        let error_response = JsonRpcErrorResponse::new(id, code, message);
+        send_json(&mut self.writer, &error_response).await
+    }
+
+    /// Send a JSON-RPC notification as NDJSON.
+    pub async fn send_notification(&mut self, method: &str, params: Value) -> std::io::Result<()> {
+        let notification = JsonRpcNotification::new(method, params);
+        send_json(&mut self.writer, &notification).await
+    }
+}
+
+/// Encode a JSON-RPC frame and write it as one NDJSON line.
+async fn send_json<T: serde::Serialize>(
+    writer: &mut BufWriter<tokio::net::unix::OwnedWriteHalf>,
+    value: &T,
+) -> std::io::Result<()> {
+    let bytes = encode_ndjson(value)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    writer.write_all(&bytes).await?;
+    writer.flush().await
 }
 
 #[cfg(test)]
