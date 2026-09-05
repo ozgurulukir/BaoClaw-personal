@@ -32,6 +32,11 @@ import {
 import { MessageQueue } from "./messageQueue.js";
 import { createDaemonConnector, type DaemonInfo } from "./daemon.js";
 import { IpcClient } from "../../ts-ipc/client.js";
+import {
+  attachControlChannel,
+  buildDaemonInitParams,
+  type ControlChannel,
+} from "../../ts-ipc/index.js";
 import { createLogger } from "../../ts-ipc/logger.js";
 import { SessionManager } from "./session.js";
 // New modules
@@ -63,6 +68,7 @@ export class WhatsAppGateway {
   private session: SessionManager;
   private daemonConnector: ReturnType<typeof createDaemonConnector>;
   private ipcClient: IpcClient | null = null;
+  private control: ControlChannel | null = null;
   private daemonInfo: DaemonInfo | null = null;
   private rateLimiter: RateLimiter;
   private messageQueue: MessageQueue;
@@ -157,6 +163,14 @@ export class WhatsAppGateway {
     );
     this.ipcClient = client;
     this.daemonInfo = info;
+    // Abort/permission must not wait behind an in-flight turn on the serial
+    // main connection — deliver them via the dedicated control channel,
+    // joining the same session the main connection just initialized.
+    this.control = await attachControlChannel({
+      socketPath: info.socket,
+      initParams: buildDaemonInitParams(info, this.config.sharedSessionId),
+      fallbackClient: client,
+    });
     setDaemonMetrics({
       reconnectCount: this.daemonConnector.reconnectCount,
       lastConnectAt: this.daemonConnector.lastConnectAt,
@@ -339,7 +353,8 @@ export class WhatsAppGateway {
             await this.permissionManager.handleResponse(
               senderPhone,
               text,
-              this.ipcClient,
+              // Via the control channel so the gate resolves mid-turn.
+              this.control!,
             );
           if (wasPermissionReply) {
             try {
@@ -356,6 +371,7 @@ export class WhatsAppGateway {
             try {
               const result = await dispatchCommand({
                 ipcClient: this.ipcClient!,
+                control: this.control!,
                 args: text,
                 sender: senderPhone,
                 jid: replyJid,
@@ -689,6 +705,12 @@ export class WhatsAppGateway {
       );
       this.ipcClient = client;
       this.daemonInfo = info;
+      await this.control?.close();
+      this.control = await attachControlChannel({
+        socketPath: info.socket,
+        initParams: buildDaemonInitParams(info, this.config.sharedSessionId),
+        fallbackClient: client,
+      });
       setDaemonMetrics({
         reconnectCount: this.daemonConnector.reconnectCount,
         lastConnectAt: this.daemonConnector.lastConnectAt,

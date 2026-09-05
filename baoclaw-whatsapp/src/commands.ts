@@ -4,6 +4,7 @@
  * Commands are dispatched via IPC JSON-RPC to baoclaw-core daemon.
  */
 import { IpcClient } from "../../ts-ipc/client.js";
+import type { ControlChannel } from "../../ts-ipc/index.js";
 import * as fs from "fs";
 import * as os from "os";
 
@@ -26,6 +27,8 @@ export interface Command {
 
 export interface CommandContext {
   ipcClient: IpcClient;
+  /** Dedicated connection for mid-turn RPCs (abort) — see attachControlChannel. */
+  control: ControlChannel;
   args: string;
   sender: string;
   jid: string;
@@ -540,7 +543,7 @@ const abortCommand: Command = {
   name: "/abort",
   description: "中止当前任务",
   async handler(ctx) {
-    await ctx.ipcClient.request("abort");
+    await ctx.control.request("abort");
     return "⛔ 当前任务已中止。";
   },
 };

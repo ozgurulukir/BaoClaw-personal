@@ -184,14 +184,14 @@ export class PermissionManager {
    *
    * @param phone      Sender phone (E.164).
    * @param text       Raw message text from WhatsApp.
-   * @param ipcClient  Connected IPC client for communicating with the daemon.
+   * @param client     Connected IPC client or control channel for the daemon.
    * @returns `true` if this message was a permission reply (fully handled),
    *          `false` otherwise.
    */
   async handleResponse(
     phone: string,
     text: string,
-    ipcClient: IpcClient,
+    client: Pick<IpcClient, "request">,
   ): Promise<boolean> {
     // 1. Check for a pending request.
     const pending = this.senderTracker.getPendingPermission(phone);
@@ -216,7 +216,7 @@ export class PermissionManager {
 
     // 4. Forward the decision to the daemon.
     try {
-      await ipcClient.request("permissionResponse", {
+      await client.request("permissionResponse", {
         tool_use_id: pending.tool_use_id,
         decision,
       });

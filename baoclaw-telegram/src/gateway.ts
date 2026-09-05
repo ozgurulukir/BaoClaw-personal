@@ -9,8 +9,10 @@ import * as os from "os";
 import {
   DaemonConnector,
   IpcClient,
+  attachControlChannel,
   resolveFixedSocket,
   selectNewestDaemon,
+  type ControlChannel,
   type DaemonInfo,
 } from "../../ts-ipc/index.js";
 import { createLogger } from "../../ts-ipc/logger.js";
@@ -28,7 +30,11 @@ import {
   buildDocumentBlock,
   buildImageBlock,
 } from "./docParser.js";
-import { formatTranscriptToMarkdown, defaultExportFilename, markdownToPdf } from "./export.js";
+import {
+  formatTranscriptToMarkdown,
+  defaultExportFilename,
+  markdownToPdf,
+} from "./export.js";
 import {
   SessionState,
   InitializeResult,
@@ -119,6 +125,7 @@ async function connectToDaemon(
   info: DaemonInfo;
   sessionState: SessionState;
   connector: DaemonConnector;
+  initParams: Record<string, unknown>;
 }> {
   const connector = new DaemonConnector({ sessionTag: "telegram" });
   const deadline = Date.now() + maxWaitMs;
@@ -137,18 +144,22 @@ async function connectToDaemon(
         const client = new IpcClient({ requestTimeoutMs: 0 });
         await client.connect(fixedSocket);
         const telegramCwd = process.env.BAOCLAW_TELEGRAM_CWD || process.cwd();
-        const result = await client.request<InitializeResult>("initialize", {
+        const initParams = {
           cwd: telegramCwd,
           settings: {},
           shared_session_id: "telegram",
-        });
+        };
+        const result = await client.request<InitializeResult>(
+          "initialize",
+          initParams,
+        );
         const sessionState: SessionState = {
           resumed: Boolean(result?.resumed),
           messageCount: result?.message_count ?? 0,
           sessionId: result?.session_id ?? "telegram",
           shared: Boolean(result?.shared),
         };
-        return { client, info: fixedInfo, sessionState, connector };
+        return { client, info: fixedInfo, sessionState, connector, initParams };
       } catch (err) {
         lastError = err instanceof Error ? err : new Error(String(err));
         logger.info(
@@ -163,11 +174,15 @@ async function connectToDaemon(
         await client.connect(best.socket);
         // Use CLI's cwd if available (from /telegram start), else daemon's cwd
         const telegramCwd = process.env.BAOCLAW_TELEGRAM_CWD || best.cwd;
-        const result = await client.request<InitializeResult>("initialize", {
+        const initParams = {
           cwd: telegramCwd,
           settings: {},
           shared_session_id: "telegram",
-        });
+        };
+        const result = await client.request<InitializeResult>(
+          "initialize",
+          initParams,
+        );
         let sessionState: SessionState = {
           resumed: false,
           messageCount: 0,
@@ -194,7 +209,7 @@ async function connectToDaemon(
         } catch {
           // Resume extraction failed — silently degrade to new session
         }
-        return { client, info: best, sessionState, connector };
+        return { client, info: best, sessionState, connector, initParams };
       } catch (err) {
         lastError = err instanceof Error ? err : new Error(String(err));
         logger.info(`Connection attempt failed: ${err}. Retrying...`);
@@ -405,12 +420,20 @@ async function main() {
   let daemonInfo: DaemonInfo;
   let sessionState: SessionState;
   let daemonConnector: DaemonConnector;
+  let control: ControlChannel;
   try {
     const conn = await connectToDaemon();
     ipcClient = conn.client;
     daemonInfo = conn.info;
     daemonConnector = conn.connector;
     sessionState = conn.sessionState;
+    // Abort must not wait behind an in-flight turn on the serial main
+    // connection — deliver it via the dedicated control channel.
+    control = await attachControlChannel({
+      socketPath: conn.info.socket,
+      initParams: conn.initParams,
+      fallbackClient: ipcClient,
+    });
     logger.info(
       `Connected to daemon pid=${daemonInfo.pid} cwd=${daemonInfo.cwd} session=${daemonInfo.session_id}`,
     );
@@ -957,7 +980,7 @@ async function main() {
   async function handleAbort(): Promise<string> {
     if (!ipcClient.connected) return formatDisconnected();
     try {
-      await ipcClient.request("abort");
+      await control.request("abort");
       return formatAbortConfirm();
     } catch (err) {
       return formatError(err);
@@ -1002,6 +1025,10 @@ async function main() {
     setTimeout(() => {
       logger.info("Quit requested via Telegram");
       bot.stop();
+      // Close the control channel before the main connection: disconnecting
+      // the main client fires its onDisconnect handler, which exits the
+      // process and would skip this cleanup.
+      control.close().catch(() => {});
       ipcClient.disconnect().catch(() => {});
       try {
         fs.unlinkSync(PID_FILE);
@@ -1634,6 +1661,9 @@ async function main() {
   const shutdown = (signal: string) => {
     logger.info(`Shutdown (${signal})`);
     bot.stop();
+    // Control first: the main client's onDisconnect handler exits the
+    // process and would skip this cleanup.
+    control.close().catch(() => {});
     ipcClient.disconnect().catch(() => {});
     try {
       fs.unlinkSync(PID_FILE);

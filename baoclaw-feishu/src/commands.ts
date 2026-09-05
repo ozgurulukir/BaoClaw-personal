@@ -3,7 +3,7 @@
  * Adapts WhatsApp's commands.ts — same registry, same handlers,
  * but uses chatId/sendReply instead of jid/sock.
  */
-import { IpcClient } from "../../ts-ipc/index.js";
+import { IpcClient, type ControlChannel } from "../../ts-ipc/index.js";
 import { logger } from "./log.js";
 import * as fs from "fs";
 import * as os from "os";
@@ -14,6 +14,8 @@ const MAX_OUTPUT = 4000;
 
 export interface CommandContext {
   ipcClient: IpcClient;
+  /** Dedicated connection for mid-turn RPCs (abort) — see attachControlChannel. */
+  control: ControlChannel;
   args: string;
   sender: string;
   chatId: string;
@@ -390,7 +392,7 @@ async function handleExport(ctx: CommandContext): Promise<string> {
 }
 
 async function handleAbort(ctx: CommandContext): Promise<string> {
-  await ctx.ipcClient.request("abort");
+  await ctx.control.request("abort");
   return "⛔ 当前任务已中止。";
 }
 

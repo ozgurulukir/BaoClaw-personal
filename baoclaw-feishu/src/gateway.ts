@@ -24,7 +24,12 @@ import * as path from "path";
 import * as readline from "readline";
 import { randomUUID } from "crypto";
 import { createDaemonConnector, type DaemonInfo } from "./daemon.js";
-import { IpcClient } from "../../ts-ipc/index.js";
+import {
+  IpcClient,
+  attachControlChannel,
+  buildDaemonInitParams,
+  type ControlChannel,
+} from "../../ts-ipc/index.js";
 import { securePrivateFile } from "../../ts-ipc/security.js";
 import { isAllowedChat } from "./authorization.js";
 import { logger, setLogLevel, setLogFile } from "./log.js";
@@ -192,6 +197,7 @@ class DaemonBridge {
   private client: IpcClient | null = null;
   private info: DaemonInfo | null = null;
   private connector = createDaemonConnector();
+  private control: ControlChannel | null = null;
 
   // Per-chat interaction state
   private accumulators = new Map<string, string>();
@@ -209,6 +215,14 @@ class DaemonBridge {
     );
     this.client = client;
     this.info = info;
+    // Abort must not wait behind an in-flight turn on the serial main
+    // connection — deliver it via the dedicated control channel, joining
+    // the same session the main connection just initialized.
+    this.control = await attachControlChannel({
+      socketPath: info.socket,
+      initParams: buildDaemonInitParams(info, sharedSessionId),
+      fallbackClient: client,
+    });
     setDaemonInfo({
       pid: info.pid,
       session_id: info.session_id,
@@ -318,6 +332,9 @@ class DaemonBridge {
   get ipcClient(): IpcClient | null {
     return this.client;
   }
+  get controlChannel(): ControlChannel | null {
+    return this.control;
+  }
   getReconnectCount(): number {
     return this.connector.reconnectCount;
   }
@@ -359,6 +376,7 @@ async function handleMessage(event: FeishuEvent): Promise<void> {
       try {
         const result = await dispatchCommand(parsed, {
           ipcClient: bridge.ipcClient!,
+          control: bridge.controlChannel!,
           args: parsed.args,
           sender,
           chatId,
