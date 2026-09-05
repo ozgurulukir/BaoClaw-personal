@@ -2,6 +2,7 @@ export { IpcClient, type IpcClientOptions } from "./client.js";
 export type { DaemonInfo, DaemonConnectorOptions } from "./daemon.js";
 export {
   DaemonConnector,
+  discoverLegacyDaemons,
   selectNewestDaemon,
   getSocketDir,
   resolveFixedSocket,

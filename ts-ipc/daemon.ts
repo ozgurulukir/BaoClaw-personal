@@ -57,6 +57,37 @@ export function selectNewestDaemon(daemons: DaemonInfo[]): DaemonInfo | null {
   );
 }
 
+/**
+ * Scan the legacy socket directory for daemon meta files whose owning process
+ * is still alive and whose socket file still exists.
+ */
+export function discoverLegacyDaemons(): DaemonInfo[] {
+  const dir = getSocketDir();
+  if (!fs.existsSync(dir)) return [];
+
+  const daemons: DaemonInfo[] = [];
+  for (const file of fs.readdirSync(dir)) {
+    if (!file.endsWith(".json")) continue;
+    try {
+      const meta: DaemonInfo = JSON.parse(
+        fs.readFileSync(path.join(dir, file), "utf-8"),
+      );
+      // Check if the process is still alive
+      try {
+        process.kill(meta.pid, 0);
+      } catch {
+        continue; // dead process
+      }
+      // Check if socket file exists
+      if (!fs.existsSync(meta.socket)) continue;
+      daemons.push(meta);
+    } catch {
+      /* skip invalid files */
+    }
+  }
+  return daemons;
+}
+
 export class DaemonConnector {
   private readonly sessionTag: string;
   private reconnectCountValue = 0;
@@ -80,30 +111,7 @@ export class DaemonConnector {
    * Discover running BaoClaw daemon instances by scanning metadata files.
    */
   discover(): DaemonInfo[] {
-    const dir = getSocketDir();
-    if (!fs.existsSync(dir)) return [];
-
-    const daemons: DaemonInfo[] = [];
-    for (const file of fs.readdirSync(dir)) {
-      if (!file.endsWith(".json")) continue;
-      try {
-        const meta: DaemonInfo = JSON.parse(
-          fs.readFileSync(path.join(dir, file), "utf-8"),
-        );
-        // Check if the process is still alive
-        try {
-          process.kill(meta.pid, 0);
-        } catch {
-          continue; // dead process
-        }
-        // Check if socket file exists
-        if (!fs.existsSync(meta.socket)) continue;
-        daemons.push(meta);
-      } catch {
-        /* skip invalid files */
-      }
-    }
-    return daemons;
+    return discoverLegacyDaemons();
   }
 
   /**

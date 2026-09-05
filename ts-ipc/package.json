@@ -7,6 +7,7 @@
   },
   "scripts": {
     "start": "npx tsx cli.ts",
+    "typecheck": "tsc --noEmit",
     "build": "esbuild cli.ts --bundle --platform=node --target=node18 --format=esm --outfile=dist/baoclaw.mjs --external:mammoth --external:pdf-parse",
     "tui": "npx tsx tui/index.tsx",
     "build:rust": "cd ../baoclaw-core && cargo build --release"

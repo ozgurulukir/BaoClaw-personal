@@ -6,10 +6,16 @@ import * as http from "http";
 import * as fs from "fs";
 import * as path from "path";
 import * as os from "os";
-import * as net from "net";
 import * as crypto from "crypto";
 import { WebSocketServer, WebSocket } from "ws";
 import { isOriginAllowed } from "./origin.js";
+import {
+  IpcClient,
+  type DaemonInfo,
+  discoverLegacyDaemons,
+  resolveFixedSocket,
+  selectNewestDaemon,
+} from "../../ts-ipc/index.js";
 
 function loadExpectedToken(): string {
   if (process.env.BAOCLAW_WEB_TOKEN) {
@@ -43,147 +49,19 @@ function isValidToken(
 }
 
 // ═══════════════════════════════════════════════════════════════
-// IPC Client (same pattern as CLI/Telegram)
-// ═══════════════════════════════════════════════════════════════
-class IpcClient {
-  private socket: net.Socket | null = null;
-  private buffer = "";
-  private nextId = 1;
-  private pending = new Map<
-    number,
-    { resolve: (v: unknown) => void; reject: (e: Error) => void }
-  >();
-  private notifHandlers = new Map<string, ((params: unknown) => void)[]>();
-  private closeHandlers: (() => void)[] = [];
-
-  async connect(socketPath: string): Promise<void> {
-    return new Promise((resolve, reject) => {
-      const sock = net.createConnection(socketPath, () => {
-        this.socket = sock;
-        resolve();
-      });
-      sock.on("data", (d: Buffer) => this.onData(d));
-      sock.on("error", (e) => {
-        if (!this.socket) reject(e);
-      });
-      sock.on("close", () => this.onClose());
-    });
-  }
-
-  async request<T = unknown>(method: string, params?: unknown): Promise<T> {
-    if (!this.socket) throw new Error("Not connected");
-    const id = this.nextId++;
-    const msg: Record<string, unknown> = { jsonrpc: "2.0", method, id };
-    if (params !== undefined) msg.params = params;
-    return new Promise((resolve, reject) => {
-      this.pending.set(id, {
-        resolve: resolve as (v: unknown) => void,
-        reject,
-      });
-      this.socket!.write(JSON.stringify(msg) + "\n");
-    });
-  }
-
-  onNotification(method: string, handler: (params: unknown) => void): void {
-    const list = this.notifHandlers.get(method) ?? [];
-    list.push(handler);
-    this.notifHandlers.set(method, list);
-  }
-
-  onDisconnect(handler: () => void): void {
-    this.closeHandlers.push(handler);
-  }
-  async disconnect(): Promise<void> {
-    if (this.socket) {
-      this.socket.end();
-      this.socket = null;
-    }
-  }
-  get connected(): boolean {
-    return this.socket !== null;
-  }
-
-  private onData(data: Buffer) {
-    this.buffer += data.toString("utf-8");
-    let idx: number;
-    while ((idx = this.buffer.indexOf("\n")) !== -1) {
-      const line = this.buffer.slice(0, idx).trim();
-      this.buffer = this.buffer.slice(idx + 1);
-      if (line) this.handleLine(line);
-    }
-  }
-
-  private handleLine(json: string) {
-    let p: Record<string, unknown>;
-    try {
-      p = JSON.parse(json);
-    } catch {
-      return;
-    }
-    if ("id" in p && p.id != null) {
-      const req = this.pending.get(p.id as number);
-      if (req) {
-        this.pending.delete(p.id as number);
-        if ("error" in p)
-          req.reject(new Error((p.error as { message: string }).message));
-        else req.resolve(p.result);
-      }
-      return;
-    }
-    if ("method" in p) {
-      const handlers = this.notifHandlers.get(p.method as string);
-      if (handlers)
-        for (const h of handlers)
-          try {
-            h(p.params);
-          } catch {}
-    }
-  }
-
-  private onClose() {
-    for (const [, p] of this.pending) p.reject(new Error("Connection closed"));
-    this.pending.clear();
-    this.socket = null;
-    for (const h of this.closeHandlers)
-      try {
-        h();
-      } catch {}
-  }
-}
-
-// ═══════════════════════════════════════════════════════════════
 // Daemon discovery
 // ═══════════════════════════════════════════════════════════════
-interface DaemonInfo {
-  pid: number;
-  cwd: string;
-  session_id: string;
-  socket: string;
-  started_at: string;
-}
-
-function getSocketDir(): string {
-  return path.join(os.tmpdir(), "baoclaw-sockets");
-}
+// IpcClient, DaemonInfo, getSocketDir and resolveFixedSocket come from the
+// shared ts-ipc package (single source of truth for JSON-RPC/UDS).
 
 /**
- * Preferred fixed socket path (P3-1c) — matches the Rust daemon and the
- * CLI/TUI resolvers. Linux uses $XDG_RUNTIME_DIR (/run/user/<UID>/),
- * macOS and others fall back to /tmp.
+ * Discover running BaoClaw daemons: prefer the fixed socket (P3-1c) with its
+ * sibling meta file, then fall back to the shared legacy-directory scan.
+ * Unlike ts-ipc's DaemonConnector, this reads the fixed socket's meta file so
+ * the gateway can display the daemon's real pid/cwd.
  */
-function fixedSocketPath(): string | null {
-  if (process.platform === "linux") {
-    const xdg = process.env.XDG_RUNTIME_DIR;
-    if (xdg && fs.existsSync(xdg)) return path.join(xdg, "baoclaw.sock");
-    return null;
-  }
-  return path.join(getSocketDir(), "baoclaw.sock");
-}
-
 function discoverDaemons(): DaemonInfo[] {
-  // Fixed socket first (P3-1c): read its sibling meta file if present,
-  // otherwise synthesize an entry from the socket's existence.
-  const fixed = fixedSocketPath();
+  const fixed = resolveFixedSocket();
   if (fixed && fs.existsSync(fixed)) {
     const metaPath = fixed.replace(/\.sock$/, ".json");
     try {
@@ -197,30 +75,13 @@ function discoverDaemons(): DaemonInfo[] {
       return [meta];
     } catch {
       // No/stale meta file — the socket itself is the source of truth.
+      // pid -1 marks the entry as synthesized (display only).
       return [
         { pid: -1, cwd: "", session_id: "", socket: fixed, started_at: "" },
       ];
     }
   }
-  const dir = getSocketDir();
-  if (!fs.existsSync(dir)) return [];
-  const daemons: DaemonInfo[] = [];
-  for (const file of fs.readdirSync(dir)) {
-    if (!file.endsWith(".json")) continue;
-    try {
-      const meta: DaemonInfo = JSON.parse(
-        fs.readFileSync(path.join(dir, file), "utf-8"),
-      );
-      try {
-        process.kill(meta.pid, 0);
-      } catch {
-        continue;
-      }
-      if (!fs.existsSync(meta.socket)) continue;
-      daemons.push(meta);
-    } catch {}
-  }
-  return daemons;
+  return discoverLegacyDaemons();
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -234,6 +95,9 @@ const MIME: Record<string, string> = {
   ".png": "image/png",
   ".svg": "image/svg+xml",
   ".ico": "image/x-icon",
+  ".txt": "text/plain",
+  ".woff": "font/woff",
+  ".woff2": "font/woff2",
 };
 
 function getPublicDir(): string {
@@ -263,19 +127,21 @@ function getPublicDir(): string {
 
 const PUBLIC_DIR = getPublicDir();
 
-function serveStatic(res: http.ServerResponse, urlPath: string) {
+async function serveStatic(res: http.ServerResponse, urlPath: string) {
   const filePath = path.join(
     PUBLIC_DIR,
     urlPath === "/" ? "index.html" : urlPath,
   );
   const resolved = path.resolve(filePath);
-  if (!resolved.startsWith(PUBLIC_DIR)) {
+  // Boundary check with an explicit separator so sibling directories such as
+  // "public-evil" cannot pass a bare startsWith(PUBLIC_DIR) prefix test.
+  if (resolved !== PUBLIC_DIR && !resolved.startsWith(PUBLIC_DIR + path.sep)) {
     res.writeHead(403);
     res.end("Forbidden");
     return;
   }
   try {
-    const data = fs.readFileSync(resolved);
+    const data = await fs.promises.readFile(resolved);
     const ext = path.extname(resolved);
     res.writeHead(200, {
       "Content-Type": MIME[ext] || "application/octet-stream",
@@ -309,21 +175,41 @@ async function main() {
 
   // Find daemon
   const daemons = discoverDaemons();
-  if (daemons.length === 0) {
+  const daemon = selectNewestDaemon(daemons);
+  if (!daemon) {
     console.error("No BaoClaw daemon found. Start one first with: baoclaw");
     process.exit(1);
   }
-  const daemon = daemons[0];
   console.log(`Found daemon pid=${daemon.pid} cwd=${daemon.cwd}`);
 
   // HTTP server
   const server = http.createServer((req, res) => {
-    if (req.method === "GET") {
-      serveStatic(res, req.url || "/");
-    } else {
+    if (req.method !== "GET") {
       res.writeHead(405);
       res.end();
+      return;
     }
+    // Strip the query string and decode percent-escapes before resolving the
+    // file path: the printed entry URL is "/?token=...", which must serve
+    // index.html, and "/..%2F.." style escapes must hit the boundary check.
+    let pathname: string;
+    try {
+      pathname = decodeURIComponent(
+        new URL(req.url || "/", "http://localhost").pathname,
+      );
+    } catch {
+      res.writeHead(400);
+      res.end("Bad Request");
+      return;
+    }
+    void serveStatic(res, pathname);
+  });
+
+  // Surface listen failures (e.g. port already in use) instead of letting the
+  // unhandled 'error' event crash with a raw stack trace.
+  server.on("error", (err: Error) => {
+    console.error(`Failed to start BaoClaw Web gateway: ${err.message}`);
+    process.exit(1);
   });
 
   // WebSocket server
@@ -427,10 +313,14 @@ async function main() {
       }
     });
 
-    ipc.onDisconnect(() => {
+    ipc.onDisconnect((err) => {
       if (ws.readyState === WebSocket.OPEN) {
+        console.error(`[web] daemon IPC disconnected: ${err.message}`);
         ws.send(
-          JSON.stringify({ type: "error", message: "Daemon disconnected" }),
+          JSON.stringify({
+            type: "error",
+            message: `Daemon disconnected: ${err.message}`,
+          }),
         );
         ws.close();
       }
@@ -452,23 +342,39 @@ async function main() {
               prompt: msg.prompt,
             };
             if (msg.attachments) submitParams.attachments = msg.attachments;
-            const result = await ipc.request("submitMessage", submitParams);
+            // A submit spans a whole agent turn — no timeout (0 disables).
+            const result = await ipc.request("submitMessage", submitParams, 0);
             ws.send(JSON.stringify({ type: "submitDone", data: result }));
             break;
           }
           case "abort": {
-            await ipc.request("abort");
+            // The daemon's RPC loop is serial per connection: an abort sent
+            // mid-turn is only read (and answered) once the turn drains, so
+            // a client timeout here would always fire on long turns.
+            await ipc.request("abort", undefined, 0);
             ws.send(JSON.stringify({ type: "abortDone" }));
             break;
           }
           case "compact": {
-            const result = await ipc.request("compact");
+            // Compaction summarizes the whole context with an LLM call —
+            // no timeout (0 disables).
+            const result = await ipc.request("compact", undefined, 0);
             ws.send(JSON.stringify({ type: "compactDone", data: result }));
             break;
           }
           case "rpc": {
             // Generic RPC passthrough: { action: 'rpc', method: '...', params: {...} }
-            const result = await ipc.request(msg.method as string, msg.params);
+            if (typeof msg.method !== "string" || msg.method.length === 0) {
+              ws.send(
+                JSON.stringify({
+                  type: "error",
+                  message: "Missing 'method' for rpc action",
+                }),
+              );
+              break;
+            }
+            // Passthrough target is daemon-defined; duration unknown → no timeout.
+            const result = await ipc.request(msg.method, msg.params, 0);
             ws.send(
               JSON.stringify({
                 type: "rpcResult",
@@ -479,11 +385,18 @@ async function main() {
             break;
           }
           case "permission": {
-            await ipc.request("permissionResponse", {
-              tool_use_id: msg.tool_use_id,
-              decision: msg.decision,
-              rule: msg.rule,
-            });
+            // Decisions arrive mid-turn and are read only when the daemon's
+            // serial RPC loop yields; its own 300s permission gate bounds the
+            // wait, so no client-side timeout.
+            await ipc.request(
+              "permissionResponse",
+              {
+                tool_use_id: msg.tool_use_id,
+                decision: msg.decision,
+                rule: msg.rule,
+              },
+              0,
+            );
             break;
           }
           default:
