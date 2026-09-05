@@ -938,6 +938,7 @@ mod tests {
             always_deny_rules: std::collections::HashMap::new(),
             always_ask_rules: std::collections::HashMap::new(),
             is_bypass_permissions_mode_available: false,
+            auto_allow_channels: std::collections::HashMap::new(),
         }
     }
 

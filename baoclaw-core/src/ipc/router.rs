@@ -303,6 +303,8 @@ pub enum ClientMethod {
     },
     #[serde(rename = "permissions.setMode")]
     PermissionsSetMode { mode: String },
+    #[serde(rename = "permissions.setAutoAllow")]
+    PermissionsSetAutoAllow { channel: String, enabled: bool },
 
     // ── Session Info / Token / Cost RPC (P2-2) ──
     #[serde(rename = "session.tokens")]
@@ -502,6 +504,22 @@ mod tests {
                 assert_eq!(rule, Some("Bash(git *)".to_string()));
             }
             _ => panic!("Expected PermissionResponse"),
+        }
+    }
+
+    #[test]
+    fn test_parse_permissions_set_auto_allow() {
+        let req = make_request(
+            "permissions.setAutoAllow",
+            json!({"channel": "tui", "enabled": false}),
+        );
+        let method = parse_client_method(&req).unwrap();
+        match method {
+            ClientMethod::PermissionsSetAutoAllow { channel, enabled } => {
+                assert_eq!(channel, "tui");
+                assert!(!enabled);
+            }
+            _ => panic!("Expected PermissionsSetAutoAllow"),
         }
     }
 

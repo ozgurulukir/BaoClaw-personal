@@ -31,6 +31,12 @@ pub struct ToolPermissionContext {
     pub always_deny_rules: ToolPermissionRulesBySource,
     pub always_ask_rules: ToolPermissionRulesBySource,
     pub is_bypass_permissions_mode_available: bool,
+    /// Per-channel auto-allow knobs for clients that answer their own
+    /// permission prompts (keyed by shared_session_id, e.g. "tui"). A missing
+    /// key means auto-allow is ON, so legacy configs keep today's behavior.
+    /// Enforcement is client-side; the daemon only stores and serves the map.
+    #[serde(default)]
+    pub auto_allow_channels: HashMap<String, bool>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -340,6 +346,7 @@ impl Default for ToolPermissionContext {
             always_deny_rules: HashMap::new(),
             always_ask_rules: HashMap::new(),
             is_bypass_permissions_mode_available: false,
+            auto_allow_channels: HashMap::new(),
         }
     }
 }
@@ -347,6 +354,18 @@ impl Default for ToolPermissionContext {
 impl Default for PermissionManager {
     fn default() -> Self {
         Self::new(ToolPermissionContext::default())
+    }
+}
+
+impl ToolPermissionContext {
+    /// Auto-allow knob for a channel; a missing entry means ON so legacy
+    /// configs and fresh installs keep prompting-free behavior for channels
+    /// that used to auto-allow.
+    pub fn is_channel_auto_allow(&self, channel: &str) -> bool {
+        self.auto_allow_channels
+            .get(channel)
+            .copied()
+            .unwrap_or(true)
     }
 }
 
@@ -362,6 +381,7 @@ mod tests {
             always_deny_rules: HashMap::new(),
             always_ask_rules: HashMap::new(),
             is_bypass_permissions_mode_available: false,
+            auto_allow_channels: HashMap::new(),
         }
     }
 
@@ -799,5 +819,21 @@ mod tests {
         assert!(ctx.additional_working_directories.is_empty());
         assert_eq!(ctx.always_allow_rules["user"].len(), 1);
         assert!(!ctx.is_bypass_permissions_mode_available);
+    }
+
+    #[test]
+    fn auto_allow_channel_defaults_on_and_round_trips() {
+        let ctx = empty_context();
+        // Missing key => ON (legacy behavior preserved).
+        assert!(ctx.is_channel_auto_allow("tui"));
+
+        let ctx: ToolPermissionContext =
+            serde_json::from_value(serde_json::json!({"auto_allow_channels": {"tui": false}}))
+                .expect("knob-only json must deserialize");
+        assert!(!ctx.is_channel_auto_allow("tui"));
+        assert!(ctx.is_channel_auto_allow("slack"));
+
+        let serialized = serde_json::to_value(&ctx).expect("serialize");
+        assert_eq!(serialized["auto_allow_channels"]["tui"], false);
     }
 }

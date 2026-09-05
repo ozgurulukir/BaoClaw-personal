@@ -2888,6 +2888,40 @@ async fn handle_shared_client(
                                 .await;
                         }
 
+                        ClientMethod::PermissionsSetAutoAllow { channel, enabled } => {
+                            // Persisted knob for clients that answer their own
+                            // permission prompts (see ToolPermissionContext::
+                            // auto_allow_channels). Enforcement is client-side.
+                            {
+                                let mgr = shared.permission_manager.write().await;
+                                mgr.update_context(|c| {
+                                    c.auto_allow_channels.insert(channel.clone(), enabled);
+                                });
+                                let ctx = mgr.get_context();
+                                if let Ok(ctx_json) = serde_json::to_value(&ctx) {
+                                    let mut cfg = config::load_config();
+                                    cfg.extra.insert("permissions".to_string(), ctx_json);
+                                    let _ = cfg.save();
+                                }
+                            }
+                            let mut conn_guard = writer.lock().await;
+                            let _ = conn_guard
+                                .send_response(
+                                    id,
+                                    serde_json::json!({
+                                        "success": true,
+                                        "channel": channel,
+                                        "enabled": enabled,
+                                        "message": format!(
+                                            "Auto-allow for channel '{}' {}",
+                                            channel,
+                                            if enabled { "enabled" } else { "disabled" }
+                                        )
+                                    }),
+                                )
+                                .await;
+                        }
+
                         // ── Session Info / Token / Cost handlers (P2-2) ──
                         ClientMethod::SessionTokens => {
                             let engine = session.engine_read().await;
