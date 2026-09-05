@@ -19,7 +19,10 @@ describe("isOriginAllowed", () => {
 
   describe("allows same-origin upgrades", () => {
     test("exact host match", () => {
-      assert.equal(isOriginAllowed("http://localhost:8080", "localhost:8080"), true);
+      assert.equal(
+        isOriginAllowed("http://localhost:8080", "localhost:8080"),
+        true,
+      );
     });
 
     test("LAN IP host match", () => {
@@ -30,13 +33,22 @@ describe("isOriginAllowed", () => {
     });
 
     test("loopback equivalence: localhost vs 127.0.0.1", () => {
-      assert.equal(isOriginAllowed("http://localhost:8080", "127.0.0.1:8080"), true);
-      assert.equal(isOriginAllowed("http://127.0.0.1:8080", "localhost:8080"), true);
+      assert.equal(
+        isOriginAllowed("http://localhost:8080", "127.0.0.1:8080"),
+        true,
+      );
+      assert.equal(
+        isOriginAllowed("http://127.0.0.1:8080", "localhost:8080"),
+        true,
+      );
     });
 
     test("loopback equivalence: ::1", () => {
       assert.equal(isOriginAllowed("http://[::1]:8080", "[::1]:8080"), true);
-      assert.equal(isOriginAllowed("http://localhost:8080", "[::1]:8080"), true);
+      assert.equal(
+        isOriginAllowed("http://localhost:8080", "[::1]:8080"),
+        true,
+      );
     });
 
     test("scheme-default ports omitted on both sides", () => {
@@ -46,17 +58,26 @@ describe("isOriginAllowed", () => {
     });
 
     test("case-insensitive hostnames", () => {
-      assert.equal(isOriginAllowed("http://LOCALHOST:8080", "localhost:8080"), true);
+      assert.equal(
+        isOriginAllowed("http://LOCALHOST:8080", "localhost:8080"),
+        true,
+      );
     });
   });
 
   describe("rejects cross-origin upgrades", () => {
     test("different hostname", () => {
-      assert.equal(isOriginAllowed("http://evil.com:8080", "127.0.0.1:8080"), false);
+      assert.equal(
+        isOriginAllowed("http://evil.com:8080", "127.0.0.1:8080"),
+        false,
+      );
     });
 
     test("different port", () => {
-      assert.equal(isOriginAllowed("http://localhost:9090", "localhost:8080"), false);
+      assert.equal(
+        isOriginAllowed("http://localhost:9090", "localhost:8080"),
+        false,
+      );
     });
 
     test("loopback does not equate to remote host", () => {
@@ -71,8 +92,14 @@ describe("isOriginAllowed", () => {
     });
 
     test("non-http(s) scheme", () => {
-      assert.equal(isOriginAllowed("file:///etc/passwd", "localhost:8080"), false);
-      assert.equal(isOriginAllowed("javascript:alert(1)", "localhost:8080"), false);
+      assert.equal(
+        isOriginAllowed("file:///etc/passwd", "localhost:8080"),
+        false,
+      );
+      assert.equal(
+        isOriginAllowed("javascript:alert(1)", "localhost:8080"),
+        false,
+      );
     });
 
     test("Origin present but Host missing", () => {
