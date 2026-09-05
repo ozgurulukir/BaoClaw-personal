@@ -44,6 +44,7 @@ import {
   formatHelp,
 } from "./commands.js";
 import { formatForFeishu, splitMessage } from "./formatter.js";
+import { PermissionManager, formatPermissionRequest } from "./permission.js";
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
@@ -64,6 +65,8 @@ interface StreamEvent {
   type: string;
   content?: string;
   tool_name?: string;
+  tool_use_id?: string;
+  input?: unknown;
   is_error?: boolean;
   output?: unknown;
   message?: string;
@@ -205,6 +208,7 @@ class DaemonBridge {
   private interactionResolve!: () => void;
   private interactionError: Error | null = null;
   private processing = false;
+  private permissionManager = new PermissionManager();
 
   async connect(): Promise<void> {
     const sharedSessionId = "feishu";
@@ -259,6 +263,38 @@ class DaemonBridge {
         const tn = event.tool_name || "?";
         logger.info(`Tool use: ${tn}`);
         sendFeishuMessage(chatId, `🔧 正在使用工具: ${tn}`).catch(() => {});
+        break;
+      }
+      case "permission_request": {
+        const preview = JSON.stringify(event.input ?? {}).slice(0, 200);
+        const toolName = event.tool_name || "unknown";
+        logger.info(`Permission request: ${toolName} (${event.tool_use_id})`);
+        sendFeishuMessage(
+          chatId,
+          formatPermissionRequest(toolName, preview),
+        ).catch(() => {});
+        this.permissionManager.registerRequest(
+          chatId,
+          event.tool_use_id || "",
+          toolName,
+          (cid, toolUseId, reason) => {
+            // Expiry/supersede must deny with the daemon so the parked turn
+            // resumes; notify the user only for a real expiry.
+            this.control
+              ?.request<{ delivered: boolean }>("permissionResponse", {
+                tool_use_id: toolUseId,
+                decision: "deny",
+              })
+              .then((res) => {
+                if (res?.delivered === true && reason === "timeout") {
+                  sendFeishuMessage(cid, "⏰ 权限请求已超时，自动拒绝。").catch(
+                    () => {},
+                  );
+                }
+              })
+              .catch(() => {});
+          },
+        );
         break;
       }
       case "tool_result": {
@@ -345,6 +381,11 @@ class DaemonBridge {
     return this.processing;
   }
 
+  /** Public access for the standalone handleMessage interceptor. */
+  get permissions(): PermissionManager {
+    return this.permissionManager;
+  }
+
   isCommandBusy(): boolean {
     // Some commands can run even while AI is processing
     return false;
@@ -367,6 +408,31 @@ async function handleMessage(event: FeishuEvent): Promise<void> {
   const chatLabel = event.chat_type === "p2p" ? "DM" : `group(${chatId})`;
 
   logger.info(`📩 message received in ${chatLabel} from ${sender}`);
+
+  // ── Permission reply check (before commands and the busy bounce) ──
+  // A decision necessarily arrives while the turn is parked on the gate, so
+  // this must precede both parseCommand and the isProcessing rejection.
+  if (bridge.permissions.getPending(chatId)) {
+    const reply = await bridge.permissions.handleResponse(
+      chatId,
+      text,
+      bridge.controlChannel!,
+    );
+    if (reply) {
+      if (!reply.delivered) {
+        await sendFeishuMessage(chatId, "⚠️ 该请求已过期。");
+        return;
+      }
+      const ack =
+        reply.decision === "allow"
+          ? "✅ 已允许。"
+          : reply.decision === "allow_always"
+            ? "🔁 已允许并记住此工具。"
+            : "❌ 已拒绝。";
+      await sendFeishuMessage(chatId, ack);
+      return;
+    }
+  }
 
   // ── Slash command detection ──
   const parsed = parseCommand(text);
@@ -513,6 +579,7 @@ async function main() {
     if (cleaningUp) return;
     cleaningUp = true;
     logger.info("Shutting down...");
+    bridge.permissions.cleanup();
     consumer.kill("SIGTERM");
     removePidFile();
     process.exit(0);
