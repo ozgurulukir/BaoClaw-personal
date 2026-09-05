@@ -5,6 +5,7 @@ use serde::Serialize;
 use serde_json::{json, Value};
 use std::path::Path;
 
+use super::path_utils::resolve_and_validate_path;
 use crate::tools::trait_def::*;
 
 /// Maximum number of grep results before truncation
@@ -111,7 +112,8 @@ impl Tool for GrepTool {
             .ok_or_else(|| ToolError::ExecutionFailed("Missing 'pattern' field".to_string()))?;
 
         let search_path = match input.get("path").and_then(|v| v.as_str()) {
-            Some(p) => context.cwd.join(p),
+            Some(p) => resolve_and_validate_path(p, &context.cwd, &[])
+                .map_err(ToolError::ExecutionFailed)?,
             None => context.cwd.clone(),
         };
 
@@ -125,7 +127,7 @@ impl Tool for GrepTool {
         let search_path_clone = search_path.clone();
         let pattern_owned = pattern.to_string();
         let include_glob_owned = include_glob.map(|s| s.to_string());
-        let matches = tokio::task::spawn_blocking(move || {
+        let result = tokio::task::spawn_blocking(move || {
             grep_search(
                 &pattern_owned,
                 &search_path_clone,
@@ -137,13 +139,11 @@ impl Tool for GrepTool {
         .await
         .map_err(|e| ToolError::ExecutionFailed(format!("Grep task panicked: {}", e)))??;
 
-        let truncated = matches.len() >= MAX_RESULTS;
-
         Ok(ToolResult {
             data: json!({
-                "matches": matches,
-                "count": matches.len(),
-                "truncated": truncated,
+                "matches": result.matches,
+                "count": result.matches.len(),
+                "truncated": result.truncated,
             }),
             is_error: false,
         })
@@ -153,14 +153,15 @@ impl Tool for GrepTool {
 /// Core grep search algorithm.
 ///
 /// Uses the `ignore` crate to walk files (respecting .gitignore) and the
-/// `regex` crate to match lines. Returns up to `max_results` matches.
+/// `regex` crate to match lines. Returns up to `max_results` matches, plus a
+/// `truncated` flag that is set only when further matches were cut off.
 pub fn grep_search(
     pattern: &str,
     search_path: &Path,
     include_glob: Option<&str>,
     context_lines: usize,
     max_results: usize,
-) -> Result<Vec<GrepMatch>, ToolError> {
+) -> Result<GrepResult, ToolError> {
     let regex = Regex::new(pattern)
         .map_err(|e| ToolError::ExecutionFailed(format!("Invalid regex: {}", e)))?;
 
@@ -183,11 +184,11 @@ pub fn grep_search(
 
     let walker = builder.build();
 
+    // No cap check at the top of the walker loop: the inner check below
+    // returns as soon as one match beyond the cap is found, which keeps
+    // `truncated` correct even when the cap is filled exactly at the end
+    // of a file (later files may still contain matches).
     for entry in walker {
-        if matches.len() >= max_results {
-            break;
-        }
-
         let entry = match entry {
             Ok(e) => e,
             Err(_) => continue,
@@ -215,6 +216,13 @@ pub fn grep_search(
         let lines: Vec<&str> = content.lines().collect();
         for (line_idx, line) in lines.iter().enumerate() {
             if regex.is_match(line) {
+                // Hitting one match beyond the cap proves truncation happened.
+                if matches.len() == max_results {
+                    return Ok(GrepResult {
+                        matches,
+                        truncated: true,
+                    });
+                }
                 let start = line_idx.saturating_sub(context_lines);
                 let end = (line_idx + context_lines + 1).min(lines.len());
                 let context: Vec<String> = lines[start..end]
@@ -229,15 +237,21 @@ pub fn grep_search(
                     content: line.to_string(),
                     context,
                 });
-
-                if matches.len() >= max_results {
-                    break;
-                }
             }
         }
     }
 
-    Ok(matches)
+    Ok(GrepResult {
+        matches,
+        truncated: false,
+    })
+}
+
+/// Result of a grep search operation.
+#[derive(Debug)]
+pub struct GrepResult {
+    pub matches: Vec<GrepMatch>,
+    pub truncated: bool,
 }
 
 #[cfg(test)]
@@ -281,10 +295,11 @@ mod tests {
         std::fs::write(&file_path, "fn main() {\n    println!(\"hello\");\n}\n").unwrap();
 
         let results = grep_search("fn main", dir.path(), None, 2, 100).unwrap();
-        assert_eq!(results.len(), 1);
-        assert_eq!(results[0].line_number, 1);
-        assert!(results[0].content.contains("fn main"));
-        assert!(!results[0].file.is_empty());
+        assert_eq!(results.matches.len(), 1);
+        assert_eq!(results.matches[0].line_number, 1);
+        assert!(results.matches[0].content.contains("fn main"));
+        assert!(!results.matches[0].file.is_empty());
+        assert!(!results.truncated);
     }
 
     #[test]
@@ -308,12 +323,12 @@ mod tests {
         .unwrap();
 
         let results = grep_search("MATCH", dir.path(), None, 2, 100).unwrap();
-        assert_eq!(results.len(), 1);
-        assert_eq!(results[0].line_number, 4);
+        assert_eq!(results.matches.len(), 1);
+        assert_eq!(results.matches[0].line_number, 4);
         // Context should include 2 lines before and 2 lines after
-        assert_eq!(results[0].context.len(), 5); // lines 2,3,4,5,6
-        assert!(results[0].context[0].contains("line2"));
-        assert!(results[0].context[4].contains("line6"));
+        assert_eq!(results.matches[0].context.len(), 5); // lines 2,3,4,5,6
+        assert!(results.matches[0].context[0].contains("line2"));
+        assert!(results.matches[0].context[4].contains("line6"));
     }
 
     #[test]
@@ -323,9 +338,35 @@ mod tests {
         let content: String = (0..20).map(|i| format!("match_line_{}\n", i)).collect();
         std::fs::write(&file_path, content).unwrap();
 
-        // Limit to 5 results
+        // Limit to 5 results — 15 more exist, so truncated must be set
         let results = grep_search("match_line", dir.path(), None, 0, 5).unwrap();
-        assert_eq!(results.len(), 5);
+        assert_eq!(results.matches.len(), 5);
+        assert!(results.truncated);
+    }
+
+    #[test]
+    fn test_grep_search_exact_limit_not_truncated() {
+        let dir = TempDir::new().unwrap();
+        let file_path = dir.path().join("exactly_five.txt");
+        let content: String = (0..5).map(|i| format!("match_line_{}\n", i)).collect();
+        std::fs::write(&file_path, content).unwrap();
+
+        // Exactly 5 matches with a limit of 5 — nothing was cut off
+        let results = grep_search("match_line", dir.path(), None, 0, 5).unwrap();
+        assert_eq!(results.matches.len(), 5);
+        assert!(!results.truncated);
+    }
+
+    #[test]
+    fn test_grep_search_truncation_across_files() {
+        let dir = TempDir::new().unwrap();
+        // File A fills the cap exactly; file B has one more match.
+        std::fs::write(dir.path().join("a.txt"), "hit\nhit\nhit\nhit\nhit\n").unwrap();
+        std::fs::write(dir.path().join("b.txt"), "hit\n").unwrap();
+
+        let results = grep_search("hit", dir.path(), None, 0, 5).unwrap();
+        assert_eq!(results.matches.len(), 5);
+        assert!(results.truncated);
     }
 
     #[test]
@@ -339,8 +380,8 @@ mod tests {
         std::fs::write(&text_path, "searchable text\n").unwrap();
 
         let results = grep_search("searchable", dir.path(), None, 0, 100).unwrap();
-        assert_eq!(results.len(), 1);
-        assert!(results[0].file.contains("text.txt"));
+        assert_eq!(results.matches.len(), 1);
+        assert!(results.matches[0].file.contains("text.txt"));
     }
 
     #[test]
@@ -350,7 +391,22 @@ mod tests {
         std::fs::write(&file_path, "hello world\n").unwrap();
 
         let results = grep_search("nonexistent_pattern", dir.path(), None, 2, 100).unwrap();
-        assert!(results.is_empty());
+        assert!(results.matches.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_grep_tool_rejects_path_outside_cwd() {
+        let dir = TempDir::new().unwrap();
+        let tool = GrepTool::new();
+        let ctx = make_context(dir.path());
+        let progress = NoopProgress;
+
+        for path in ["../../etc", "/tmp", "../.."] {
+            let result = tool
+                .call(json!({"pattern": "x", "path": path}), &ctx, &progress)
+                .await;
+            assert!(result.is_err(), "expected rejection for path {:?}", path);
+        }
     }
 
     #[tokio::test]

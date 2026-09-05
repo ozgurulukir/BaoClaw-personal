@@ -11,7 +11,7 @@ use async_trait::async_trait;
 use serde_json::{json, Value};
 use std::sync::Arc;
 
-use crate::engine::evolution::EvolutionEngine;
+use crate::engine::evolution::{is_safe_skill_name, EvolutionEngine};
 use crate::tools::trait_def::*;
 
 pub struct EvolveTool {
@@ -22,6 +22,22 @@ impl EvolveTool {
     pub fn new(evolution: Arc<EvolutionEngine>) -> Self {
         Self { evolution }
     }
+}
+
+/// Extract `skill_name` from the input, rejecting names that could escape
+/// the skills directory when joined into a path.
+fn validated_skill_name(input: &Value) -> Result<&str, ToolError> {
+    let name = input
+        .get("skill_name")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| ToolError::ExecutionFailed("Missing 'skill_name'".to_string()))?;
+    if !is_safe_skill_name(name) {
+        return Err(ToolError::ExecutionFailed(
+            "Invalid 'skill_name': use only letters, numbers, '-' or '_' (max 80 chars)"
+                .to_string(),
+        ));
+    }
+    Ok(name)
 }
 
 #[async_trait]
@@ -111,12 +127,7 @@ Guidelines for skill creation:
 
         match operation {
             "create_skill" => {
-                let name = input
-                    .get("skill_name")
-                    .and_then(|v| v.as_str())
-                    .ok_or_else(|| {
-                        ToolError::ExecutionFailed("Missing 'skill_name'".to_string())
-                    })?;
+                let name = validated_skill_name(&input)?;
                 let content = input
                     .get("content")
                     .and_then(|v| v.as_str())
@@ -164,12 +175,7 @@ Guidelines for skill creation:
             }
 
             "improve_skill" => {
-                let name = input
-                    .get("skill_name")
-                    .and_then(|v| v.as_str())
-                    .ok_or_else(|| {
-                        ToolError::ExecutionFailed("Missing 'skill_name'".to_string())
-                    })?;
+                let name = validated_skill_name(&input)?;
                 let content = input
                     .get("content")
                     .and_then(|v| v.as_str())

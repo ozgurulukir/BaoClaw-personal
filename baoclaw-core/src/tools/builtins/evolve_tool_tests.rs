@@ -46,4 +46,46 @@ mod tests {
         let result = res.unwrap();
         assert_eq!(result.data["created"], true);
     }
+
+    #[tokio::test]
+    async fn test_evolve_tool_rejects_traversal_skill_name() {
+        let dir = tempdir().unwrap();
+        let engine = crate::engine::evolution::EvolutionEngine::new(dir.path());
+        let tool = EvolveTool::new(std::sync::Arc::new(engine));
+        let ctx = make_ctx(dir.path());
+        let progress = NoopProgress;
+
+        for name in ["../../evil", "/tmp/pwned", "a/b", "a\\b", ".."] {
+            let input = json!({
+                "operation": "create_skill",
+                "skill_name": name,
+                "content": "# Evil",
+                "scope": "project"
+            });
+            let res = tool.call(input, &ctx, &progress).await;
+            assert!(res.is_err(), "expected rejection for skill_name {:?}", name);
+        }
+
+        // Nothing escaped the project skills dir
+        assert!(!dir.path().join("evil.md").exists());
+    }
+
+    #[tokio::test]
+    async fn test_evolve_tool_improve_skill_rejects_traversal_skill_name() {
+        let dir = tempdir().unwrap();
+        let engine = crate::engine::evolution::EvolutionEngine::new(dir.path());
+        let tool = EvolveTool::new(std::sync::Arc::new(engine));
+        let ctx = make_ctx(dir.path());
+        let progress = NoopProgress;
+
+        let input = json!({
+            "operation": "improve_skill",
+            "skill_name": "../../evil",
+            "content": "# Evil",
+            "scope": "project"
+        });
+        let res = tool.call(input, &ctx, &progress).await;
+        assert!(res.is_err());
+        assert!(!dir.path().join("evil.md").exists());
+    }
 }

@@ -78,7 +78,15 @@ impl Tool for TodoWriteTool {
             let content = tokio::fs::read_to_string(&todo_path).await.map_err(|e| {
                 ToolError::ExecutionFailed(format!("Failed to read todo.json: {}", e))
             })?;
-            serde_json::from_str(&content).unwrap_or_default()
+            // Refuse to proceed on a corrupt file so existing items are not
+            // silently wiped by the next write.
+            serde_json::from_str(&content).map_err(|e| {
+                ToolError::ExecutionFailed(format!(
+                    "todo.json is corrupted ({}). Repair or remove {} before using the todo tool.",
+                    e,
+                    todo_path.display()
+                ))
+            })?
         } else {
             Vec::new()
         };
@@ -353,5 +361,32 @@ mod tests {
             .await;
 
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_corrupt_todo_json_is_not_silently_reset() {
+        let tmp = TempDir::new().unwrap();
+        let tool = TodoWriteTool::new();
+        let ctx = make_context(tmp.path().to_path_buf());
+        let progress = NoopProgress;
+
+        let todo_path = tmp.path().join(".baoclaw").join("todo.json");
+        std::fs::create_dir_all(todo_path.parent().unwrap()).unwrap();
+        std::fs::write(&todo_path, "{not valid json").unwrap();
+
+        let result = tool
+            .call(
+                json!({"operation": "add", "text": "New task"}),
+                &ctx,
+                &progress,
+            )
+            .await;
+        assert!(result.is_err());
+
+        // Corrupt content must be left in place for manual recovery
+        assert_eq!(
+            std::fs::read_to_string(&todo_path).unwrap(),
+            "{not valid json"
+        );
     }
 }

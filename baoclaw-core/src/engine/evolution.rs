@@ -1363,7 +1363,10 @@ fn redact_training_text(text: &str) -> String {
     }
 }
 
-fn is_safe_skill_name(name: &str) -> bool {
+/// Validate a skill name before using it in a filesystem path.
+/// Only ASCII letters, digits, '-' and '_' are allowed (max 80 chars),
+/// which rules out path traversal and absolute-path injection.
+pub fn is_safe_skill_name(name: &str) -> bool {
     !name.is_empty()
         && name.len() <= 80
         && name.chars().all(|character| {

@@ -1,6 +1,7 @@
 use async_trait::async_trait;
 use serde_json::{json, Value};
 
+use super::path_utils::resolve_and_validate_path;
 use crate::tools::trait_def::*;
 
 /// Maximum number of glob results before truncation
@@ -86,38 +87,18 @@ impl Tool for GlobTool {
             .ok_or_else(|| ToolError::ExecutionFailed("Missing 'pattern' field".to_string()))?;
 
         let base = match input.get("path").and_then(|v| v.as_str()) {
-            Some(p) => context.cwd.join(p),
+            Some(p) => resolve_and_validate_path(p, &context.cwd, &[])
+                .map_err(ToolError::ExecutionFailed)?,
             None => context.cwd.clone(),
         };
 
-        let full_pattern = base.join(pattern).to_string_lossy().to_string();
-
-        let entries = glob::glob(&full_pattern)
-            .map_err(|e| ToolError::ExecutionFailed(format!("Invalid glob pattern: {}", e)))?;
-
-        let mut files: Vec<String> = Vec::new();
-        let mut truncated = false;
-
-        for path in entries.flatten() {
-            if path.is_file() {
-                let relative = path
-                    .strip_prefix(&context.cwd)
-                    .unwrap_or(&path)
-                    .to_string_lossy()
-                    .to_string();
-                files.push(relative);
-            }
-            if files.len() >= MAX_GLOB_RESULTS {
-                truncated = true;
-                break;
-            }
-        }
+        let result = glob_search(pattern, &base, &context.cwd, MAX_GLOB_RESULTS)?;
 
         Ok(ToolResult {
             data: json!({
-                "files": files,
-                "count": files.len(),
-                "truncated": truncated,
+                "files": result.files,
+                "count": result.files.len(),
+                "truncated": result.truncated,
             }),
             is_error: false,
         })
@@ -134,6 +115,19 @@ pub fn glob_search(
     cwd: &std::path::Path,
     max_results: usize,
 ) -> Result<GlobResult, ToolError> {
+    // Path::join adopts an absolute argument wholesale, so an absolute or
+    // `..`-bearing pattern would glob outside the (already validated) base.
+    let pattern_path = std::path::Path::new(pattern);
+    if pattern_path.is_absolute()
+        || pattern_path
+            .components()
+            .any(|c| c == std::path::Component::ParentDir)
+    {
+        return Err(ToolError::ExecutionFailed(
+            "Glob pattern must be relative and must not contain '..'".to_string(),
+        ));
+    }
+
     let full_pattern = base_dir.join(pattern).to_string_lossy().to_string();
 
     let entries = glob::glob(&full_pattern)
@@ -144,16 +138,16 @@ pub fn glob_search(
 
     for path in entries.flatten() {
         if path.is_file() {
+            if files.len() >= max_results {
+                truncated = true;
+                break;
+            }
             let relative = path
                 .strip_prefix(cwd)
                 .unwrap_or(&path)
                 .to_string_lossy()
                 .to_string();
             files.push(relative);
-        }
-        if files.len() >= max_results {
-            truncated = true;
-            break;
         }
     }
 
@@ -356,5 +350,46 @@ mod tests {
 
         assert!(!result.is_error);
         assert_eq!(result.data["count"], 1);
+    }
+
+    #[tokio::test]
+    async fn test_glob_tool_rejects_path_outside_cwd() {
+        let dir = TempDir::new().unwrap();
+        let tool = GlobTool::new();
+        let ctx = make_context(dir.path());
+        let progress = NoopProgress;
+
+        for path in ["../../etc", "/tmp", "../.."] {
+            let result = tool
+                .call(json!({"pattern": "*", "path": path}), &ctx, &progress)
+                .await;
+            assert!(result.is_err(), "expected rejection for path {:?}", path);
+        }
+    }
+
+    #[test]
+    fn test_glob_search_exact_limit_not_truncated() {
+        let dir = TempDir::new().unwrap();
+        for i in 0..5 {
+            std::fs::write(dir.path().join(format!("file_{}.txt", i)), "content").unwrap();
+        }
+
+        let result = glob_search("*.txt", dir.path(), dir.path(), 5).unwrap();
+        assert_eq!(result.files.len(), 5);
+        assert!(!result.truncated);
+    }
+
+    #[test]
+    fn test_glob_search_rejects_escaping_patterns() {
+        let dir = TempDir::new().unwrap();
+
+        for pattern in ["/etc/*.conf", "../outside/*", "a/../../*"] {
+            let result = glob_search(pattern, dir.path(), dir.path(), 100);
+            assert!(
+                result.is_err(),
+                "expected rejection for pattern {:?}",
+                pattern
+            );
+        }
     }
 }

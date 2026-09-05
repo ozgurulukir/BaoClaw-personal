@@ -155,13 +155,6 @@ impl Tool for FileReadTool {
             .await
             .map_err(|e| ToolError::ExecutionFailed(format!("Failed to read file: {}", e)))?;
 
-        // Record partial reads too (so cache is aware of this file)
-        if offset == 0 && limit.is_none() {
-            if let Some(ref cache_arc) = context.file_cache {
-                cache_arc.lock().await.record(&resolved, &content);
-            }
-        }
-
         let lines: Vec<&str> = content.lines().collect();
         let total_lines = lines.len();
 

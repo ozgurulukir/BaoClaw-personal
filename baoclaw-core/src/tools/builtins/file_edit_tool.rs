@@ -73,7 +73,10 @@ impl Tool for FileEditTool {
             .get("file_path")
             .and_then(|v| v.as_str())
             .is_some_and(|s| !s.is_empty());
-        let has_old = input.get("old_string").and_then(|v| v.as_str()).is_some();
+        let has_old = input
+            .get("old_string")
+            .and_then(|v| v.as_str())
+            .is_some_and(|s| !s.is_empty());
         let has_new = input.get("new_string").and_then(|v| v.as_str()).is_some();
 
         if !has_path {
@@ -84,7 +87,7 @@ impl Tool for FileEditTool {
         }
         if !has_old {
             return ValidationResult::Invalid {
-                message: "Missing 'old_string' field".to_string(),
+                message: "Missing or empty 'old_string' field (to create a new file, use FileWrite instead)".to_string(),
                 code: None,
             };
         }
@@ -313,6 +316,30 @@ mod tests {
             .await;
 
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_edit_rejects_empty_old_string() {
+        let dir = TempDir::new().unwrap();
+        let file_path = dir.path().join("test.txt");
+        std::fs::write(&file_path, "hello world").unwrap();
+
+        let tool = FileEditTool::new(vec![]);
+        let ctx = make_context(dir.path());
+
+        let result = tool
+            .validate_input(
+                &json!({
+                    "file_path": file_path.to_str().unwrap(),
+                    "old_string": "",
+                    "new_string": "x"
+                }),
+                &ctx,
+            )
+            .await;
+        assert!(matches!(result, ValidationResult::Invalid { .. }));
+        // File untouched
+        assert_eq!(std::fs::read_to_string(&file_path).unwrap(), "hello world");
     }
 
     #[test]

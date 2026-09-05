@@ -102,7 +102,7 @@ proptest! {
 
         // Should not error on valid regex
         prop_assert!(results.is_ok(), "grep_search should succeed for valid regex '{}'", pattern);
-        let matches = results.unwrap();
+        let matches = results.unwrap().matches;
 
         let regex = Regex::new(&pattern).unwrap();
 
@@ -156,7 +156,7 @@ proptest! {
             result.is_err(),
             "grep_search should return Err for invalid regex '{}', but got Ok with {} matches",
             pattern,
-            result.as_ref().map(|m| m.len()).unwrap_or(0)
+            result.as_ref().map(|m| m.matches.len()).unwrap_or(0)
         );
 
         let err_msg = format!("{}", result.unwrap_err());
