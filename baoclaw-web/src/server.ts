@@ -273,27 +273,23 @@ async function main() {
     const wsCwd = reqUrl.searchParams.get("cwd") || cwd;
     console.log(`WebSocket client connected (cwd: ${wsCwd})`);
 
+    // Both connections must initialize with identical params: the daemon
+    // derives the shared session key from cwd + shared_session_id, so the
+    // control connection only reaches the submitter's session if they match.
+    const initParams = {
+      cwd: wsCwd,
+      settings: {},
+      shared_session_id: "web",
+    };
+
     // Each WS connection gets its own IPC client to the daemon
     const ipc = new IpcClient();
+    let initResult: unknown;
     try {
       console.log(`Connecting to daemon socket: ${daemon.socket}`);
       await ipc.connect(daemon.socket);
       console.log("IPC connected, sending initialize...");
-      const initResult = await ipc.request("initialize", {
-        cwd: wsCwd,
-        settings: {},
-        shared_session_id: "web",
-      });
-      console.log("Initialize done, sending to browser");
-      // Send init info to browser
-      ws.send(
-        JSON.stringify({
-          type: "init",
-          data: initResult,
-          cwd: wsCwd,
-          daemon: { pid: daemon.pid },
-        }),
-      );
+      initResult = await ipc.request("initialize", initParams);
     } catch (err: any) {
       console.error("IPC init failed:", err.message);
       ws.send(
@@ -306,6 +302,35 @@ async function main() {
       return;
     }
 
+    // The daemon reads each IPC connection serially: while the main
+    // connection's loop is parked inside an active turn, abort/permission
+    // requests sent on it would sit unread until the turn ends (the engine
+    // never aborts; permission gates auto-deny after 300s). The daemon
+    // resolves both from ANY client attached to the same session ("abort —
+    // any client can call"), so a second control connection keeps them
+    // responsive mid-turn.
+    let control: IpcClient | null = null;
+    try {
+      control = new IpcClient();
+      await control.connect(daemon.socket);
+      await control.request("initialize", initParams);
+    } catch (err: any) {
+      // Tear the socket down too: a connected-but-uninitialized control
+      // socket would stay registered daemon-side and block session cleanup.
+      await control?.disconnect().catch(() => {});
+      console.warn(
+        `[web] control connection failed (${err.message}); abort/permission will use the main connection`,
+      );
+      control = null;
+    }
+
+    // Fallback path shares the serial main connection, where a bounded
+    // timeout would misfire mid-turn — disable it there.
+    const requestControl = (method: string, params?: unknown) =>
+      control
+        ? control.request(method, params)
+        : ipc.request(method, params, 0);
+
     // Forward daemon stream events to browser
     ipc.onNotification("stream/event", (params) => {
       if (ws.readyState === WebSocket.OPEN) {
@@ -313,7 +338,7 @@ async function main() {
       }
     });
 
-    ipc.onDisconnect((err) => {
+    const notifyDaemonDown = (err: Error) => {
       if (ws.readyState === WebSocket.OPEN) {
         console.error(`[web] daemon IPC disconnected: ${err.message}`);
         ws.send(
@@ -324,7 +349,22 @@ async function main() {
         );
         ws.close();
       }
-    });
+    };
+    ipc.onDisconnect(notifyDaemonDown);
+    if (control) control.onDisconnect(notifyDaemonDown);
+
+    // Wire every handler before the browser learns we are ready: it replies
+    // to "init" immediately (session tokens, history tail) and the WebSocket
+    // discards events emitted while no listener is attached.
+    console.log("Initialize done, sending to browser");
+    ws.send(
+      JSON.stringify({
+        type: "init",
+        data: initResult,
+        cwd: wsCwd,
+        daemon: { pid: daemon.pid },
+      }),
+    );
 
     // Handle messages from browser
     ws.on("message", async (raw: Buffer) => {
@@ -348,10 +388,8 @@ async function main() {
             break;
           }
           case "abort": {
-            // The daemon's RPC loop is serial per connection: an abort sent
-            // mid-turn is only read (and answered) once the turn drains, so
-            // a client timeout here would always fire on long turns.
-            await ipc.request("abort", undefined, 0);
+            // Via the control connection — see the setup note above.
+            await requestControl("abort");
             ws.send(JSON.stringify({ type: "abortDone" }));
             break;
           }
@@ -385,18 +423,13 @@ async function main() {
             break;
           }
           case "permission": {
-            // Decisions arrive mid-turn and are read only when the daemon's
-            // serial RPC loop yields; its own 300s permission gate bounds the
-            // wait, so no client-side timeout.
-            await ipc.request(
-              "permissionResponse",
-              {
-                tool_use_id: msg.tool_use_id,
-                decision: msg.decision,
-                rule: msg.rule,
-              },
-              0,
-            );
+            // Via the control connection so the gate resolves mid-turn
+            // instead of auto-denying.
+            await requestControl("permissionResponse", {
+              tool_use_id: msg.tool_use_id,
+              decision: msg.decision,
+              rule: msg.rule,
+            });
             break;
           }
           default:
@@ -415,6 +448,7 @@ async function main() {
     ws.on("close", () => {
       console.log("WebSocket client disconnected");
       ipc.disconnect();
+      if (control) control.disconnect();
     });
   });
 
