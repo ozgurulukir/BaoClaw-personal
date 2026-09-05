@@ -64,6 +64,13 @@ import {
 } from "./commands.js";
 import { splitMessage } from "./messageSplitter.js";
 import { isAllowedChat } from "./authorization.js";
+import {
+  TelegramPermissionManager,
+  buildPermissionKeyboard,
+  formatPermissionRequest,
+  parsePermissionReply,
+  type PermissionDecision,
+} from "./permission.js";
 
 const logger = createLogger("telegram");
 
@@ -531,6 +538,51 @@ async function main() {
   const pendingAttachments = new Map<number, Record<string, unknown>[]>();
   let activeChatId: number | null = null;
 
+  // ── Permission prompt state ──
+  const permissionManager = new TelegramPermissionManager();
+
+  /**
+   * Apply a user's decision to the chat's pending permission request: clear
+   * the pending entry, forward the decision via the control channel (the
+   * daemon's main loop is parked mid-turn), and replace the prompt message.
+   */
+  async function applyPermissionDecision(
+    chatId: number,
+    decision: PermissionDecision,
+  ): Promise<"none" | "applied" | "stale"> {
+    const pending = permissionManager.resolve(chatId);
+    if (!pending) return "none";
+    // "Always" records a whole-tool allow rule keyed by the tool name.
+    const rule = decision === "allow_always" ? pending.tool_name : undefined;
+    let delivered = false;
+    try {
+      const res = await control.request<{ delivered: boolean }>(
+        "permissionResponse",
+        { tool_use_id: pending.tool_use_id, decision, rule },
+      );
+      delivered = res?.delivered === true;
+    } catch {}
+    const label =
+      decision === "allow"
+        ? "✅ 已允许"
+        : decision === "allow_always"
+          ? "🔁 已允许并记住此工具"
+          : "❌ 已拒绝";
+    const stale = delivered ? "" : "\n\n<i>(请求已在别处处理)</i>";
+    if (pending.message_id !== undefined) {
+      // Replacing the text also drops the inline keyboard.
+      bot.api
+        .editMessageText({
+          chat_id: chatId,
+          message_id: pending.message_id,
+          text: `${label} <code>${pending.tool_name}</code>${stale}`,
+          parse_mode: "HTML",
+        })
+        .catch(() => {});
+    }
+    return delivered ? "applied" : "stale";
+  }
+
   // ── Stream event handler ──
   ipcClient.onNotification("stream/event", async (params: unknown) => {
     const event = params as Record<string, unknown>;
@@ -575,6 +627,51 @@ async function main() {
           (event as { tool_name: string }).tool_name || "unknown";
         try {
           await sendMessage(chatId, `⚡ ${toolName}`);
+        } catch {}
+        break;
+      }
+
+      case "permission_request": {
+        const pr = event as {
+          tool_use_id: string;
+          tool_name: string;
+          input?: unknown;
+        };
+        const preview = JSON.stringify(pr.input ?? {}).slice(0, 200);
+        try {
+          const sent = await sendMessage(
+            chatId,
+            formatPermissionRequest(pr.tool_name || "unknown", preview),
+            {
+              parse_mode: "HTML",
+              reply_markup: buildPermissionKeyboard(),
+            },
+          );
+          permissionManager.register(
+            chatId,
+            {
+              tool_use_id: pr.tool_use_id || "",
+              tool_name: pr.tool_name || "unknown",
+              message_id: (sent as { message_id?: number })?.message_id,
+            },
+            async (cid, toolUseId, reason) => {
+              // Expiry/supersede must deny with the daemon so the parked turn
+              // resumes; notify the user only for a real expiry.
+              let delivered = false;
+              try {
+                const res = await control.request<{ delivered: boolean }>(
+                  "permissionResponse",
+                  { tool_use_id: toolUseId, decision: "deny" },
+                );
+                delivered = res?.delivered === true;
+              } catch {}
+              if (delivered && reason === "timeout") {
+                try {
+                  await sendMessage(cid, "⏰ 权限请求已超时，自动拒绝。");
+                } catch {}
+              }
+            },
+          );
         } catch {}
         break;
       }
@@ -1462,6 +1559,17 @@ async function main() {
     text: string,
     attachments?: Record<string, unknown>[],
   ): Promise<void> {
+    // Single-slot rule: never steal the active slot from a chat whose turn is
+    // still in flight (e.g. parked on a permission prompt), or that chat's
+    // stream events would be dropped and its queue wedged forever.
+    if (activeChatId !== null && activeChatId !== chatId) {
+      await sendMessage(
+        chatId,
+        "⏳ 另一个会话正在处理中，请等当前请求完成后再试。",
+      );
+      return;
+    }
+    const previousChatId = activeChatId;
     activeChatId = chatId;
     accumulators.set(chatId, "");
 
@@ -1501,7 +1609,8 @@ async function main() {
       resultResolvers.delete(chatId);
     }
 
-    activeChatId = null;
+    // Restore, don't null: an outer turn may still be streaming its events.
+    activeChatId = previousChatId;
   }
 
   // ── Process queue for a chat ──
@@ -1630,6 +1739,21 @@ async function main() {
     // ── Handle text messages ──
     if (!msg.text) return;
 
+    // ── Permission reply fallback (before command routing) ──
+    // A decision keyword only counts while a prompt is pending in this chat;
+    // anything else falls through to commands/chat as usual.
+    if (permissionManager.get(chatId)) {
+      const decision = parsePermissionReply(msg.text);
+      if (decision) {
+        const outcome = await applyPermissionDecision(chatId, decision);
+        await sendMessage(
+          chatId,
+          outcome === "applied" ? "✅ 已处理。" : "⚠️ 该请求已过期。",
+        );
+        return;
+      }
+    }
+
     // Command routing
     const parsed = parseCommand(msg.text);
     if (parsed && isRegisteredCommand(msg.text)) {
@@ -1657,9 +1781,55 @@ async function main() {
     }
   });
 
+  // ── Permission inline-button callbacks ──
+  // callback_data carries the decision only ("perm:allow" / "perm:always" /
+  // "perm:deny") — the pending request is looked up per chat, keeping the
+  // payload far below Telegram's 64-byte callback_data cap.
+  bot.on("callback_query", async (ctx: Context) => {
+    const cq = ctx.callbackQuery as
+      | {
+          data?: string;
+          message?: { message_id?: number; chat?: { id?: number } };
+        }
+      | undefined;
+    try {
+      const decisions: Record<string, PermissionDecision> = {
+        "perm:allow": "allow",
+        "perm:always": "allow_always",
+        "perm:deny": "deny",
+      };
+      const decision = cq?.data ? decisions[cq.data] : undefined;
+      const chatId = cq?.message?.chat?.id;
+      if (!decision || chatId === undefined) {
+        await ctx.answerCallbackQuery({ text: "无效请求" });
+        return;
+      }
+      // Allowlist keys on the CHAT id (same policy as text messages) — never
+      // on cq.from.id, which in groups is a member, not the chat.
+      if (!isAllowedChat(chatId, config.allowedChatIds)) {
+        await ctx.answerCallbackQuery({ text: "未授权的会话" });
+        return;
+      }
+      const outcome = await applyPermissionDecision(chatId, decision);
+      await ctx.answerCallbackQuery({
+        text:
+          outcome === "applied"
+            ? "已处理"
+            : outcome === "stale"
+              ? "此请求已过期"
+              : "无待处理请求",
+      });
+    } catch {
+      try {
+        await ctx.answerCallbackQuery({ text: "处理失败" });
+      } catch {}
+    }
+  });
+
   // ── Graceful shutdown ──
   const shutdown = (signal: string) => {
     logger.info(`Shutdown (${signal})`);
+    permissionManager.cleanup();
     bot.stop();
     // Control first: the main client's onDisconnect handler exits the
     // process and would skip this cleanup.
