@@ -18,6 +18,10 @@ const shortcuts = [
   },
   { key: "Ctrl+Y / y", action: "Copy output or message to Clipboard" },
   { key: "Ctrl+H / ?", action: "Toggle this Help Overlay" },
+  {
+    key: "Ctrl+P / p",
+    action: "Toggle auto-allow of tool permissions (persisted)",
+  },
   { key: "Ctrl+C", action: "Exit BaoClaw TUI" },
 ];
 

@@ -2,7 +2,7 @@
 import React from "react";
 import { render } from "ink";
 import { App } from "./components/App.js";
-import { createIpcConnection } from "./ipc.js";
+import { createIpcConnection, attachTuiControlChannel } from "./ipc.js";
 import * as fs from "fs";
 import * as path from "path";
 import * as os from "os";
@@ -78,8 +78,12 @@ async function main() {
     const client = await createIpcConnection({ socketPath });
     console.log("Connected!");
 
+    // Dedicated connection for mid-turn permission responses; degrades to
+    // the main client when the control socket cannot be established.
+    const control = await attachTuiControlChannel(client, { socketPath });
+
     // Render TUI
-    render(React.createElement(App, { client, model }));
+    render(React.createElement(App, { client, model, control }));
   } catch (err) {
     console.error("Failed to connect:", err);
     console.error(

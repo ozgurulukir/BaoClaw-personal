@@ -45,6 +45,14 @@ export interface ToolProgress {
   isExpanded?: boolean;
 }
 
+/** A tool invocation waiting for the user's allow/deny decision. */
+export interface PendingPermission {
+  toolUseId: string;
+  toolName: string;
+  /** Truncated JSON.stringify of the daemon event's `input`. */
+  inputPreview: string;
+}
+
 export type ActionType =
   | "ADD_MESSAGE"
   | "SET_STREAMING"
@@ -64,6 +72,9 @@ export type ActionType =
   | "SET_ERROR"
   | "CLEAR_ERROR"
   | "SET_FLASH"
+  | "QUEUE_PERMISSION"
+  | "RESOLVE_PERMISSION"
+  | "SET_AUTO_ALLOW"
   | "RESET";
 
 export interface Action {
@@ -84,4 +95,12 @@ export interface TuiState {
   error: string | null;
   flashMessage: string | null;
   usage: TokenUsage;
+  /** Permission requests awaiting a decision; the head is shown first. */
+  pendingPermissions: PendingPermission[];
+  /**
+   * Whether tool permission requests are auto-allowed. Seeded from the
+   * daemon-persisted knob (permissions.auto_allow_channels.tui, absent =
+   * true) and toggled with p / Ctrl+P, which persists via the daemon.
+   */
+  autoAllow: boolean;
 }

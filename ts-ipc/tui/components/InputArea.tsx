@@ -6,6 +6,8 @@ interface InputAreaProps {
   input: string;
   isStreaming: boolean;
   mode?: "insert" | "normal";
+  /** While the permission dialog is open, all keys here are suppressed. */
+  suspendInput?: boolean;
   onSubmit: (text: string) => void;
   onInputChange: (text: string) => void;
   onToggleMode?: () => void;
@@ -13,12 +15,14 @@ interface InputAreaProps {
   onToggleExpand?: () => void;
   onCopy?: () => void;
   onToggleHelp?: () => void;
+  onToggleAutoAllow?: () => void;
 }
 
 export const InputArea: React.FC<InputAreaProps> = ({
   input,
   isStreaming,
   mode = "insert",
+  suspendInput = false,
   onSubmit,
   onInputChange,
   onToggleMode,
@@ -26,6 +30,7 @@ export const InputArea: React.FC<InputAreaProps> = ({
   onToggleExpand,
   onCopy,
   onToggleHelp,
+  onToggleAutoAllow,
 }) => {
   const [cursorVisible, setCursorVisible] = useState(true);
 
@@ -39,7 +44,7 @@ export const InputArea: React.FC<InputAreaProps> = ({
 
   // Handle keyboard input
   useInput((inputChar, key) => {
-    if (isStreaming) return;
+    if (isStreaming || suspendInput) return;
 
     if (mode === "normal") {
       // Normal / Navigation mode keybindings
@@ -57,6 +62,8 @@ export const InputArea: React.FC<InputAreaProps> = ({
         onCopy?.();
       } else if (inputChar === "?" || (key.ctrl && inputChar === "h")) {
         onToggleHelp?.();
+      } else if (inputChar === "p") {
+        onToggleAutoAllow?.();
       }
       return;
     }
@@ -78,6 +85,8 @@ export const InputArea: React.FC<InputAreaProps> = ({
       onCopy?.();
     } else if (key.ctrl && inputChar === "h") {
       onToggleHelp?.();
+    } else if (key.ctrl && inputChar === "p") {
+      onToggleAutoAllow?.();
     } else if (!key.ctrl && !key.meta && inputChar) {
       onInputChange(input + inputChar);
     }
@@ -122,8 +131,8 @@ export const InputArea: React.FC<InputAreaProps> = ({
         <Box>
           <Text color={colors.text.dim}>
             {mode === "normal"
-              ? "Space/Enter: Toggle Tool • j/k: Navigate • y: Copy • i: Insert"
-              : "Enter: Send • Esc: Normal Mode • Ctrl+Y: Copy • Ctrl+H: Help"}
+              ? "Space/Enter: Toggle Tool • j/k: Navigate • y: Copy • p: Auto-allow • i: Insert"
+              : "Enter: Send • Esc: Normal Mode • Ctrl+Y: Copy • Ctrl+P: Auto-allow • Ctrl+H: Help"}
           </Text>
         </Box>
         <Box>

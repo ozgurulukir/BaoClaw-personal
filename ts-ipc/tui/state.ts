@@ -6,6 +6,7 @@ import {
   ContentBlock,
   Session,
   ToolProgress,
+  PendingPermission,
 } from "./types.js";
 
 export const INITIAL_STATE: TuiState = {
@@ -20,6 +21,8 @@ export const INITIAL_STATE: TuiState = {
   input: "",
   error: null,
   flashMessage: null,
+  pendingPermissions: [],
+  autoAllow: true,
   usage: {
     promptTokens: 0,
     completionTokens: 0,
@@ -265,6 +268,31 @@ export function reducer(state: TuiState, action: Action): TuiState {
       return {
         ...state,
         flashMessage: action.payload as string | null,
+      };
+    }
+
+    case "QUEUE_PERMISSION": {
+      const request = action.payload as PendingPermission;
+      return {
+        ...state,
+        pendingPermissions: [...state.pendingPermissions, request],
+      };
+    }
+
+    case "RESOLVE_PERMISSION": {
+      const toolUseId = action.payload as string;
+      return {
+        ...state,
+        pendingPermissions: state.pendingPermissions.filter(
+          (p) => p.toolUseId !== toolUseId,
+        ),
+      };
+    }
+
+    case "SET_AUTO_ALLOW": {
+      return {
+        ...state,
+        autoAllow: action.payload as boolean,
       };
     }
 

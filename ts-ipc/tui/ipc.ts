@@ -1,5 +1,9 @@
 // IPC Integration for BaoClaw TUI
 import { IpcClient } from "../client.js";
+import {
+  attachControlChannel,
+  type ControlChannel,
+} from "../controlChannel.js";
 import { Action } from "./types.js";
 
 export type IpcEventHandler = (event: IpcEvent) => void;
@@ -15,6 +19,32 @@ export interface IpcConfig {
   model?: string;
 }
 
+// Build the initialize params for a TUI connection. The daemon derives the
+// shared session key from cwd + shared_session_id, so the control channel
+// must clone these exactly to land in the same session.
+export function buildTuiInitParams(config: IpcConfig): Record<string, unknown> {
+  return {
+    cwd: config.cwd || process.cwd(),
+    model: config.model,
+    settings: {},
+    shared_session_id: "tui",
+  };
+}
+
+// Attach a dedicated control connection for mid-turn RPCs (permission
+// responses). Degrades to the main client with timeouts disabled when the
+// control socket cannot be established.
+export async function attachTuiControlChannel(
+  client: IpcClient,
+  config: IpcConfig,
+): Promise<ControlChannel> {
+  return attachControlChannel({
+    socketPath: config.socketPath,
+    initParams: buildTuiInitParams(config),
+    fallbackClient: client,
+  });
+}
+
 // Create IPC client and connect
 export async function createIpcConnection(
   config: IpcConfig,
@@ -25,16 +55,7 @@ export async function createIpcConnection(
   // Send initialize message to register as a client
   // This is required by the backend
   try {
-    await client.request(
-      "initialize",
-      {
-        cwd: config.cwd || process.cwd(),
-        model: config.model,
-        settings: {},
-        shared_session_id: "tui",
-      },
-      10000,
-    );
+    await client.request("initialize", buildTuiInitParams(config), 10000);
   } catch (err) {
     // Log but continue - some backends may not require initialize
     console.log("Initialize response received");
@@ -165,16 +186,19 @@ export function subscribeToEvents(
       }
 
       case "permission_request": {
-        // Auto-grant in TUI stream to maintain responsive UI
+        // Hand the decision to the app: it either auto-allows (persisted
+        // knob) or queues the request for the PermissionDialog. The response
+        // itself rides the control channel — see App.tsx.
         const toolUseId = (p.tool_use_id as string) || "";
-        if (toolUseId) {
-          client
-            .request("permissionResponse", {
-              tool_use_id: toolUseId,
-              decision: "allow",
-            })
-            .catch(() => {});
-        }
+        if (!toolUseId) break;
+        dispatch({
+          type: "QUEUE_PERMISSION",
+          payload: {
+            toolUseId,
+            toolName: (p.tool_name as string) || "tool",
+            inputPreview: JSON.stringify(p.input ?? {}).slice(0, 400),
+          },
+        });
         break;
       }
 

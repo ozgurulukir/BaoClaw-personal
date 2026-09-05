@@ -7,12 +7,16 @@ import React, {
 } from "react";
 import { Box, useApp, useInput, Text } from "ink";
 import { IpcClient } from "../../client.js";
+import type { ControlChannel } from "../../controlChannel.js";
 import StatusBar from "./StatusBar.js";
 import MessageList from "./MessageList.js";
 import StreamOutput from "./StreamOutput.js";
 import InputArea from "./InputArea.js";
 import HelpOverlay from "./HelpOverlay.js";
 import ToolsPanel from "./ToolsPanel.js";
+import PermissionDialog, {
+  type PermissionDecision,
+} from "./PermissionDialog.js";
 import { copyToClipboard } from "../clipboard.js";
 import {
   reducer,
@@ -22,14 +26,16 @@ import {
 } from "../state.js";
 import { subscribeToEvents, sendMessage } from "../ipc.js";
 import { colors } from "../theme.js";
-import { ContentBlock } from "../types.js";
+import { ContentBlock, PendingPermission } from "../types.js";
 
 interface AppProps {
   client: IpcClient;
   model: string;
+  /** Dedicated connection for mid-turn permission responses. */
+  control: ControlChannel;
 }
 
-export const App: React.FC<AppProps> = ({ client, model }) => {
+export const App: React.FC<AppProps> = ({ client, model, control }) => {
   const [state, dispatch] = useReducer(reducer, {
     ...INITIAL_STATE,
     session: {
@@ -50,6 +56,98 @@ export const App: React.FC<AppProps> = ({ client, model }) => {
     streamingContentRef.current = state.streamingContent;
     thinkingContentRef.current = state.thinkingContent;
   }, [state.streamingContent, state.thinkingContent]);
+
+  // Seed the auto-allow knob from the daemon-persisted permission context
+  // (permissions.auto_allow_channels.tui). Absent key or transient failure
+  // keeps the ON default, so a fetch error can never silently disable it.
+  useEffect(() => {
+    control
+      .request<{ auto_allow_channels?: Record<string, boolean> }>(
+        "permissions.info",
+      )
+      .then((ctx) => {
+        dispatch({
+          type: "SET_AUTO_ALLOW",
+          payload: ctx?.auto_allow_channels?.tui ?? true,
+        });
+      })
+      .catch(() => {});
+  }, [control]);
+
+  // ── Permission queue handling ──
+  const head = state.pendingPermissions[0] ?? null;
+  const dialogOpen = !state.autoAllow && state.pendingPermissions.length > 0;
+
+  const decide = useCallback(
+    async (request: PendingPermission, decision: PermissionDecision) => {
+      try {
+        const res = await control.request<{ delivered: boolean }>(
+          "permissionResponse",
+          {
+            tool_use_id: request.toolUseId,
+            decision,
+            ...(decision === "allow_always" ? { rule: request.toolName } : {}),
+          },
+        );
+        const delivered = res?.delivered === true;
+        dispatch({ type: "RESOLVE_PERMISSION", payload: request.toolUseId });
+        if (!delivered) {
+          dispatch({
+            type: "SET_FLASH",
+            payload: "Permission request was already handled elsewhere",
+          });
+        }
+      } catch {
+        // Transport failure: the daemon's gate is still parked, so keep the
+        // request queued and let the user retry (or the timer re-deny).
+        dispatch({
+          type: "SET_FLASH",
+          payload: "Failed to send permission response",
+        });
+      }
+    },
+    [control],
+  );
+
+  // The queue head owns auto-allow and the 60s local deny timer. Keyed on
+  // the head's id so each request gets a fresh timer and the timer is
+  // cancelled on any decision.
+  useEffect(() => {
+    if (!head) return;
+    if (state.autoAllow) {
+      void decide(head, "allow");
+      return;
+    }
+    const timer = setTimeout(() => {
+      void decide(head, "deny");
+    }, 60_000);
+    return () => clearTimeout(timer);
+  }, [head, state.autoAllow, decide]);
+
+  // Toggle the persisted auto-allow knob (p in normal mode, Ctrl+P anywhere).
+  const toggleAutoAllow = useCallback(() => {
+    const next = !state.autoAllow;
+    dispatch({ type: "SET_AUTO_ALLOW", payload: next });
+    control
+      .request("permissions.setAutoAllow", { channel: "tui", enabled: next })
+      .catch(() => {
+        dispatch({ type: "SET_AUTO_ALLOW", payload: !next });
+        dispatch({
+          type: "SET_FLASH",
+          payload: "Failed to persist auto-allow toggle",
+        });
+      });
+  }, [control, state.autoAllow]);
+
+  useInput((inputChar, key) => {
+    // Dialog modality: y/a/n belong to the PermissionDialog while it's open.
+    if (state.pendingPermissions.length > 0) return;
+    if (key.ctrl && inputChar === "p") {
+      toggleAutoAllow();
+    } else if (state.mode === "normal" && inputChar === "p") {
+      toggleAutoAllow();
+    }
+  });
 
   // Subscribe to IPC events
   useEffect(() => {
@@ -165,6 +263,7 @@ export const App: React.FC<AppProps> = ({ client, model }) => {
         mode={state.mode}
         usage={state.usage}
         flashMessage={state.flashMessage}
+        autoAllow={state.autoAllow}
       />
 
       {/* Messages area */}
@@ -207,11 +306,13 @@ export const App: React.FC<AppProps> = ({ client, model }) => {
         )}
       </Box>
 
-      {/* Modal Input area */}
+      {/* Modal Input area — suspended while the permission dialog holds the
+          keyboard (Ink broadcasts keys to every useInput handler). */}
       <InputArea
         input={state.input}
         isStreaming={state.isStreaming}
         mode={state.mode}
+        suspendInput={dialogOpen}
         onSubmit={handleSubmit}
         onInputChange={handleInputChange}
         onToggleMode={handleToggleMode}
@@ -219,10 +320,23 @@ export const App: React.FC<AppProps> = ({ client, model }) => {
         onToggleExpand={handleToggleExpand}
         onCopy={handleCopy}
         onToggleHelp={() => setShowHelp((h) => !h)}
+        onToggleAutoAllow={toggleAutoAllow}
       />
 
-      {/* Help overlay */}
-      <HelpOverlay visible={showHelp} onClose={() => setShowHelp(false)} />
+      {/* Help overlay — suppressed while the permission dialog is open so
+          its swallow-all key handler can't eat the y/a/n decision keys. */}
+      <HelpOverlay
+        visible={showHelp && !dialogOpen}
+        onClose={() => setShowHelp(false)}
+      />
+
+      {/* Permission prompt — modal, queue head first */}
+      <PermissionDialog
+        request={dialogOpen ? head : null}
+        onDecide={(decision) => {
+          if (head) void decide(head, decision);
+        }}
+      />
     </Box>
   );
 };

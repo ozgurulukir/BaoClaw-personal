@@ -9,6 +9,8 @@ interface StatusBarProps {
   mode?: "insert" | "normal";
   usage?: TokenUsage;
   flashMessage?: string | null;
+  /** Persisted auto-allow knob; badge shows only when prompting is enforced. */
+  autoAllow?: boolean;
 }
 
 function renderProgressBar(
@@ -35,6 +37,7 @@ export const StatusBar: React.FC<StatusBarProps> = ({
   mode = "insert",
   usage,
   flashMessage,
+  autoAllow,
 }) => {
   const statusColor = isStreaming
     ? colors.status.streaming
@@ -80,6 +83,16 @@ export const StatusBar: React.FC<StatusBarProps> = ({
           [{mode.toUpperCase()}]
         </Text>
       </Box>
+
+      {/* Auto-allow badge — only rendered when prompting is enforced, so
+          the default (auto-allow on) keeps the bar uncluttered. */}
+      {autoAllow === false && (
+        <Box marginRight={1}>
+          <Text color={colors.status.warning} bold>
+            [ASK]
+          </Text>
+        </Box>
+      )}
 
       {/* Model name */}
       <Box marginRight={1}>
