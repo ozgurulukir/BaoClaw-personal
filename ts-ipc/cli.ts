@@ -1632,6 +1632,74 @@ async function main() {
   let cumulativeCostUsd = 0;
   const CONTEXT_WINDOW = 200_000;
 
+  // ── Permission prompts ──
+  // Reuse the main REPL readline instead of creating a second interface: two
+  // terminal-mode readlines on the same stdin echo every keypress twice and
+  // leak the answer into the REPL's line buffer (submitted as a chat
+  // message). While a question is pending, readline suppresses rl's own
+  // 'line' event; a concurrent request queues until the current one is
+  // answered.
+  type PermissionRequestEvent = {
+    tool_name: string;
+    input: Record<string, unknown>;
+    tool_use_id: string;
+  };
+  let permissionPromptActive = false;
+  const permissionQueue: PermissionRequestEvent[] = [];
+  const showPermissionPrompt = (pr: PermissionRequestEvent) => {
+    permissionPromptActive = true;
+    const inp = pr.input || {};
+    const paramPreview = Object.keys(inp)
+      .slice(0, 2)
+      .map((k) => {
+        const v = String(inp[k] ?? "");
+        return `${k}=${v.length > 30 ? v.slice(0, 30) + "…" : v}`;
+      })
+      .join(", ");
+
+    console.log(
+      `\n  ${FG_YELLOW}⚠ Permission${RESET}  ${FG_WHITE}${BOLD}${pr.tool_name}${RESET}  ${DIM}${paramPreview}${RESET}`,
+    );
+    console.log(
+      `    ${FG_GREEN}[y]${RESET} Allow  ${FG_GREEN}[a]${RESET} Always  ${FG_RED}[n]${RESET} Deny`,
+    );
+    rl.question(`  ${FG_ORANGE}> ${RESET}`, async (answer: string) => {
+      permissionPromptActive = false;
+      let decision: string;
+      let rule: string | undefined;
+      switch (answer.trim().toLowerCase()) {
+        case "y":
+          decision = "allow";
+          break;
+        case "a":
+          decision = "allow_always";
+          rule = pr.tool_name;
+          break;
+        case "n":
+        default:
+          decision = "deny";
+          break;
+      }
+      console.log(`  ${DIM}→ ${decision}${RESET}`);
+      try {
+        await control.request("permissionResponse", {
+          tool_use_id: pr.tool_use_id,
+          decision,
+          rule,
+        });
+      } catch (err) {
+        console.error(
+          `${FG_RED}Failed to send permission response: ${err}${RESET}`,
+        );
+      }
+      if (decision !== "deny") {
+        startSpinner(`Running ${pr.tool_name}...`);
+      }
+      const next = permissionQueue.shift();
+      if (next) showPermissionPrompt(next);
+    });
+  };
+
   client.onNotification("stream/event", (params: unknown) => {
     const event = params as Record<string, unknown>;
     if (!event || typeof event !== "object") return;
@@ -1834,65 +1902,14 @@ async function main() {
           process.stdout.write("\n");
           isStreaming = false;
         }
-        const pr = event as {
-          tool_name: string;
-          input: Record<string, unknown>;
-          tool_use_id: string;
-        };
+        const pr = event as PermissionRequestEvent;
 
         // Show a compact permission prompt
-        const inp = pr.input || {};
-        const paramPreview = Object.keys(inp)
-          .slice(0, 2)
-          .map((k) => {
-            const v = String(inp[k] ?? "");
-            return `${k}=${v.length > 30 ? v.slice(0, 30) + "…" : v}`;
-          })
-          .join(", ");
-
-        console.log(
-          `\n  ${FG_YELLOW}⚠ Permission${RESET}  ${FG_WHITE}${BOLD}${pr.tool_name}${RESET}  ${DIM}${paramPreview}${RESET}`,
-        );
-        console.log(
-          `    ${FG_GREEN}[y]${RESET} Allow  ${FG_GREEN}[a]${RESET} Always  ${FG_RED}[n]${RESET} Deny`,
-        );
-
-        const permRl = readline.createInterface({
-          input: process.stdin,
-          output: process.stdout,
-        });
-        permRl.question(`  ${FG_ORANGE}> ${RESET}`, async (answer: string) => {
-          permRl.close();
-          let decision: string;
-          let rule: string | undefined;
-          switch (answer.trim().toLowerCase()) {
-            case "y":
-              decision = "allow";
-              break;
-            case "a":
-              decision = "allow_always";
-              rule = pr.tool_name;
-              break;
-            case "n":
-            default:
-              decision = "deny";
-              break;
-          }
-          try {
-            await control.request("permissionResponse", {
-              tool_use_id: pr.tool_use_id,
-              decision,
-              rule,
-            });
-          } catch (err) {
-            console.error(
-              `${FG_RED}Failed to send permission response: ${err}${RESET}`,
-            );
-          }
-          if (decision !== "deny") {
-            startSpinner(`Running ${pr.tool_name}...`);
-          }
-        });
+        if (permissionPromptActive) {
+          permissionQueue.push(pr);
+        } else {
+          showPermissionPrompt(pr);
+        }
         break;
       }
 
@@ -2313,23 +2330,14 @@ async function main() {
           `  ${DIM}─── Enter additional instructions (or press Enter to send as-is) ───${RESET}`,
         );
 
-        // Pause readline, let user type additional instructions
-        // Use a separate interface with terminal: false to avoid echo conflicts
-        rl.pause();
-        const { createInterface } = await import("readline");
-        const mlRl = createInterface({
-          input: process.stdin,
-          output: process.stdout,
-          terminal: false, // Disable terminal mode to avoid echo conflicts
-        });
+        // Ask for additional instructions on the main readline: a second
+        // interface on the same stdin (even with rl.pause()) leaks every line
+        // into the REPL's line handler, submitting it as a separate message.
         const extraInput: string = await new Promise((resolve) => {
-          process.stdout.write(`  ${FG_CYAN}➤${RESET} `);
-          mlRl.once("line", (answer: string) => {
-            mlRl.close();
+          rl.question(`  ${FG_CYAN}➤${RESET} `, (answer: string) => {
             resolve(answer.trim());
           });
         });
-        rl.resume();
 
         // Build final message: summary header + full content + extra instructions
         let finalMessage = `[User pasted ${totalLines} lines (${sizeStr}) of ${contentType}]\n\n${combined}`;
