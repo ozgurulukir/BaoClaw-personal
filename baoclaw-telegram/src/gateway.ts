@@ -25,6 +25,7 @@ import {
   parseCommand,
   isRegisteredCommand,
   formatError,
+  COMMAND_REGISTRY,
   type SessionState,
 } from "./commands.js";
 import { splitMessage } from "./messageSplitter.js";
@@ -147,6 +148,21 @@ async function main() {
   try {
     botInfo = await bot.api.getMe();
     logger.info(`Telegram bot @${botInfo.username} ready.`);
+
+    // Keep the server-side command menu in sync with the registry. The menu
+    // persists per-bot at Telegram; without this, entries set by whatever
+    // previously used this bot token (e.g. stale "update hermes agent")
+    // would linger forever.
+    try {
+      await bot.api.setMyCommands({
+        commands: Object.entries(COMMAND_REGISTRY).map(([name, def]) => ({
+          command: name.slice(1),
+          description: def.description,
+        })),
+      });
+    } catch (err: any) {
+      logger.warn(`Failed to update command menu: ${err.message}`);
+    }
   } catch (err: any) {
     logger.error(`Failed to connect to Telegram API: ${err.message}`);
     process.exit(1);
