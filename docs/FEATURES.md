@@ -134,7 +134,11 @@ loop — each carries an inline status note and a tracking issue.
 
 #### 📐 Adaptive Compact (#9)
 
-> **Status: dead code — not wired.** See #37.
+> **Status: wired (see #37, closed).** Compaction now feeds the
+> AdaptiveCompactTracker and uses its clamped recommendation
+> (8–30 messages) instead of a hardcoded keep_recent. The loss-signal
+> branch (user re-asking about pre-compact content) is not wired yet —
+> only the compression-ratio adaptation is active.
 
 - `AdaptiveCompactTracker` adjusts `keep_recent` heuristically from compression history
 - If the user re-asks about pre-compact content → increase `keep_recent` (preserve more)

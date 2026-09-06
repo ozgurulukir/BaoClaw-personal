@@ -21,8 +21,9 @@ use crate::tools::executor::{execute_tools, ToolUseRequest};
 use crate::tools::trait_def::ToolContext;
 
 use crate::engine::query_engine::{
-    estimate_tokens, format_messages_for_summary, AdaptiveCompactTracker, EngineError, EngineEvent,
-    NoopProgressSender, QueryLoopConfig, QueryResult, QueryStatus, EMPTY_USAGE,
+    estimate_tokens, format_messages_for_summary, AdaptiveCompactTracker, CompactResult,
+    EngineError, EngineEvent, NoopProgressSender, QueryLoopConfig, QueryResult, QueryStatus,
+    EMPTY_USAGE,
 };
 use crate::engine::tool_loop::{
     accumulate_usage, build_tool_result_message, extract_text, extract_tool_result_ids,
@@ -451,14 +452,21 @@ async fn enforce_token_budget(
                 );
             } else {
                 // Try session_memory_compact first (no API call needed).
+                let tokens_before = estimate_tokens(messages);
                 let session_ok = config
                     .session_memory
                     .as_ref()
                     .is_some_and(|sm| session_memory_compact(messages, &sm.get()));
 
                 if !session_ok {
-                    match compact_messages(messages, tx.clone(), &*config).await {
+                    let keep = adaptive_keep_recent(&config.adaptive_compact);
+                    match compact_messages(messages, tx.clone(), &*config, keep).await {
                         Ok(_) => {
+                            record_compact_feedback(
+                                &mut config.adaptive_compact,
+                                messages,
+                                tokens_before,
+                            );
                             eprintln!("Mid-loop auto-compact succeeded");
                             config.compact_fail_count = 0;
                         }
@@ -471,6 +479,7 @@ async fn enforce_token_budget(
                         }
                     }
                 } else {
+                    record_compact_feedback(&mut config.adaptive_compact, messages, tokens_before);
                     config.compact_fail_count = 0;
                 }
             }
@@ -710,8 +719,17 @@ async fn call_api_with_fallback(
                         }).await;
                     return ApiCallOutcome::Retry;
                 }
-                match compact_messages(messages, tx.clone(), &*config).await {
+                // Emergency path (context-overflow bad request): still adaptive,
+                // but the tracker may steer toward larger keeps over time.
+                let keep = adaptive_keep_recent(&config.adaptive_compact);
+                let tokens_before = estimate_tokens(messages);
+                match compact_messages(messages, tx.clone(), &*config, keep).await {
                     Ok(_) => {
+                        record_compact_feedback(
+                            &mut config.adaptive_compact,
+                            messages,
+                            tokens_before,
+                        );
                         config.compact_fail_count = 0;
                         let _ = tx.send(EngineEvent::Progress {
                                 tool_use_id: String::new(),
@@ -1527,14 +1545,14 @@ pub async fn compact_messages(
     messages: &mut Vec<Message>,
     tx: mpsc::Sender<EngineEvent>,
     config: &QueryLoopConfig,
+    keep_recent: usize,
 ) -> Result<(), EngineError> {
-    const KEEP_RECENT: usize = 10; // keep last 10 messages (5 turns)
-    if messages.len() <= KEEP_RECENT {
+    if messages.len() <= keep_recent {
         return Ok(());
     }
 
     // Ensure we don't split between tool calls and their results.
-    let old_count = adjust_compact_split(messages, messages.len() - KEEP_RECENT);
+    let old_count = adjust_compact_split(messages, messages.len() - keep_recent);
 
     // Clone old messages to avoid borrowing messages during API call
     let old_messages: Vec<Message> = messages[..old_count].to_vec();
@@ -1664,6 +1682,36 @@ pub async fn compact_messages(
 
 /// Maximum consecutive compact failures before the circuit breaker trips.
 const MAX_COMPACT_FAILURES: usize = 3;
+
+/// Adaptive compact policy: clamp the tracker's recommendation to a safe
+/// band. The tracker starts at 10, matching the historical hardcoded default,
+/// so the first compact behaves exactly as before adaptation kicks in.
+fn adaptive_keep_recent(adaptive: &AdaptiveCompactTracker) -> usize {
+    adaptive.recommended_keep_recent().clamp(8, 30)
+}
+
+/// Feed a completed compact back into the tracker so the next keep_recent
+/// adapts to observed compression.
+///
+/// `user_repeated` (did the user re-ask about pre-compact content within 3
+/// turns) is recorded as false: that detection signal is not wired yet, so
+/// today only the compression-ratio branches of the tracker can fire.
+fn record_compact_feedback(
+    adaptive: &mut AdaptiveCompactTracker,
+    messages: &[Message],
+    tokens_before: u64,
+) {
+    let tokens_after = estimate_tokens(messages);
+    adaptive.record_compact(
+        &CompactResult {
+            tokens_saved: tokens_before.saturating_sub(tokens_after),
+            summary_tokens: 0,
+            tokens_before,
+            tokens_after,
+        },
+        false,
+    );
+}
 
 /// Micro-compact: replace old, large tool-result content with placeholders.
 ///
@@ -2028,5 +2076,59 @@ pub async fn update_session_memory_background(
         Err(e) => {
             eprintln!("Session memory background update failed: {}", e);
         }
+    }
+}
+
+#[cfg(test)]
+mod adaptive_compact_tests {
+    use super::*;
+
+    #[test]
+    fn initial_recommendation_matches_historical_default() {
+        // The tracker starts at 10 — identical to the pre-adaptive hardcoded
+        // KEEP_RECENT — so the first compact of a session is unchanged.
+        let tracker = AdaptiveCompactTracker::new();
+        assert_eq!(adaptive_keep_recent(&tracker), 10);
+    }
+
+    #[test]
+    fn keep_recent_is_clamped_to_safe_band() {
+        let mut tracker = AdaptiveCompactTracker::new();
+        tracker.keep_recent = 2;
+        assert_eq!(adaptive_keep_recent(&tracker), 8);
+        tracker.keep_recent = 500;
+        assert_eq!(adaptive_keep_recent(&tracker), 30);
+    }
+
+    #[test]
+    fn good_compression_lets_tracker_shrink_keep() {
+        // Sustained good compression + no repeated topics should trend the
+        // tracker's keep_recent down (floor 8 via the policy clamp).
+        let mut tracker = AdaptiveCompactTracker::new();
+        for _ in 0..5 {
+            tracker.record_compact(
+                &CompactResult {
+                    tokens_saved: 900,
+                    summary_tokens: 0,
+                    tokens_before: 1000,
+                    tokens_after: 100,
+                },
+                false,
+            );
+        }
+        assert!(tracker.recommended_keep_recent() < 10);
+        assert_eq!(adaptive_keep_recent(&tracker), 8);
+    }
+
+    #[test]
+    fn feedback_records_estimated_tokens() {
+        let mut tracker = AdaptiveCompactTracker::new();
+        // Empty message list -> tokens_after 0, all "before" tokens saved.
+        record_compact_feedback(&mut tracker, &[], 1234);
+        assert_eq!(tracker.compact_count, 1);
+        assert_eq!(tracker.history.len(), 1);
+        assert_eq!(tracker.history[0].tokens_before, 1234);
+        assert_eq!(tracker.history[0].tokens_after, 0);
+        assert!(!tracker.history[0].user_repeated_topic);
     }
 }
