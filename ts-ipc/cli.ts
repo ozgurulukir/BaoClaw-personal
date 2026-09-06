@@ -5044,36 +5044,63 @@ async function main() {
             `\n${FG_ORANGE}${BOLD}🔒 Permission Rules${RESET} ${DIM}(mode: ${info.mode ?? "default"})${RESET}\n`,
           );
 
-          const allowRules = info.always_allow_rules ?? [];
-          const denyRules = info.always_deny_rules ?? [];
-          const askRules = info.always_ask_rules ?? [];
-
           console.log(
-            `  ${FG_GREEN}${BOLD}✓ Allow (${allowRules.length})${RESET} ${DIM}— auto-approve${RESET}`,
+            `  ${DIM}ask timeout: ${info.ask_timeout_secs ?? 300}s • persist grants: ${(info.persist_grants ?? true) ? "on" : "off"}\n`,
           );
-          allowRules.forEach((r: any) => {
-            const t = r.tool_name ?? "?";
-            const p = r.rule_content ? ` "${r.rule_content}"` : "";
-            console.log(`    ${FG_GREEN}✓${RESET} ${t}${p}`);
-          });
 
-          console.log(
-            `\n  ${FG_RED}${BOLD}✗ Deny (${denyRules.length})${RESET} ${DIM}— always reject${RESET}`,
-          );
-          denyRules.forEach((r: any) => {
-            const t = r.tool_name ?? "?";
-            const p = r.rule_content ? ` "${r.rule_content}"` : "";
-            console.log(`    ${FG_RED}✗${RESET} ${t}${p}`);
-          });
+          // The daemon serializes rule maps as objects keyed by source
+          // ({user: [...]}) — flatten before rendering.
+          const renderRules = (
+            rules: any,
+            symbol: string,
+            color: string,
+            label: string,
+            hint: string,
+          ) => {
+            const entries = Object.entries(rules ?? {}) as Array<
+              [string, any[]]
+            >;
+            const total = entries.reduce(
+              (n, [, rs]) => n + (rs as any[]).length,
+              0,
+            );
+            console.log(
+              `  ${color}${BOLD}${symbol} ${label} (${total})${RESET} ${DIM}— ${hint}${RESET}`,
+            );
+            for (const [source, rs] of entries) {
+              for (const r of rs ?? []) {
+                const t = r.tool_name ?? "?";
+                const p = r.rule_content ? ` "${r.rule_content}"` : "";
+                console.log(
+                  `    ${color}${symbol}${RESET} ${t}${p} ${DIM}(${source})${RESET}`,
+                );
+              }
+            }
+          };
 
-          console.log(
-            `\n  ${FG_YELLOW}${BOLD}? Ask (${askRules.length})${RESET} ${DIM}— prompt user${RESET}`,
+          renderRules(
+            info.always_allow_rules,
+            "✓",
+            FG_GREEN,
+            "Allow",
+            "auto-approve",
           );
-          askRules.forEach((r: any) => {
-            const t = r.tool_name ?? "?";
-            const p = r.rule_content ? ` "${r.rule_content}"` : "";
-            console.log(`    ${FG_YELLOW}?${RESET} ${t}${p}`);
-          });
+          console.log("");
+          renderRules(
+            info.always_deny_rules,
+            "✗",
+            FG_RED,
+            "Deny",
+            "always reject",
+          );
+          console.log("");
+          renderRules(
+            info.always_ask_rules,
+            "?",
+            FG_YELLOW,
+            "Ask",
+            "prompt user",
+          );
 
           console.log(`\n  ${DIM}Usage:${RESET}`);
           console.log(
@@ -5087,6 +5114,12 @@ async function main() {
           );
           console.log(
             `  ${FG_WHITE}/permissions mode <m>${RESET}             ${DIM}Set mode (default|plan|bypass|auto)${RESET}`,
+          );
+          console.log(
+            `  ${FG_WHITE}/permissions timeout <s>${RESET}          ${DIM}Prompt timeout 5-3600s${RESET}`,
+          );
+          console.log(
+            `  ${FG_WHITE}/permissions persist <on|off>${RESET}     ${DIM}Persist allow-always grants${RESET}`,
           );
           console.log(
             `  ${FG_WHITE}/permissions remove <cat> <tool> [glob]${RESET} ${DIM}Remove rule${RESET}\n`,
@@ -5113,6 +5146,53 @@ async function main() {
           );
         } catch (err) {
           console.error(`\n${FG_RED}Failed to set mode: ${err}${RESET}\n`);
+        }
+        rl.prompt();
+        return;
+      }
+
+      // /permissions timeout <seconds>
+      if (sub === "timeout") {
+        const seconds = Number(parts[1]);
+        if (!parts[1] || !Number.isInteger(seconds) || seconds <= 0) {
+          console.log(
+            `\n${FG_YELLOW}Usage: /permissions timeout <seconds>${RESET} ${DIM}(5-3600)${RESET}\n`,
+          );
+          rl.prompt();
+          return;
+        }
+        try {
+          await client.request("permissions.setAskTimeout", { seconds });
+          console.log(
+            `\n${FG_GREEN}${BOLD}✓ Ask timeout set to ${seconds}s${RESET}\n`,
+          );
+        } catch (err) {
+          console.error(`\n${FG_RED}Failed to set timeout: ${err}${RESET}\n`);
+        }
+        rl.prompt();
+        return;
+      }
+
+      // /permissions persist <on|off>
+      if (sub === "persist") {
+        const value = parts[1]?.toLowerCase();
+        if (value !== "on" && value !== "off") {
+          console.log(
+            `\n${FG_YELLOW}Usage: /permissions persist <on|off>${RESET}\n`,
+          );
+          rl.prompt();
+          return;
+        }
+        const enabled = value === "on";
+        try {
+          await client.request("permissions.setPersistGrants", { enabled });
+          console.log(
+            `\n${FG_GREEN}${BOLD}✓ Allow-always persistence ${enabled ? "enabled" : "disabled"}${RESET}\n`,
+          );
+        } catch (err) {
+          console.error(
+            `\n${FG_RED}Failed to set persistence: ${err}${RESET}\n`,
+          );
         }
         rl.prompt();
         return;
