@@ -1240,7 +1240,14 @@ async function executeOneShot(
 
   client.onNotification("stream/event", async (params: any) => {
     if (!params) return;
-    if (params.type === "text_delta" && params.text) {
+    if (params.type === "assistant_chunk" && params.content) {
+      // Current stream vocabulary (same as the interactive REPL and TUI).
+      fullResponse += params.content;
+      if (!jsonMode) {
+        process.stdout.write(params.content);
+      }
+    } else if (params.type === "text_delta" && params.text) {
+      // Legacy event shape kept for older daemons.
       fullResponse += params.text;
       if (!jsonMode) {
         process.stdout.write(params.text);
