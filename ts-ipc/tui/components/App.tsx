@@ -60,16 +60,22 @@ export const App: React.FC<AppProps> = ({ client, model, control }) => {
   // Seed the auto-allow knob from the daemon-persisted permission context
   // (permissions.auto_allow_channels.tui). Absent key or transient failure
   // keeps the ON default, so a fetch error can never silently disable it.
+  // The daemon's ask timeout seeds the local deny timer so every channel
+  // auto-denies on the same schedule. Fetch failure keeps the historical
+  // 60s (an absent field on an old daemon means the daemon default 300).
+  const [askTimeoutSecs, setAskTimeoutSecs] = useState(60);
   useEffect(() => {
     control
-      .request<{ auto_allow_channels?: Record<string, boolean> }>(
-        "permissions.info",
-      )
+      .request<{
+        auto_allow_channels?: Record<string, boolean>;
+        ask_timeout_secs?: number;
+      }>("permissions.info")
       .then((ctx) => {
         dispatch({
           type: "SET_AUTO_ALLOW",
           payload: ctx?.auto_allow_channels?.tui ?? true,
         });
+        setAskTimeoutSecs(Math.max(5, ctx?.ask_timeout_secs ?? 300));
       })
       .catch(() => {});
   }, [control]);
@@ -109,9 +115,9 @@ export const App: React.FC<AppProps> = ({ client, model, control }) => {
     [control],
   );
 
-  // The queue head owns auto-allow and the 60s local deny timer. Keyed on
-  // the head's id so each request gets a fresh timer and the timer is
-  // cancelled on any decision.
+  // The queue head owns auto-allow and the local deny timer (mirrors the
+  // daemon's ask_timeout knob). Keyed on the head's id so each request gets
+  // a fresh timer and the timer is cancelled on any decision.
   useEffect(() => {
     if (!head) return;
     if (state.autoAllow) {
@@ -120,9 +126,9 @@ export const App: React.FC<AppProps> = ({ client, model, control }) => {
     }
     const timer = setTimeout(() => {
       void decide(head, "deny");
-    }, 60_000);
+    }, askTimeoutSecs * 1000);
     return () => clearTimeout(timer);
-  }, [head, state.autoAllow, decide]);
+  }, [head, state.autoAllow, decide, askTimeoutSecs]);
 
   // Toggle the persisted auto-allow knob (p in normal mode, Ctrl+P anywhere).
   const toggleAutoAllow = useCallback(() => {
@@ -333,6 +339,7 @@ export const App: React.FC<AppProps> = ({ client, model, control }) => {
       {/* Permission prompt — modal, queue head first */}
       <PermissionDialog
         request={dialogOpen ? head : null}
+        autoDenySecs={askTimeoutSecs}
         onDecide={(decision) => {
           if (head) void decide(head, decision);
         }}

@@ -8,6 +8,8 @@ export type PermissionDecision = "allow" | "allow_always" | "deny";
 interface PermissionDialogProps {
   /** The request at the head of the queue; null renders nothing. */
   request: PendingPermission | null;
+  /** Daemon ask-timeout knob mirrored for the local deny timer. */
+  autoDenySecs?: number;
   onDecide: (decision: PermissionDecision) => void;
 }
 
@@ -21,6 +23,7 @@ interface PermissionDialogProps {
  */
 export const PermissionDialog: React.FC<PermissionDialogProps> = ({
   request,
+  autoDenySecs = 60,
   onDecide,
 }) => {
   useInput((inputChar, key) => {
@@ -63,7 +66,7 @@ export const PermissionDialog: React.FC<PermissionDialogProps> = ({
         <Text color={colors.text.primary}> Deny</Text>
         <Text color={colors.text.muted}>
           {" "}
-          {zen.separator} auto-deny after 60s
+          {zen.separator} auto-deny after {autoDenySecs}s
         </Text>
       </Text>
     </Box>
