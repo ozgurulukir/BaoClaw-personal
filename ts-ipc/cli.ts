@@ -4933,7 +4933,9 @@ async function main() {
     }
 
     // ── /permission commands ──
-    if (input.startsWith("/permission")) {
+    // Word-boundary match: a plain startsWith("/permission") would shadow the
+    // /permissions (plural) handler below and swallow its subcommands.
+    if (input === "/permission" || input.startsWith("/permission ")) {
       const permArgs = input.slice("/permission".length).trim();
       const parts = permArgs.split(/\s+/);
       const subCmd = parts[0] || "";

@@ -28,7 +28,7 @@ Inspired by [Hermes Agent](https://github.com/NousResearch/hermes-agent)'s learn
 - **Trajectory recording** — every interaction is logged with tools used, outcomes, and timing
 - **Skill auto-generation** — complex successful tasks are extracted as reusable skill candidates
 - **Self-evaluation nudge** — every 15 tasks, the agent reflects on patterns and creates/improves skills
-- **User ratings** — rate interactions as good/bad to build preference data
+- **User ratings** — rate interactions as good/bad to build preference data _(no user-facing surface yet — see #42)_
 - **Training-data export** — export trajectories as JSONL in a format that can be adapted for DPO/RLHF fine-tuning
 - **Personal evolution** — skills and trajectories are cross-project (`~/.baoclaw/evolution/`)
 - **Evolve tool** — agent can propose, improve, and promote skills; review generated skills before relying on them
@@ -97,7 +97,9 @@ Inspired by [Hermes Agent](https://github.com/NousResearch/hermes-agent)'s learn
 
 ### 🚀 v2.0 — Intelligence Layer (NEW)
 
-Phase 2–4 additions that make BaoClaw smarter, safer, and faster:
+Phase 2–4 additions that make BaoClaw smarter, safer, and faster.
+Several modules below were implemented but never wired into the query
+loop — each carries an inline status note and a tracking issue.
 
 #### 🔍 Cross-Session Search (#5)
 
@@ -107,17 +109,23 @@ Phase 2–4 additions that make BaoClaw smarter, safer, and faster:
 
 #### ❄️ Frozen Snapshot Caching (#6)
 
+> **Status: implemented but never activates.** See #35.
+
 - System prompt and tools list are built **once** and frozen for the entire session
 - Maximizes Anthropic prompt cache hit rate — only the dynamic reminder changes per turn
 - Reduces cost and latency on every API call
 
 #### 👤 User Profile (#7)
 
+> **Status: dead code — not wired.** See #31.
+
 - `~/.baoclaw/USER.md` — persistent user profile (name, language, coding style, tool preferences)
 - Auto-loaded into system prompt for personalized responses
 - Session stats merged automatically (total turns, cost, top tools)
 
 #### 🔄 Skill Self-Improvement Loop (#8)
+
+> **Status: partially wired.** See #36.
 
 - **5-stage cycle**: Collect → Evaluate → Improve → Validate → Retire
 - Scores skills on relevance rate, success rate, user rating, and staleness
@@ -126,12 +134,16 @@ Phase 2–4 additions that make BaoClaw smarter, safer, and faster:
 
 #### 📐 Adaptive Compact (#9)
 
+> **Status: dead code — not wired.** See #37.
+
 - `AdaptiveCompactTracker` adjusts `keep_recent` heuristically from compression history
 - If the user re-asks about pre-compact content → increase `keep_recent` (preserve more)
 - If compression ratio is poor and no information loss → decrease `keep_recent` (compact harder)
 - Range: 6–30 messages, auto-adjusted per session
 
 #### 🏥 Tool Health Monitoring (#10)
+
+> **Status: dead code — not wired.** See #38.
 
 - Tracks success/failure/timeout rates per tool in real time
 - **3 statuses**: Healthy → Degraded (3 consecutive failures) → Disabled (6 failures)
@@ -140,11 +152,15 @@ Phase 2–4 additions that make BaoClaw smarter, safer, and faster:
 
 #### 🎯 Intent Prediction (#11)
 
+> **Status: wired for file/skill warmup.** "Hints in the system prompt" is overstated — prediction warms up files/skills and logs; no prompt hints yet.
+
 - Predicts user intent (coding, debugging, testing, refactoring, git, research…) from message keywords
 - Heuristic transition matrix records what intent typically follows what (e.g., CodeWriting → Testing)
 - High-confidence predictions trigger tool preloading hints in the system prompt
 
 #### 🧮 Context Window Allocator (#12)
+
+> **Status: dead code — not wired.** See #32.
 
 - Attention score = 0.5×relevance + 0.3×recency + 0.2×frequency
 - Mandatory blocks (system prompt, tools) always included
@@ -160,6 +176,8 @@ Phase 2–4 additions that make BaoClaw smarter, safer, and faster:
 
 #### 🛡️ Prompt Injection Detection (#14)
 
+> **Status: dead code — not wired.** See #33.
+
 - **20 patterns** across 6 categories: instruction override, role hijack, data exfiltration, encoding tricks, hidden payloads, jailbreak
 - Heuristic scoring with diminishing returns + multi-category boost
 - Four severity levels: Clean → Suspicious → Dangerous → Critical
@@ -167,12 +185,16 @@ Phase 2–4 additions that make BaoClaw smarter, safer, and faster:
 
 #### 🔐 Subagent Depth Policy (#15)
 
+> **Status: dead code — not wired.** See #39.
+
 - Maximum nesting depth: 3 levels
 - **Progressive tool restriction**: Depth 0 = all tools, Depth 1 = safe tools, Depth 2 = read-only, Depth 3 = minimal (FileRead + Bash only)
 - Per-depth budgets: turns cap (100→30→15→5), cost cap ($10→$2→$0.50→$0.10)
 - Exceeded budget → auto-terminate sub-agent
 
 #### 📡 Streaming Tool Executor (#16)
+
+> **Status: dead code — not wired.** See #34.
 
 - Real-time chunked output: Started → Progress → Stdout → Stderr → Completed → Error → Heartbeat
 - `StreamWriter` / `StreamReader` pair via `tokio::sync::mpsc`
@@ -200,6 +222,8 @@ Phase 2–4 additions that make BaoClaw smarter, safer, and faster:
 
 #### 🧭 Model Router (#19)
 
+> **Status: advisory only — not applied to queries.** See #40.
+
 - **Intelligent routing**: select model by task type (code/completion/creative/analysis)
 - **Cost-aware**: prefer cheaper models for simple tasks, route to premium models for complex work
 - **Budget tracking**: set spending limits, track token usage, alert on threshold exceeded
@@ -207,6 +231,8 @@ Phase 2–4 additions that make BaoClaw smarter, safer, and faster:
 - **Fallback chain**: automatic failover when primary model unavailable
 
 #### 📊 Telemetry & Monitoring (#20)
+
+> **Status: events never recorded — RPCs return empty data.** See #41.
 
 - **Event collection**: record tool calls, model invocations, errors, session events
 - **Trend analysis**: detect increasing/decreasing/stable patterns over time windows

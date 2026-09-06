@@ -260,7 +260,7 @@ ls $env:TEMP\baoclaw-sockets\baoclaw.sock
 ├── baoclaw-whatsapp/             # WhatsApp gateway
 ├── docs/                         # Documentation (USAGE.md / DAEMON_MIGRATION.md)
 ├── config.json                   # Configuration file (model_profiles)
-├── memories/                     # Long-term memory (JSONL)
+├── memory.jsonl                  # Global long-term memory (single JSONL file)
 └── sessions/                     # Session persistence
     ├── registry.json             # session index
     ├── <session-id>.json         # individual session state
