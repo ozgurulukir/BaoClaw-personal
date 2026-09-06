@@ -5,7 +5,7 @@
 import * as fs from "fs";
 import * as path from "path";
 import * as os from "os";
-import { securePrivateFile } from "../../ts-ipc/security.js";
+import { securePrivateFile } from "baoclaw-ipc/security";
 import { validateE164 } from "./allowlist.js";
 
 export interface WhatsAppConfig {

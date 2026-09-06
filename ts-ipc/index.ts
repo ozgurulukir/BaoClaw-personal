@@ -28,9 +28,3 @@ export {
 } from "./streamHandler.js";
 export { startRustCore, startRustCoreWithRestart } from "./rustCore.js";
 export type { RustCoreConfig, RustCoreHandle } from "./rustCore.js";
-export { useRustEngine } from "./useRustEngine.js";
-export type {
-  Message,
-  EngineState,
-  UseRustEngineReturn,
-} from "./useRustEngine.js";

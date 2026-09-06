@@ -324,7 +324,7 @@ system, and memory architecture, see [docs/INTERNALS.md](docs/INTERNALS.md).
 ### Prerequisites
 
 - **Rust** (1.96+) — [rustup.rs](https://rustup.rs)
-- **Node.js** (18+) — [nodejs.org](https://nodejs.org)
+- **Node.js** (22+) — [nodejs.org](https://nodejs.org)
 - An LLM API key (Anthropic, OpenRouter, or any OpenAI-compatible provider)
 
 ### Linux / macOS
@@ -359,10 +359,8 @@ cd baoclaw-core
 cargo build --release
 cd ..
 
-# 2. Install CLI dependencies
-cd ts-ipc
+# 2. Install Node.js dependencies (single npm workspace root)
 npm install
-cd ..
 
 # 3. Set your API key
 export ANTHROPIC_API_KEY=sk-ant-...
@@ -371,17 +369,16 @@ export ANTHROPIC_API_KEY=your-key
 export ANTHROPIC_BASE_URL=https://your-provider.com/v1
 
 # 4. Run
-npx --prefix ts-ipc tsx ts-ipc/cli.ts
+npx tsx ts-ipc/cli.ts
 ```
 
 Full reference: [docs/CONFIGURATION.md](docs/CONFIGURATION.md).
 
 ## Conventions
 
-- Use type hints everywhere
-- Tests go in tests/ directory
-- Use pytest for testing
-- Database migrations with alembic
+- Rust: `rustfmt` + `clippy -D warnings` gate every commit via lint-staged.
+- TypeScript: prettier + eslint; each workspace package typechecks with `tsc --noEmit`.
+- Tests live next to the code: `*.test.ts` (node:test via tsx) for TS, `cargo test` for Rust.
 
 Annotated tour: [docs/IMPORTANT_FILES.md](docs/IMPORTANT_FILES.md).
 

@@ -6,7 +6,7 @@ import * as fs from "fs";
 import * as path from "path";
 import * as os from "os";
 import * as readline from "readline";
-import { createLogger } from "../../ts-ipc/logger.js";
+import { createLogger } from "baoclaw-ipc/logger";
 
 const runtimeLogger = createLogger("whatsapp");
 const log = (level: "info" | "warn" | "error", args: unknown[]) =>

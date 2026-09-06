@@ -29,8 +29,8 @@ import {
   attachControlChannel,
   buildDaemonInitParams,
   type ControlChannel,
-} from "../../ts-ipc/index.js";
-import { securePrivateFile } from "../../ts-ipc/security.js";
+} from "baoclaw-ipc";
+import { securePrivateFile } from "baoclaw-ipc/security";
 import { isAllowedChat } from "./authorization.js";
 import { logger, setLogLevel, setLogFile } from "./log.js";
 import {

@@ -16,7 +16,7 @@ import {
   discoverLegacyDaemons,
   resolveFixedSocket,
   selectNewestDaemon,
-} from "../../ts-ipc/index.js";
+} from "baoclaw-ipc";
 
 function loadExpectedToken(): string {
   if (process.env.BAOCLAW_WEB_TOKEN) {
@@ -52,8 +52,8 @@ function isValidToken(
 // ═══════════════════════════════════════════════════════════════
 // Daemon discovery
 // ═══════════════════════════════════════════════════════════════
-// IpcClient, DaemonInfo, getSocketDir and resolveFixedSocket come from the
-// shared ts-ipc package (single source of truth for JSON-RPC/UDS).
+// IpcClient, DaemonInfo and resolveFixedSocket come from the shared
+// baoclaw-ipc package (single source of truth for JSON-RPC/UDS).
 
 /**
  * Discover running BaoClaw daemons: prefer the fixed socket (P3-1c) with its

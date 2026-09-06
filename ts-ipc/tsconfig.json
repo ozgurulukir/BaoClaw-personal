@@ -1,16 +1,8 @@
 {
+  "extends": "../tsconfig.base.json",
   "compilerOptions": {
-    "target": "ES2022",
-    "module": "ESNext",
-    "moduleResolution": "bundler",
-    "esModuleInterop": true,
-    "strict": true,
-    "outDir": "dist",
-    "rootDir": ".",
-    "declaration": true,
-    "skipLibCheck": true,
     "jsx": "react-jsx",
     "jsxImportSource": "react"
   },
-  "include": ["*.ts", "tui/**/*.tsx", "tui/**/*.ts"]
+  "include": ["*.ts", "tui/**/*.ts", "tui/**/*.tsx"]
 }

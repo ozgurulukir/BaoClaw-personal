@@ -14,9 +14,9 @@ import {
   selectNewestDaemon,
   type ControlChannel,
   type DaemonInfo,
-} from "../../ts-ipc/index.js";
-import { createLogger } from "../../ts-ipc/logger.js";
-import { securePrivateFile } from "../../ts-ipc/security.js";
+} from "baoclaw-ipc";
+import { createLogger } from "baoclaw-ipc/logger";
+import { securePrivateFile } from "baoclaw-ipc/security";
 import {
   Bot,
   InputFile,

@@ -1,24 +1,28 @@
 {
   "name": "baoclaw-web",
   "version": "2.1.0",
+  "private": true,
   "type": "module",
+  "main": "./src/server.ts",
+  "exports": {
+    ".": "./src/server.ts",
+    "./export": "./src/export.ts"
+  },
   "scripts": {
-    "start": "npx tsx src/server.ts",
-    "test": "npx tsx --test src/*.test.ts",
+    "start": "tsx src/server.ts",
+    "test": "tsx --test src/*.test.ts",
     "typecheck": "tsc --noEmit",
     "check:js": "node scripts/check-static-js.mjs",
-    "check": "npm run typecheck && npm run check:js",
-    "build": "tsc --noEmit"
+    "check": "npm run typecheck && npm run check:js"
   },
   "dependencies": {
+    "baoclaw-ipc": "*",
     "pdfkit": "^0.20.2",
     "ws": "^8.18.0"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
     "@types/pdfkit": "^0.17.6",
-    "@types/ws": "^8.5.0",
-    "tsx": "^4.19.0",
-    "typescript": "^5.6.0"
+    "@types/ws": "^8.5.0"
   }
 }

@@ -18,7 +18,6 @@ const AFFECTED_FILES = [
   "cli.ts",
   "index.ts",
   "rustCore.ts",
-  "useRustEngine.ts",
   "streamHandler.ts",
 ];
 
@@ -98,7 +97,6 @@ const ALL_SOURCE_FILES = [
   "rustCore.ts",
   "streamHandler.ts",
   "types.ts",
-  "useRustEngine.ts",
 ];
 
 /**
@@ -114,7 +112,6 @@ const KNOWN_BARE_SPECIFIERS: Record<string, string[]> = {
   "rustCore.ts": ["child_process"],
   "streamHandler.ts": [],
   "types.ts": [],
-  "useRustEngine.ts": ["react"],
 };
 
 /**

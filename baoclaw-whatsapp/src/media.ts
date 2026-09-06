@@ -6,12 +6,12 @@
  */
 import * as fs from "fs";
 import * as path from "path";
-import { createLogger } from "../../ts-ipc/logger.js";
+import { createLogger } from "baoclaw-ipc/logger";
 
 const logger = createLogger("whatsapp");
 import * as os from "os";
 import * as crypto from "crypto";
-import { IpcClient } from "../../ts-ipc/index.js";
+import { IpcClient } from "baoclaw-ipc";
 
 export interface MediaFile {
   path: string;

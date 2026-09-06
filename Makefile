@@ -9,8 +9,8 @@ help: ## Show this help
 install: ## Install all dependencies (Rust + Node.js)
 	@echo "==> Installing Rust dependencies..."
 	cd baoclaw-core && cargo fetch
-	@echo "==> Installing Node.js dependencies..."
-	cd ts-ipc && npm install
+	@echo "==> Installing Node.js workspace dependencies..."
+	npm install
 	@echo "==> Done. Run 'make run' to start."
 
 build: ## Build release binary
@@ -70,8 +70,8 @@ cli: ## Run CLI (one-shot command, requires daemon)
 
 clean: ## Clean build artifacts
 	cd baoclaw-core && cargo clean
-	cd ts-ipc && rm -rf node_modules
-	@echo "Cleaned."
+	rm -rf node_modules
+	@echo "Cleaned. Run 'make install' to restore."
 
 # ======== Team ========
 

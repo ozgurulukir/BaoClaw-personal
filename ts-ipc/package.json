@@ -1,32 +1,31 @@
 {
-  "name": "baoclaw-cli",
+  "name": "baoclaw-ipc",
   "version": "2.1.0",
+  "private": true,
   "type": "module",
-  "bin": {
-    "baoclaw-tui": "./tui/index.tsx"
+  "exports": {
+    ".": "./index.ts",
+    "./client": "./client.ts",
+    "./daemon": "./daemon.ts",
+    "./logger": "./logger.ts",
+    "./security": "./security.ts"
   },
   "scripts": {
-    "start": "npx tsx cli.ts",
+    "start": "tsx cli.ts",
     "typecheck": "tsc --noEmit",
-    "build": "esbuild cli.ts --bundle --platform=node --target=node18 --format=esm --outfile=dist/baoclaw.mjs --external:mammoth --external:pdf-parse",
-    "tui": "npx tsx tui/index.tsx",
+    "test": "tsx --test '*.test.ts'",
+    "build": "esbuild cli.ts --bundle --platform=node --target=node20 --format=esm --outfile=dist/baoclaw.mjs --external:mammoth --external:pdf-parse",
+    "tui": "tsx tui/index.tsx",
     "build:rust": "cd ../baoclaw-core && cargo build --release"
   },
   "dependencies": {
     "ink": "^5.0.1",
     "react": "^18.3.1",
     "mammoth": "^1.12.0",
-    "pdf-parse": "^2.4.5",
-    "tsx": "^4.19.0",
-    "chalk": "^5.3.0",
-    "cli-truncate": "^4.0.0",
-    "slice-ansi": "^7.1.0",
-    "string-width": "^7.2.0"
+    "pdf-parse": "^2.4.5"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
-    "@types/react": "^18.3.0",
-    "esbuild": "^0.25.0",
-    "typescript": "^5.6.0"
+    "@types/react": "^18.3.0"
   }
 }

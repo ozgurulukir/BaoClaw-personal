@@ -14,8 +14,8 @@
  */
 
 import { SenderTracker, type PermissionRequest } from "./senderTracker.js";
-import { IpcClient } from "../../ts-ipc/index.js";
-import { createLogger } from "../../ts-ipc/logger.js";
+import { IpcClient } from "baoclaw-ipc";
+import { createLogger } from "baoclaw-ipc/logger";
 
 const logger = createLogger("whatsapp");
 

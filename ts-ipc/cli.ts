@@ -3879,17 +3879,26 @@ async function main() {
           }
         }
 
-        // Find tsx binary from the telegram gateway's node_modules
-        const tsxBin = path.join(
+        // Find tsx binary: hoisted workspace root first, then the legacy
+        // per-package layout from pre-workspaces installs.
+        const tsxHoisted = path.join(
+          baoclawHome,
+          "node_modules",
+          ".bin",
+          "tsx",
+        );
+        const tsxLegacy = path.join(
           baoclawHome,
           "baoclaw-telegram",
           "node_modules",
           ".bin",
           "tsx",
         );
-        const tsxPath = fs.existsSync(tsxBin)
-          ? tsxBin
-          : path.join(path.dirname(process.execPath), "tsx");
+        const tsxPath = fs.existsSync(tsxHoisted)
+          ? tsxHoisted
+          : fs.existsSync(tsxLegacy)
+            ? tsxLegacy
+            : path.join(path.dirname(process.execPath), "tsx");
 
         // Spawn gateway as detached background process
         const logFd = fs.openSync(tgLogFile, "a");

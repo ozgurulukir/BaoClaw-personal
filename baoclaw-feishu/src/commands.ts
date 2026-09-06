@@ -3,7 +3,7 @@
  * Adapts WhatsApp's commands.ts — same registry, same handlers,
  * but uses chatId/sendReply instead of jid/sock.
  */
-import { IpcClient, type ControlChannel } from "../../ts-ipc/index.js";
+import { IpcClient, type ControlChannel } from "baoclaw-ipc";
 import { logger } from "./log.js";
 import * as fs from "fs";
 import * as os from "os";

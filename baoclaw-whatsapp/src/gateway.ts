@@ -31,13 +31,13 @@ import {
 } from "./formatter.js";
 import { MessageQueue } from "./messageQueue.js";
 import { createDaemonConnector, type DaemonInfo } from "./daemon.js";
-import { IpcClient } from "../../ts-ipc/client.js";
+import { IpcClient } from "baoclaw-ipc/client";
 import {
   attachControlChannel,
   buildDaemonInitParams,
   type ControlChannel,
-} from "../../ts-ipc/index.js";
-import { createLogger } from "../../ts-ipc/logger.js";
+} from "baoclaw-ipc";
+import { createLogger } from "baoclaw-ipc/logger";
 import { SessionManager } from "./session.js";
 // New modules
 import { SenderTracker } from "./senderTracker.js";

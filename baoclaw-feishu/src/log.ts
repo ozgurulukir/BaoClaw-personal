@@ -1,4 +1,4 @@
-export { createLogger, setLogLevel, setLogFile } from "../../ts-ipc/logger.js";
-import { createLogger } from "../../ts-ipc/logger.js";
+export { createLogger, setLogLevel, setLogFile } from "baoclaw-ipc/logger";
+import { createLogger } from "baoclaw-ipc/logger";
 
 export const logger = createLogger("feishu");

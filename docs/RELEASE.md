@@ -3,7 +3,9 @@
 ## Version Policy
 
 BaoClaw uses one monorepo version. The root `package.json` is the source of
-truth, and every inner package manifest and lockfile uses the same version.
+truth, and every workspace package manifest uses the same version. The root
+`package-lock.json` is the only Node lockfile (single npm workspace root);
+per-package lockfiles no longer exist.
 
 Use Semantic Versioning:
 
@@ -13,10 +15,10 @@ Use Semantic Versioning:
 
 ## Release Flow
 
-1. Update the version in the root and inner package manifests with `npm version
-X.Y.Z --no-git-tag-version`.
-2. Update the matching `CHANGELOG.md` section and verify all package versions
-   and lockfiles agree.
+1. Update the version in the root and all workspace manifests with `npm version
+X.Y.Z --no-git-tag-version --workspaces`.
+2. Update the matching `CHANGELOG.md` section and verify the root
+   `package-lock.json` agrees.
 3. Run `npm run verify-all` and the gateway test commands.
 4. Commit the version and changelog changes.
 5. Create an annotated tag: `git tag -a vX.Y.Z -m "BaoClaw vX.Y.Z"`.
@@ -48,7 +50,7 @@ To rehearse the flow, use a temporary branch and a patch version:
 ```bash
 git switch -c release-dry-run
 npm version 2.1.1 --no-git-tag-version
-git diff -- package.json */package.json */package-lock.json
+git diff -- package.json */package.json package-lock.json
 git switch -
 git branch -D release-dry-run
 ```

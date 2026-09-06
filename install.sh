@@ -32,51 +32,42 @@ cargo build --release --quiet
 cd "$SCRIPT_DIR"
 echo "✓ Rust core built"
 
-# 2. Build ts-ipc bundle
+# 2. Install workspace dependencies and build the CLI bundle.
+# The repo is a single npm workspace root: one lockfile, one hoisted
+# node_modules shared by all TS packages (ts-ipc + 4 gateways).
+if [ ! -d "$SCRIPT_DIR/node_modules" ] || [ "$FORCE_DEPS" -eq 1 ]; then
+  echo "📦 Installing workspace dependencies..."
+  (cd "$SCRIPT_DIR" && npm ci --prefer-offline --no-audit --no-fund --silent) \
+    || (cd "$SCRIPT_DIR" && npm install --prefer-offline --no-audit --no-fund --silent)
+fi
 if [ -d "$SCRIPT_DIR/ts-ipc" ]; then
-  if [ ! -d "$SCRIPT_DIR/ts-ipc/node_modules" ] || [ "$FORCE_DEPS" -eq 1 ]; then
-    echo "📦 Installing ts-ipc dependencies..."
-    cd "$SCRIPT_DIR/ts-ipc"
-    npm install --prefer-offline --no-audit --no-fund --silent
-    cd "$SCRIPT_DIR"
-  fi
   echo "⚡ Building fast CLI bundle (esbuild)..."
-  npm --prefix "$SCRIPT_DIR/ts-ipc" run build --silent
-  echo "✓ CLI bundle ready (dist/baoclaw.mjs)"
+  npm run build -w baoclaw-ipc --silent
+  echo "✓ CLI bundle ready (ts-ipc/dist/baoclaw.mjs)"
 fi
 
-# 3. Ensure TS gateway dependencies in source directories
-for dir in baoclaw-telegram baoclaw-web baoclaw-feishu baoclaw-whatsapp; do
-  if [ -d "$SCRIPT_DIR/$dir" ]; then
-    if [ ! -d "$SCRIPT_DIR/$dir/node_modules" ] || [ "$FORCE_DEPS" -eq 1 ]; then
-      echo "📦 Installing $dir dependencies..."
-      cd "$SCRIPT_DIR/$dir"
-      npm install --prefer-offline --no-audit --no-fund --silent
-      cd "$SCRIPT_DIR"
-    fi
-    echo "✓ $dir ready"
-  fi
-done
-
-# 4. Create install dirs
+# 3. Create install dirs
 mkdir -p "$INSTALL_DIR/bin" "$BIN_DIR"
 
-# 5. Copy Rust binary (unlink first to avoid ETXTBUSY if daemon is running)
+# 4. Copy Rust binary (unlink first to avoid ETXTBUSY if daemon is running)
 rm -f "$INSTALL_DIR/bin/baoclaw-core"
 cp "$SCRIPT_DIR/baoclaw-core/target/release/baoclaw-core" "$INSTALL_DIR/bin/baoclaw-core"
 chmod +x "$INSTALL_DIR/bin/baoclaw-core"
 echo "✓ Rust binary → $INSTALL_DIR/bin/"
 
-# 6. Copy each gateway source
+# 5. Copy each gateway source
 copy_gateway() {
   local name="$1"
   local src="$SCRIPT_DIR/$name"
   local dst="$INSTALL_DIR/$name"
   [ ! -d "$src" ] && return 0
-  mkdir -p "$dst/src" "$dst/public" "$dst/tui" 2>/dev/null
-  # Root level TS files (cli.ts, client.ts, colors.ts, images.ts, etc.)
+  mkdir -p "$dst/src"
+  # Root level TS files (cli.ts, client.ts, colors.ts, images.ts, etc.) —
+  # tests stay in the repo.
   for f in "$src"/*.ts "$src"/*.tsx; do
-    [ -f "$f" ] && cp "$f" "$dst/"
+    [ -f "$f" ] || continue
+    case "$f" in *.test.ts) continue ;; esac
+    cp "$f" "$dst/"
   done
   # TS/TSX sources in src/
   for f in "$src"/src/*.ts "$src"/src/*.tsx; do
@@ -93,25 +84,29 @@ copy_gateway() {
     done
   fi
   # public static assets (web)
-  [ -d "$src/public" ] && cp -r "$src/public/." "$dst/public/" 2>/dev/null
+  if [ -d "$src/public" ]; then
+    mkdir -p "$dst/public" && cp -r "$src/public/." "$dst/public/"
+  fi
   # Gateway-specific install hooks and patch-package patches
-  [ -d "$src/scripts" ] && cp -r "$src/scripts/." "$dst/scripts/" 2>/dev/null
-  [ -d "$src/patches" ] && cp -r "$src/patches/." "$dst/patches/" 2>/dev/null
+  if [ -d "$src/scripts" ]; then
+    mkdir -p "$dst/scripts" && cp -r "$src/scripts/." "$dst/scripts/"
+  fi
+  if [ -d "$src/patches" ]; then
+    mkdir -p "$dst/patches" && cp -r "$src/patches/." "$dst/patches/"
+  fi
   # dist bundle directory
-  [ -d "$src/dist" ] && mkdir -p "$dst/dist" && cp -r "$src/dist/." "$dst/dist/" 2>/dev/null
+  if [ -d "$src/dist" ]; then
+    mkdir -p "$dst/dist" && cp -r "$src/dist/." "$dst/dist/"
+  fi
   # package metadata
   cp "$src/package.json" "$dst/" 2>/dev/null
-  cp "$src/package-lock.json" "$dst/" 2>/dev/null
   cp "$src/tsconfig.json" "$dst/" 2>/dev/null
 
-  # Only install dependencies in destination if node_modules missing or forced
-  if [ ! -d "$dst/node_modules" ] || [ "$FORCE_DEPS" -eq 1 ]; then
-    if [ -d "$src/node_modules" ]; then
-      cp -r "$src/node_modules" "$dst/" 2>/dev/null || (cd "$dst" && npm install --prefer-offline --no-audit --no-fund --silent)
-    else
-      cd "$dst" && npm install --prefer-offline --no-audit --no-fund --silent
-    fi
-  fi
+  # Dependencies are NOT installed per package: the destination is a mini
+  # workspace root and shares one hoisted node_modules (installed below).
+  # Remove stale per-package node_modules from pre-workspaces installs so
+  # old copies can never shadow the hoisted tree.
+  rm -rf "$dst/node_modules"
 
   echo "✓ $name → $dst"
 }
@@ -121,6 +116,35 @@ copy_gateway baoclaw-web
 copy_gateway baoclaw-feishu
 copy_gateway baoclaw-whatsapp
 
+# 6. Turn the destination into a mini workspace root and install its
+# dependencies. cp -RP preserves the relative workspace symlinks inside
+# node_modules (node_modules/baoclaw-ipc -> ../ts-ipc), which resolve
+# correctly against the copied sibling package dirs.
+# Refresh destination deps when missing, forced, or when the lockfile moved
+# (compared BEFORE the new lockfile is copied over it).
+DEST_DEPS_STALE=0
+if [ ! -d "$INSTALL_DIR/node_modules" ]; then
+  DEST_DEPS_STALE=1
+elif ! cmp -s "$SCRIPT_DIR/package-lock.json" "$INSTALL_DIR/package-lock.json"; then
+  DEST_DEPS_STALE=1
+fi
+[ "$FORCE_DEPS" -eq 1 ] && DEST_DEPS_STALE=1
+cp "$SCRIPT_DIR/package.json" "$INSTALL_DIR/package.json"
+cp "$SCRIPT_DIR/package-lock.json" "$INSTALL_DIR/package-lock.json"
+[ -f "$SCRIPT_DIR/tsconfig.base.json" ] && cp "$SCRIPT_DIR/tsconfig.base.json" "$INSTALL_DIR/tsconfig.base.json"
+if [ "$DEST_DEPS_STALE" -eq 1 ]; then
+  echo "📦 Installing destination workspace dependencies..."
+  rm -rf "$INSTALL_DIR/node_modules"
+  cp -RP "$SCRIPT_DIR/node_modules" "$INSTALL_DIR/node_modules" 2>/dev/null \
+    || (cd "$INSTALL_DIR" && npm ci --include=dev --prefer-offline --no-audit --no-fund --silent)
+fi
+# Lifecycle scripts did not run during the copy — probe the destination's
+# native AES and apply the Baileys/libsignal patches there if needed.
+if [ -d "$INSTALL_DIR/baoclaw-whatsapp" ]; then
+  (cd "$INSTALL_DIR" && node baoclaw-whatsapp/scripts/apply-crypto-patch.cjs) \
+    || echo "⚠️  crypto patch probe failed in $INSTALL_DIR — WhatsApp gateway may hit broken AES"
+fi
+
 # 7. Launcher functions
 make_launcher() {
   local name="$1" target_subpath="$2" help="$3"
@@ -129,7 +153,9 @@ make_launcher() {
 # BaoClaw $name — $help
 BAOCLAW_HOME="\${BAOCLAW_HOME:-\$HOME/.baoclaw}"
 export BAOCLAW_CORE_BIN="\$BAOCLAW_HOME/bin/baoclaw-core"
-exec npx --prefix "\$BAOCLAW_HOME/$(dirname "$target_subpath")" tsx "\$BAOCLAW_HOME/$target_subpath" "\$@"
+# Exec the hoisted tsx bin directly: deterministic, no npx resolution or
+# registry fallback.
+exec "\$BAOCLAW_HOME/node_modules/.bin/tsx" "\$BAOCLAW_HOME/$target_subpath" "\$@"
 EOF
   chmod +x "$BIN_DIR/$name"
   echo "✓ $name → $BIN_DIR/$name"
@@ -144,7 +170,7 @@ export BAOCLAW_CORE_BIN="$BAOCLAW_HOME/bin/baoclaw-core"
 if [ -f "$BAOCLAW_HOME/ts-ipc/dist/baoclaw.mjs" ]; then
   exec node "$BAOCLAW_HOME/ts-ipc/dist/baoclaw.mjs" "$@"
 else
-  exec npx --prefix "$BAOCLAW_HOME/ts-ipc" tsx "$BAOCLAW_HOME/ts-ipc/cli.ts" "$@"
+  exec "$BAOCLAW_HOME/node_modules/.bin/tsx" "$BAOCLAW_HOME/ts-ipc/cli.ts" "$@"
 fi
 LAUNCHER
 chmod +x "$BIN_DIR/baoclaw"
