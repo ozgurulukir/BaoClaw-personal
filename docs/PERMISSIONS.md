@@ -236,10 +236,12 @@ pub enum PermissionDecision {
 
 ### 超时机制
 
-`ToolExecutor` 在 `execute_tool_with_permission` 中使用 **5 分钟超时**：
+`ToolExecutor` 在 `execute_tool_with_permission` 中等待用户决定，超时后自动拒绝。
+超时时长来自配置 `permissions.ask_timeout_secs`（默认 **300 秒**，允许 5–3600 秒），
+executor 每次 prompt 都会从共享的 PermissionManager 实时读取，因此修改立即生效：
 
 ```rust
-let decision = match tokio::time::timeout(Duration::from_secs(300), rx).await {
+let decision = match tokio::time::timeout(ask_timeout, rx).await {
     Ok(Ok(decision)) => decision,
     Ok(Err(_)) => PermissionDecision::Deny,  // channel 关闭 → 拒绝
     Err(_) => PermissionDecision::Deny,      // 超时 → 自动拒绝
@@ -280,7 +282,7 @@ let decision = match tokio::time::timeout(Duration::from_secs(300), rx).await {
 │  Step 3 (Ask 分支):                                  │
 │  a. 发送 EngineEvent::PermissionRequest              │
 │  b. PermissionGate.request(tool_use_id)              │
-│  c. 等待 5 分钟超时                                   │
+│  c. 等待 ask_timeout_secs 超时                       │
 │                                                      │
 │  → Allow          → 执行                            │
 │  → AllowAlways    → 添加规则 + 执行                  │
@@ -296,7 +298,7 @@ let decision = match tokio::time::timeout(Duration::from_secs(300), rx).await {
 | 函数                             | 用途                                    | 权限检查方式                                                                                           |
 | -------------------------------- | --------------------------------------- | ------------------------------------------------------------------------------------------------------ |
 | `execute_tool()`                 | 简单路径（直接/批量执行）               | 检查 Tool trait 的 `check_permissions`；非只读工具遇 `Ask` 默认 Fail-Closed 阻断（只读工具警告后允许） |
-| `execute_tool_with_permission()` | 完整路径（带 PermissionManager + Gate） | PermissionManager → Gate 交互式确认（超时 5 分钟自动 Fail-Closed 拒绝）                                |
+| `execute_tool_with_permission()` | 完整路径（带 PermissionManager + Gate） | PermissionManager → Gate 交互式确认（ask_timeout_secs 超时后自动 Fail-Closed 拒绝，默认 300 秒）       |
 
 ---
 
@@ -412,7 +414,7 @@ Security 模块提供了三层额外的安全防护（独立于 PermissionManage
            │  │ Request → CLI             │
            │  ├──────────────────────────┤
            │  │ PermissionGate.request()  │
-           │  │ 等待 5 分钟               │
+           │  │ 等待 ask_timeout_secs    │
            │  └───┬──────────┬──────┬─────┘
            │      │          │      │
            │   Allow    AllowAlways Deny
@@ -454,7 +456,10 @@ Security 模块提供了三层额外的安全防护（独立于 PermissionManage
     },
     "always_ask_rules": {
       "builtin": [{ "tool_name": "Bash", "rule_content": "*" }]
-    }
+    },
+    "auto_allow_channels": { "tui": true },
+    "ask_timeout_secs": 300,
+    "persist_grants": true
   }
 }
 ```
@@ -471,6 +476,9 @@ Security 模块提供了三层额外的安全防护（独立于 PermissionManage
 - `/permissions allow <tool> [glob]` — 添加 allow 规则
 - `/permissions deny <tool> [glob]` — 添加 deny 规则
 - `/permissions ask <tool> [glob]` — 添加 ask 规则
+- `/permissions timeout <5-3600>` — 设置 prompt 超时（秒，实时生效）
+- `/permissions persist <on|off>` — 切换 allow-always 规则是否写入配置
+- TUI：`p` / `Ctrl+P` — 切换 TUI 频道的自动允许（`permissions.setAutoAllow`）
 
 ### 向后兼容
 
