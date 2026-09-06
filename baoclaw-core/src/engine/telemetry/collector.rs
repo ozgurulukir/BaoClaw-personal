@@ -21,9 +21,16 @@ fn default_db_path() -> PathBuf {
 /// Collects and queries telemetry data from a local SQLite database.
 pub struct TelemetryCollector {
     conn: Mutex<Connection>,
+    stored_path: PathBuf,
 }
 
 impl TelemetryCollector {
+    /// Path of the underlying telemetry database.
+    pub fn db_path(&self) -> &std::path::Path {
+        // Reconstructed from the connection is impossible; stored at open.
+        self.stored_path.as_path()
+    }
+
     /// Create a new collector using the default database path.
     /// Initializes the schema if needed.
     pub fn new() -> Result<Self, String> {
@@ -44,6 +51,7 @@ impl TelemetryCollector {
 
         let collector = Self {
             conn: Mutex::new(conn),
+            stored_path: path.clone(),
         };
         collector.init_schema()?;
         Ok(collector)

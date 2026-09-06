@@ -949,6 +949,7 @@ const COMMANDS = [
   "/permissions",
   "/tokens",
   "/cost",
+  "/rate",
   "/session",
   "/config",
 ];
@@ -5327,6 +5328,29 @@ async function main() {
       return;
     };
 
+    const cmd_rate = async (args: string): Promise<void> => {
+      const rating = args.trim().toLowerCase();
+      if (!["good", "bad", "neutral"].includes(rating)) {
+        console.log(
+          `\n${FG_YELLOW}Usage: /rate <good|bad|neutral> — rate the last interaction for preference data${RESET}\n`,
+        );
+        rl.prompt();
+        return;
+      }
+      try {
+        await client.request("evolution.rateTrajectory", { rating });
+        console.log(
+          `\n${FG_GREEN}✓ Rated last interaction: ${rating}${RESET}\n`,
+        );
+      } catch (err: any) {
+        console.error(
+          `${FG_RED}Failed to record rating: ${err?.message || err}${RESET}\n`,
+        );
+      }
+      rl.prompt();
+      return;
+    };
+
     const cmd_cost = async (): Promise<void> => {
       try {
         const result = await client.request<any>("session.cost", {});
@@ -5549,6 +5573,7 @@ async function main() {
       console.log(`  ${FG_GRAY}── Session & Info ──${RESET}`);
       console.log(
         `  ${FG_WHITE}/tokens${RESET}    ${DIM}显示 token 用量统计${RESET}`,
+        `  ${FG_WHITE}/rate${RESET}     ${DIM}评价上次交互 (good|bad|neutral)${RESET}`,
       );
       console.log(`  ${FG_WHITE}/cost${RESET}      ${DIM}显示花费估算${RESET}`);
       console.log(
@@ -5628,6 +5653,7 @@ async function main() {
       { names: ["/cost"], handler: cmd_cost },
       { names: ["/session"], handler: cmd_session },
       { names: ["/config"], handler: cmd_config },
+      { names: ["/rate"], handler: cmd_rate },
       { names: ["/help"], handler: cmd_help },
     ];
 

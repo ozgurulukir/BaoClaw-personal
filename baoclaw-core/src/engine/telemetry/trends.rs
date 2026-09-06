@@ -59,9 +59,13 @@ impl TrendAnalyzer {
         }
     }
 
-    /// Create a trend analyzer bound to a specific collector.
-    pub fn from_collector(_collector: &TelemetryCollector) -> Self {
-        Self::new()
+    /// Create a trend analyzer bound to a specific collector's database.
+    pub fn from_collector(collector: &TelemetryCollector) -> Self {
+        Self {
+            db: DbHelper {
+                path: collector.db_path().to_path_buf(),
+            },
+        }
     }
 
     /// Analyze a specific metric over the last N days compared to the previous N days.
@@ -350,8 +354,8 @@ mod tests {
 
     #[test]
     fn test_analyze_returns_flat_when_no_data() {
-        let (_collector, _dir) = setup_test_db();
-        let analyzer = TrendAnalyzer::new();
+        let (collector, _dir) = setup_test_db();
+        let analyzer = TrendAnalyzer::from_collector(&collector);
         // When no data, both periods return 0, so trend is flat.
         let trend = analyzer
             .analyze("turns", 7)
@@ -361,8 +365,8 @@ mod tests {
 
     #[test]
     fn test_analyze_with_known_metric() {
-        let (_collector, _dir) = setup_test_db();
-        let analyzer = TrendAnalyzer::new();
+        let (collector, _dir) = setup_test_db();
+        let analyzer = TrendAnalyzer::from_collector(&collector);
         let result = analyzer.analyze("cost", 7);
         // May succeed or fail depending on DB availability,
         // but shouldn't panic.
@@ -371,8 +375,8 @@ mod tests {
 
     #[test]
     fn test_compare_weeks_returns_trends() {
-        let (_collector, _dir) = setup_test_db();
-        let analyzer = TrendAnalyzer::new();
+        let (collector, _dir) = setup_test_db();
+        let analyzer = TrendAnalyzer::from_collector(&collector);
         let trends = analyzer.compare_weeks();
         // TrendAnalyzer uses default_db_path, not test DB — may fail in test env
         if let Ok(trends) = trends {
@@ -385,8 +389,8 @@ mod tests {
 
     #[test]
     fn test_compare_months_returns_trends() {
-        let (_collector, _dir) = setup_test_db();
-        let analyzer = TrendAnalyzer::new();
+        let (collector, _dir) = setup_test_db();
+        let analyzer = TrendAnalyzer::from_collector(&collector);
         let trends = analyzer.compare_months();
         if let Ok(trends) = trends {
             assert_eq!(trends.len(), 4);
@@ -395,8 +399,8 @@ mod tests {
 
     #[test]
     fn test_forecast_with_insufficient_data() {
-        let (_collector, _dir) = setup_test_db();
-        let analyzer = TrendAnalyzer::new();
+        let (collector, _dir) = setup_test_db();
+        let analyzer = TrendAnalyzer::from_collector(&collector);
         if let Ok(result) = analyzer.forecast("turns") {
             assert!(result.contains("Not enough data") || result.contains("no data"));
         } // Err(_) expected: no default DB in test env
@@ -404,16 +408,16 @@ mod tests {
 
     #[test]
     fn test_unknown_metric_returns_error() {
-        let (_collector, _dir) = setup_test_db();
-        let analyzer = TrendAnalyzer::new();
+        let (collector, _dir) = setup_test_db();
+        let analyzer = TrendAnalyzer::from_collector(&collector);
         let result = analyzer.analyze("nonexistent", 7);
         assert!(result.is_err());
     }
 
     #[test]
     fn test_forecast_unknown_metric() {
-        let (_collector, _dir) = setup_test_db();
-        let analyzer = TrendAnalyzer::new();
+        let (collector, _dir) = setup_test_db();
+        let analyzer = TrendAnalyzer::from_collector(&collector);
         if let Ok(msg) = analyzer.forecast("nonexistent") {
             assert!(msg.contains("Not enough data") || msg.contains("no data"));
         }

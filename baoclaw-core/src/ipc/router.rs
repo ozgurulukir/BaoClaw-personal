@@ -309,6 +309,8 @@ pub enum ClientMethod {
     PermissionsSetAskTimeout { seconds: u64 },
     #[serde(rename = "permissions.setPersistGrants")]
     PermissionsSetPersistGrants { enabled: bool },
+    #[serde(rename = "evolution.rateTrajectory")]
+    EvolutionRateTrajectory { rating: String },
 
     // ── Session Info / Token / Cost RPC (P2-2) ──
     #[serde(rename = "session.tokens")]
@@ -536,6 +538,18 @@ mod tests {
                 assert_eq!(seconds, 120);
             }
             _ => panic!("Expected PermissionsSetAskTimeout"),
+        }
+    }
+
+    #[test]
+    fn test_parse_evolution_rate_trajectory() {
+        let req = make_request("evolution.rateTrajectory", json!({"rating": "good"}));
+        let method = parse_client_method(&req).unwrap();
+        match method {
+            ClientMethod::EvolutionRateTrajectory { rating } => {
+                assert_eq!(rating, "good");
+            }
+            _ => panic!("Expected EvolutionRateTrajectory"),
         }
     }
 

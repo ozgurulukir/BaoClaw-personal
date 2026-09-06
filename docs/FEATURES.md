@@ -28,7 +28,7 @@ Inspired by [Hermes Agent](https://github.com/NousResearch/hermes-agent)'s learn
 - **Trajectory recording** — every interaction is logged with tools used, outcomes, and timing
 - **Skill auto-generation** — complex successful tasks are extracted as reusable skill candidates
 - **Self-evaluation nudge** — every 15 tasks, the agent reflects on patterns and creates/improves skills
-- **User ratings** — rate interactions as good/bad to build preference data _(no user-facing surface yet — see #42)_
+- **User ratings** — `/rate good|bad|neutral` in the CLI records a rating on the last trajectory for preference data
 - **Training-data export** — export trajectories as JSONL in a format that can be adapted for DPO/RLHF fine-tuning
 - **Personal evolution** — skills and trajectories are cross-project (`~/.baoclaw/evolution/`)
 - **Evolve tool** — agent can propose, improve, and promote skills; review generated skills before relying on them

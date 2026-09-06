@@ -595,6 +595,10 @@ pub(super) async fn handle_shared_client(
                             scm_permissions_set_persist_grants(&shared, &writer, id, enabled).await;
                         }
 
+                        ClientMethod::EvolutionRateTrajectory { rating } => {
+                            scm_evolution_rate_trajectory(&shared, &writer, id, rating).await;
+                        }
+
                         // ── Session Info / Token / Cost handlers (P2-2) ──
                         ClientMethod::SessionTokens => {
                             scm_session_tokens(&session, &shared, &session_id, &writer, id).await;
@@ -3469,5 +3473,41 @@ async fn scm_config_show(shared: &SharedState, writer: WriterRef<'_>, id: Reques
     let mut conn_guard = writer.lock().await;
     let _ = conn_guard
         .send_response(id, serde_json::json!({"config": config_json}))
+        .await;
+}
+
+async fn scm_evolution_rate_trajectory(
+    shared: &SharedState,
+    writer: WriterRef<'_>,
+    id: RequestId,
+    rating: String,
+) {
+    use crate::engine::evolution::TrajectoryRating;
+    let parsed = match rating.to_ascii_lowercase().as_str() {
+        "good" => TrajectoryRating::Good,
+        "bad" => TrajectoryRating::Bad,
+        "neutral" => TrajectoryRating::Neutral,
+        other => {
+            let mut conn_guard = writer.lock().await;
+            let _ = conn_guard
+                .send_error(
+                    Some(id),
+                    -32000,
+                    format!("invalid rating '{}': expected good, bad, or neutral", other),
+                )
+                .await;
+            return;
+        }
+    };
+    shared.evolution_engine.rate_last_trajectory(parsed).await;
+    let mut conn_guard = writer.lock().await;
+    let _ = conn_guard
+        .send_response(
+            id,
+            serde_json::json!({
+                "success": true,
+                "message": "rating recorded for the last trajectory",
+            }),
+        )
         .await;
 }
