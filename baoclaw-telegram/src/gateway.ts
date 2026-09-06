@@ -163,6 +163,15 @@ async function main() {
     } catch (err: any) {
       logger.warn(`Failed to update command menu: ${err.message}`);
     }
+    // Same persistence applies to the bot description — keep it clean too.
+    try {
+      await bot.api.setMyDescription({
+        description:
+          "BaoClaw — AI coding assistant with persistent memory. Talk to your project from anywhere.",
+      });
+    } catch (err: any) {
+      logger.warn(`Failed to update bot description: ${err.message}`);
+    }
   } catch (err: any) {
     logger.error(`Failed to connect to Telegram API: ${err.message}`);
     process.exit(1);
