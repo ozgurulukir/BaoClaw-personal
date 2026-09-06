@@ -372,19 +372,8 @@ pub fn build_api_request(messages: &[Message], config: &QueryLoopConfig) -> Crea
         }
     }
 
-    // Use frozen system prompt if available (maximizes cache hit rate)
-    let system = if let Some(ref frozen) = config.frozen_system_prompt {
-        Some(frozen.clone())
-    } else {
-        build_system_prompt(config)
-    };
-
-    // Use frozen tools list if available (same caching benefit)
-    let tools = if let Some(ref frozen) = config.frozen_tools {
-        Some(frozen.clone())
-    } else {
-        build_tools_list(config)
-    };
+    let system = build_system_prompt(config);
+    let tools = build_tools_list(config);
 
     CreateMessageRequest {
         model: config.model.clone(),

@@ -107,14 +107,6 @@ loop — each carries an inline status note and a tracking issue.
 - Search by keyword, get ranked results with context snippets
 - Find that solution you saw 3 weeks ago in seconds
 
-#### ❄️ Frozen Snapshot Caching (#6)
-
-> **Status: implemented but never activates.** See #35.
-
-- System prompt and tools list are built **once** and frozen for the entire session
-- Maximizes Anthropic prompt cache hit rate — only the dynamic reminder changes per turn
-- Reduces cost and latency on every API call
-
 #### 👤 User Profile (#7)
 
 > **Status: wired (see #31, closed).** `~/.baoclaw/USER.md` is loaded
@@ -167,15 +159,6 @@ loop — each carries an inline status note and a tracking issue.
 - Heuristic transition matrix records what intent typically follows what (e.g., CodeWriting → Testing)
 - High-confidence predictions trigger tool preloading hints in the system prompt
 
-#### 🧮 Context Window Allocator (#12)
-
-> **Status: dead code — not wired.** See #32.
-
-- Attention score = 0.5×relevance + 0.3×recency + 0.2×frequency
-- Mandatory blocks (system prompt, tools) always included
-- Optional blocks (memory, skills, search results) greedy-fill by score
-- Budget exceeded → lowest-scoring blocks trimmed first
-
 #### 🏖️ Sandbox Execution (#13)
 
 - Three backends: **Bubblewrap** (Linux namespaces) → **Docker** (containers) → None (direct)
@@ -191,24 +174,6 @@ loop — each carries an inline status note and a tracking issue.
 - Heuristic scoring with diminishing returns + multi-category boost
 - Four severity levels: Clean → Suspicious → Dangerous → Critical
 - `sanitize()` method redacts detected patterns with `[REDACTED]` placeholders
-
-#### 🔐 Subagent Depth Policy (#15)
-
-> **Status: dead code — not wired.** See #39.
-
-- Maximum nesting depth: 3 levels
-- **Progressive tool restriction**: Depth 0 = all tools, Depth 1 = safe tools, Depth 2 = read-only, Depth 3 = minimal (FileRead + Bash only)
-- Per-depth budgets: turns cap (100→30→15→5), cost cap ($10→$2→$0.50→$0.10)
-- Exceeded budget → auto-terminate sub-agent
-
-#### 📡 Streaming Tool Executor (#16)
-
-> **Status: dead code — not wired.** See #34.
-
-- Real-time chunked output: Started → Progress → Stdout → Stderr → Completed → Error → Heartbeat
-- `StreamWriter` / `StreamReader` pair via `tokio::sync::mpsc`
-- Configurable timeout (5 min default), buffer size, max output (1MB default)
-- Concurrent stdout/stderr reading with `tokio::select!`
 
 ### 🚀 v2.1 — Evolution Engine (NEW)
 
