@@ -111,6 +111,9 @@ pub struct ToolPermissionContext {
     pub always_deny_rules: ToolPermissionRulesBySource,
     pub always_ask_rules: ToolPermissionRulesBySource,
     pub is_bypass_permissions_mode_available: bool,
+    pub auto_allow_channels: HashMap<String, bool>,  // missing key = ON
+    pub ask_timeout_secs: u64,                       // default 300
+    pub persist_grants: bool,                        // default true
 }
 ```
 
@@ -184,6 +187,14 @@ fn matches_rule(rule: &PermissionRule, tool_name: &str, input_description: Optio
     }
 }
 ```
+
+Two details the snippet simplifies:
+
+- If `rule_content` equals the tool name (case-insensitive), the rule matches
+  **every invocation of that tool** — this is how interactive "Always allow"
+  grants are stored (`rule_content` = tool name, no glob).
+- The glob is matched against the tool's full serialized input JSON
+  (`serde_json::to_string(&request.input)`), not a human-readable description.
 
 ### API methods
 
@@ -439,7 +450,7 @@ User sends message → LLM returns tool_use
 ```json
 {
   "permissions": {
-    "mode": "default",
+    "mode": "Default",
     "additional_working_directories": {},
     "always_allow_rules": {
       "builtin": [
@@ -464,6 +475,10 @@ User sends message → LLM returns tool_use
 }
 ```
 
+`mode` is case-sensitive and must be exactly one of `Default`, `Plan`,
+`BypassPermissions`, `Auto`. Any other value causes the whole `permissions`
+block to be silently ignored at daemon startup.
+
 ### Runtime modification
 
 Via IPC methods or slash commands:
@@ -478,12 +493,28 @@ Via IPC methods or slash commands:
 - `/permissions ask <tool> [glob]` — add an ask rule
 - `/permissions timeout <5-3600>` — set the prompt timeout (seconds, takes effect immediately)
 - `/permissions persist <on|off>` — toggle whether allow-always rules are written to config
+- `/permissions remove <allow|deny|ask> <tool> [glob]` — remove a rule (`*` wildcards allowed)
 - TUI: `p` / `Ctrl+P` — toggle auto-allow for the TUI channel (`permissions.setAutoAllow`)
 
 ### Backward compatibility
 
 - When the `permissions` field is absent from `config.json`, defaults are used (mode=Default, empty rules)
 - `BaoclawConfig` preserves unknown fields via `#[serde(flatten)] extra`, ensuring forward compatibility
+
+## Gateway prompt behavior
+
+Non-CLI channels answer Ask prompts in-channel, all via the
+`permissionResponse` RPC over a control connection:
+
+- **Telegram** — HTML prompt with inline buttons (Allow / Always / Deny);
+  text replies `y|yes|allow`, `a|always`, `n|no|deny` also accepted.
+- **Feishu** — interactive card sent via `lark-cli` (button clicks arrive as
+  `card.action.trigger` events); falls back to plain-text keyword replies when
+  the installed lark-cli cannot send cards.
+- **WhatsApp** — `yes`/`no` text replies; the pending request auto-expires and
+  denies after 60 seconds.
+- **Web** — in-browser dialog.
+- **CLI** — inline `y/a/n` prompt on the main readline interface.
 
 ## See also
 

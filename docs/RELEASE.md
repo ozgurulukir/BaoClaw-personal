@@ -16,7 +16,7 @@ Use Semantic Versioning:
 ## Release Flow
 
 1. Update the version in the root and all workspace manifests with `npm version
-X.Y.Z --no-git-tag-version --workspaces`.
+X.Y.Z --no-git-tag-version --workspaces --include-workspace-root`.
 2. Update the matching `CHANGELOG.md` section and verify the root
    `package-lock.json` agrees.
 3. Run `npm run verify-all` and the gateway test commands.
@@ -49,7 +49,7 @@ To rehearse the flow, use a temporary branch and a patch version:
 
 ```bash
 git switch -c release-dry-run
-npm version 2.1.1 --no-git-tag-version
+npm version 2.1.1 --no-git-tag-version --workspaces --include-workspace-root
 git diff -- package.json */package.json package-lock.json
 git switch -
 git branch -D release-dry-run

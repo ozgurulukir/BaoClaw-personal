@@ -30,7 +30,9 @@
 
 - [Audits & design plans](docs/history/) — past code audits, specs, and plan documents
 
-**中文文档** — [docs/README.zh-CN.md](docs/README.zh-CN.md) (may lag behind the English docs)
+**中文（Chinese）** — [docs/README.zh-CN.md](docs/README.zh-CN.md)
+The English documentation above is authoritative and kept current; the
+Chinese translation may lag behind it.
 
 ---
 
@@ -120,7 +122,7 @@ cd BaoClaw
 ./install.sh
 ```
 
-The installer builds the Rust core, installs Node.js dependencies, and creates the `baoclaw` launcher in `~/.local/bin/`.
+The installer builds the Rust core, installs Node.js dependencies at the npm workspace root, and creates the `baoclaw`, `baoclaw-tui`, `baoclaw-web`, `baoclaw-telegram`, `baoclaw-feishu`, and `baoclaw-whatsapp` launchers in `~/.local/bin/`.
 
 ### Windows (WSL2)
 

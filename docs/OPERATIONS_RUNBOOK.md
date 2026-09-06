@@ -6,7 +6,7 @@ on Windows.
 
 ## Installation Verification
 
-Install the prerequisites: Git, Rust 1.96 or newer, Node.js 24, npm, and
+Install the prerequisites: Git, Rust 1.96 or newer, Node.js 22 or newer, npm, and
 `jq` for state inspection.
 
 ```bash
@@ -45,7 +45,7 @@ if [ "$(uname -s)" = "Darwin" ]; then
   ls -la /tmp/baoclaw-sockets/baoclaw.sock
 else
   systemctl --user status baoclaw
-  ls -la "${XDG_RUNTIME_DIR:-/tmp}/baoclaw.sock"
+  ls -la "${XDG_RUNTIME_DIR:-/tmp}/baoclaw-sockets/baoclaw.sock"
 fi
 ```
 
@@ -58,8 +58,7 @@ if [ "$(uname -s)" = "Darwin" ]; then
   rm -f /tmp/baoclaw-sockets/baoclaw.sock
 else
   systemctl --user stop baoclaw
-  rm -f "${XDG_RUNTIME_DIR:-/tmp}/baoclaw.sock"
-  rm -f /tmp/baoclaw-sockets/baoclaw.sock
+  rm -f "${XDG_RUNTIME_DIR:-/tmp}/baoclaw-sockets/baoclaw.sock"
 fi
 if [ "$(uname -s)" = "Darwin" ]; then
   launchctl start com.baoclaw.daemon

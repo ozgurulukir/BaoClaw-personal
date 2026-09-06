@@ -51,7 +51,7 @@ Inspired by [Hermes Agent](https://github.com/NousResearch/hermes-agent)'s learn
 
 ### 🗂️ Project-Scoped Everything
 
-- **`/cd` command** — switch working directory at runtime, like changing projects
+- **`/projects` command** — switch working directory at runtime (`list`, select, `new`), like changing projects
 - **Auto-scaffold** — `.baoclaw/` directory with config files created automatically
 - **Session per project** — each directory maps to its own persistent session file
 - **Auto-resume** — reconnecting to a project automatically restores conversation history
@@ -263,23 +263,23 @@ Phase 2–4 additions that make BaoClaw smarter, safer, and faster:
 
 ### Telegram Commands
 
-All CLI commands are also available in Telegram:
+The following CLI commands are also available in Telegram:
 
-| Command                              | Description                       |
-| ------------------------------------ | --------------------------------- |
-| `/tools` `/skills` `/mcp` `/plugins` | List resources                    |
-| `/model [name]`                      | Show or switch model              |
-| `/think`                             | Toggle extended thinking          |
-| `/compact`                           | Compress context                  |
-| `/memory`                            | Manage memories                   |
-| `/cron`                              | Manage scheduled tasks            |
-| `/projects`                          | 项目管理: list, switch, new, desc |
-| `/task`                              | Manage background tasks           |
-| `/diff` `/commit` `/git`             | Git operations                    |
-| `/abort`                             | Cancel current task               |
-| `/status`                            | Gateway status                    |
-| `/help`                              | Show all commands                 |
-| 📎 Upload file                       | Send PDF/DOCX/image for Q&A       |
+| Command                              | Description                                 |
+| ------------------------------------ | ------------------------------------------- |
+| `/tools` `/skills` `/mcp` `/plugins` | List resources                              |
+| `/model [name]`                      | Show or switch model                        |
+| `/think`                             | Toggle extended thinking                    |
+| `/compact`                           | Compress context                            |
+| `/memory`                            | Manage memories                             |
+| `/cron`                              | Manage scheduled tasks                      |
+| `/projects`                          | Project management: list, switch, new, desc |
+| `/task`                              | Manage background tasks                     |
+| `/diff` `/commit` `/git`             | Git operations                              |
+| `/abort`                             | Cancel current task                         |
+| `/status`                            | Gateway status                              |
+| `/help`                              | Show all commands                           |
+| 📎 Upload file                       | Send PDF/DOCX/image for Q&A                 |
 
 ### Telegram Setup
 

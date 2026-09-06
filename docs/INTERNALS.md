@@ -20,7 +20,11 @@ BaoClaw has two complementary memory layers: **Long-Term Memory** (cross-session
 | **Injection**  | Loaded at daemon startup → `build_prompt_fragment()` → appended to system prompt               |
 | **Management** | `/memory add`, `/memory list`, `/memory delete`, `/memory clear`                               |
 
-When the daemon starts, `MemoryStore::load()` reads both files, and `build_prompt_fragment()` generates a formatted block that becomes part of the `append_system_prompt` injected into every conversation turn.
+When the daemon starts, `MemoryStore::load()` reads the global
+`~/.baoclaw/memory.jsonl`, and `build_prompt_fragment()` generates a formatted
+block that becomes part of the `append_system_prompt` injected into every
+conversation turn. Project-level `<project>/.baoclaw/memory.jsonl` is supported
+by the store API but is not currently loaded into the prompt.
 
 #### Session Memory (`session_memory.rs`)
 
@@ -298,7 +302,7 @@ The system prompt is assembled in 5 ordered layers. The order matters for API pr
 **How skills & memory are loaded:**
 
 1. At daemon startup: `load_skills_for_prompt(cwd)` → discovers all skill `.md` files
-2. At daemon startup: `MemoryStore::load()` → reads global + project `memory.jsonl`
+2. At daemon startup: `MemoryStore::load()` → reads global `~/.baoclaw/memory.jsonl`
 3. Combined via `build_append_prompt()` → becomes Layer 4
 4. Evolution engine's `build_prompt_fragment()` adds pending reviews and skill candidates
 5. All of this is computed once at startup and reused across turns

@@ -161,7 +161,7 @@ baoclaw --debug          # debug mode
 baoclaw-tui              # requires the daemon to already be running (systemd, or run baoclaw once first)
 ```
 
-**Exit**: press `q` or `Ctrl+C`
+**Exit**: press `Ctrl+C`
 
 ### 3. Web (browser chat)
 
@@ -211,7 +211,7 @@ baoclaw-whatsapp         # long-running process
 /model       Current model configuration (API keys masked automatically)
 /config      Full configuration JSON (API keys masked automatically)
 /session     Current session info
-/clear       Clear the current session context
+/clear       Clear the screen
 /exit        Exit
 ```
 
@@ -247,7 +247,12 @@ ls $env:TEMP\baoclaw-sockets\baoclaw.sock
 ```
 ~/.baoclaw/
 ├── bin/
-│   └── baoclaw-core              # Rust daemon binary
+│   ├── baoclaw-core              # Rust daemon binary
+│   └── mcp-servers               # MCP server start/stop helper
+├── package.json                  # mini npm workspace root
+├── package-lock.json
+├── tsconfig.base.json
+├── node_modules/                 # single hoisted dependency tree
 ├── ts-ipc/                       # CLI + TUI source
 ├── baoclaw-web/                  # Web gateway
 ├── baoclaw-telegram/             # Telegram gateway
