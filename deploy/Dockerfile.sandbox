@@ -7,7 +7,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Node.js — 用预编译二进制，比 nodesource 快 10 倍
 RUN arch=$(uname -m) && \
     case "$arch" in x86_64) arch="x64" ;; aarch64) arch="arm64" ;; esac && \
-    curl -fsSL https://nodejs.org/dist/v22.16.0/node-v22.16.0-linux-${arch}.tar.xz \
+    curl -fsSL https://nodejs.org/dist/v24.20.0/node-v24.20.0-linux-${arch}.tar.xz \
     | tar -xJ -C /usr/local --strip-components=1 && \
     node --version && npm --version
 

@@ -35,11 +35,11 @@ docker commit baoclaw-builder baoclaw-sandbox:step1
 docker rm baoclaw-builder
 echo "✅ Layer 1 完成"
 
-# 4. Layer 2: Node.js 22 LTS
+# 4. Layer 2: Node.js 24 LTS
 echo ""
-echo "[4/5] Layer 2: Node.js 22 LTS..."
+echo "[4/5] Layer 2: Node.js 24 LTS..."
 docker run --name baoclaw-builder baoclaw-sandbox:step1 /bin/sh -c \
-    'curl -fsSL https://nodejs.org/dist/v22.16.0/node-v22.16.0-linux-x64.tar.xz \
+    'curl -fsSL https://nodejs.org/dist/v24.20.0/node-v24.20.0-linux-x64.tar.xz \
      | tar -xJ -C /usr/local --strip-components=1 && \
      node --version && npm --version && echo L2_OK'
 docker commit baoclaw-builder baoclaw-sandbox:latest

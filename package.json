@@ -16,6 +16,9 @@
   "allowScripts": {
     "baoclaw-whatsapp": true
   },
+  "overrides": {
+    "libsignal": "6.0.0"
+  },
   "scripts": {
     "prepare": "husky || exit 0",
     "format": "prettier --write . && cargo fmt --manifest-path baoclaw-core/Cargo.toml --all",
