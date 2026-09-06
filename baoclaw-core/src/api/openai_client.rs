@@ -62,14 +62,7 @@ impl OpenAiClient {
 
         // System prompt
         if let Some(system_blocks) = &req.system {
-            let system_text: String = system_blocks
-                .iter()
-                .filter_map(|b| b.get("text").and_then(|t| t.as_str()))
-                .collect::<Vec<_>>()
-                .join("\n\n");
-            if !system_text.is_empty() {
-                messages.push(json!({"role": "system", "content": system_text}));
-            }
+            messages.extend(Self::convert_system_message(system_blocks));
         }
 
         // Conversation messages
@@ -78,195 +71,229 @@ impl OpenAiClient {
             let content = &msg["content"];
 
             match role {
-                "user" => {
-                    // Handle content blocks (may include text, tool_result, image, document)
-                    if let Some(arr) = content.as_array() {
-                        // Collect multimodal parts for a single user message
-                        let mut parts: Vec<Value> = Vec::new();
-
-                        for block in arr {
-                            let block_type =
-                                block.get("type").and_then(|t| t.as_str()).unwrap_or("");
-                            match block_type {
-                                "tool_result" => {
-                                    // Tool results become separate "tool" role messages
-                                    // Flush any accumulated parts first
-                                    if !parts.is_empty() {
-                                        messages.push(json!({"role": "user", "content": Value::Array(parts.clone())}));
-                                        parts.clear();
-                                    }
-                                    let tool_call_id = block
-                                        .get("tool_use_id")
-                                        .and_then(|v| v.as_str())
-                                        .unwrap_or("");
-                                    let output =
-                                        block.get("content").cloned().unwrap_or(Value::Null);
-                                    let output_str = if output.is_string() {
-                                        output.as_str().unwrap_or("").to_string()
-                                    } else {
-                                        serde_json::to_string(&output).unwrap_or_default()
-                                    };
-                                    messages.push(json!({
-                                        "role": "tool",
-                                        "tool_call_id": tool_call_id,
-                                        "content": output_str,
-                                    }));
-                                }
-                                "text" => {
-                                    let text =
-                                        block.get("text").and_then(|t| t.as_str()).unwrap_or("");
-                                    parts.push(json!({"type": "text", "text": text}));
-                                }
-                                "image" => {
-                                    // Convert Anthropic image format to OpenAI image_url format
-                                    if let Some(source) = block.get("source") {
-                                        let media_type = source
-                                            .get("media_type")
-                                            .and_then(|v| v.as_str())
-                                            .unwrap_or("image/png");
-                                        let data = source
-                                            .get("data")
-                                            .and_then(|v| v.as_str())
-                                            .unwrap_or("");
-                                        let data_url =
-                                            format!("data:{};base64,{}", media_type, data);
-                                        parts.push(json!({
-                                            "type": "image_url",
-                                            "image_url": {"url": data_url}
-                                        }));
-                                    }
-                                }
-                                "document" => {
-                                    // OpenAI doesn't natively support document blocks;
-                                    // include as text description noting the document was attached
-                                    if let Some(source) = block.get("source") {
-                                        let media_type = source
-                                            .get("media_type")
-                                            .and_then(|v| v.as_str())
-                                            .unwrap_or("application/octet-stream");
-                                        // For models that support it, pass as image_url with data URI
-                                        // Otherwise fall back to a text note
-                                        let data = source
-                                            .get("data")
-                                            .and_then(|v| v.as_str())
-                                            .unwrap_or("");
-                                        if media_type == "application/pdf" {
-                                            // Some OpenAI-compatible APIs support PDF via file content
-                                            let data_url =
-                                                format!("data:{};base64,{}", media_type, data);
-                                            parts.push(json!({
-                                                "type": "image_url",
-                                                "image_url": {"url": data_url}
-                                            }));
-                                        } else {
-                                            parts.push(json!({
-                                                "type": "text",
-                                                "text": format!("[Attached document: {}]", media_type)
-                                            }));
-                                        }
-                                    }
-                                }
-                                _ => {}
-                            }
-                        }
-                        // Flush remaining parts
-                        if !parts.is_empty() {
-                            if parts.len() == 1
-                                && parts[0].get("type").and_then(|t| t.as_str()) == Some("text")
-                            {
-                                // Single text part: send as plain string for compatibility
-                                messages.push(
-                                    json!({"role": "user", "content": parts[0]["text"].clone()}),
-                                );
-                            } else {
-                                messages
-                                    .push(json!({"role": "user", "content": Value::Array(parts)}));
-                            }
-                        }
-                        if arr.is_empty() {
-                            messages.push(json!({"role": "user", "content": ""}));
-                        }
-                    } else {
-                        // Plain string content
-                        messages.push(json!({"role": "user", "content": content}));
-                    }
-                }
-                "assistant" => {
-                    // Convert assistant content blocks to OpenAI format
-                    if let Some(arr) = content.as_array() {
-                        let mut text_parts = Vec::new();
-                        let mut tool_calls = Vec::new();
-                        let mut reasoning_parts = Vec::new();
-
-                        for block in arr {
-                            let block_type =
-                                block.get("type").and_then(|t| t.as_str()).unwrap_or("");
-                            match block_type {
-                                "text" => {
-                                    if let Some(t) = block.get("text").and_then(|v| v.as_str()) {
-                                        text_parts.push(t.to_string());
-                                    }
-                                }
-                                "tool_use" => {
-                                    let id = block.get("id").and_then(|v| v.as_str()).unwrap_or("");
-                                    let name =
-                                        block.get("name").and_then(|v| v.as_str()).unwrap_or("");
-                                    let input = block.get("input").cloned().unwrap_or(json!({}));
-                                    tool_calls.push(json!({
-                                        "id": id,
-                                        "type": "function",
-                                        "function": {
-                                            "name": name,
-                                            "arguments": serde_json::to_string(&input).unwrap_or_default(),
-                                        }
-                                    }));
-                                }
-                                "thinking" => {
-                                    if let Some(t) = block.get("thinking").and_then(|v| v.as_str())
-                                    {
-                                        reasoning_parts.push(t.to_string());
-                                    }
-                                }
-                                _ => {}
-                            }
-                        }
-
-                        let mut msg = json!({"role": "assistant"});
-                        let text = text_parts.join("");
-                        if !text.is_empty() || tool_calls.is_empty() {
-                            msg["content"] = Value::String(text);
-                        }
-                        if !tool_calls.is_empty() {
-                            msg["tool_calls"] = Value::Array(tool_calls);
-                        }
-                        // DeepSeek requires reasoning_content to be passed back on all assistant messages
-                        // when thinking mode is active. Include it even if empty.
-                        let reasoning = reasoning_parts.join("");
-                        msg["reasoning_content"] = Value::String(reasoning);
-                        messages.push(msg);
-                    } else {
-                        messages.push(json!({"role": "assistant", "content": content}));
-                    }
-                }
-                _ => {
-                    // Convert mid-conversation system messages (e.g. CompactBoundary)
-                    // to user messages, since many OpenAI-compatible APIs (GLM, etc.)
-                    // only allow system role at the start of the conversation.
-                    if role == "system" {
-                        let text = match content {
-                            Value::String(s) => s.clone(),
-                            _ => serde_json::to_string(content).unwrap_or_default(),
-                        };
-                        messages.push(json!({"role": "user", "content": format!("[System context]\n{}", text)}));
-                    } else {
-                        messages.push(json!({"role": role, "content": content}));
-                    }
-                }
+                "user" => messages.extend(Self::convert_user_message(content)),
+                "assistant" => messages.extend(Self::convert_assistant_message(content)),
+                _ => messages.push(Self::convert_other_message(role, content)),
             }
         }
 
         // Tools
-        let tools: Option<Vec<Value>> = req.tools.as_ref().map(|tools| {
+        let tools = Self::convert_tools(&req.tools);
+
+        let mut body = json!({
+            "model": req.model,
+            "messages": messages,
+            "max_tokens": req.max_tokens,
+            "stream": true,
+            "stream_options": {"include_usage": true},
+        });
+
+        if let Some(tools) = tools {
+            if !tools.is_empty() {
+                body["tools"] = Value::Array(tools);
+            }
+        }
+
+        body
+    }
+
+    /// Convert Anthropic system blocks into an OpenAI system message (if non-empty).
+    fn convert_system_message(system_blocks: &[Value]) -> Vec<Value> {
+        let mut messages: Vec<Value> = Vec::new();
+        let system_text: String = system_blocks
+            .iter()
+            .filter_map(|b| b.get("text").and_then(|t| t.as_str()))
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        if !system_text.is_empty() {
+            messages.push(json!({"role": "system", "content": system_text}));
+        }
+        messages
+    }
+
+    /// Convert an Anthropic user message (content blocks or plain string)
+    /// into one or more OpenAI messages.
+    fn convert_user_message(content: &Value) -> Vec<Value> {
+        let mut messages: Vec<Value> = Vec::new();
+        // Handle content blocks (may include text, tool_result, image, document)
+        if let Some(arr) = content.as_array() {
+            // Collect multimodal parts for a single user message
+            let mut parts: Vec<Value> = Vec::new();
+
+            for block in arr {
+                let block_type = block.get("type").and_then(|t| t.as_str()).unwrap_or("");
+                match block_type {
+                    "tool_result" => {
+                        // Tool results become separate "tool" role messages
+                        // Flush any accumulated parts first
+                        if !parts.is_empty() {
+                            messages.push(
+                                json!({"role": "user", "content": Value::Array(parts.clone())}),
+                            );
+                            parts.clear();
+                        }
+                        let tool_call_id = block
+                            .get("tool_use_id")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("");
+                        let output = block.get("content").cloned().unwrap_or(Value::Null);
+                        let output_str = if output.is_string() {
+                            output.as_str().unwrap_or("").to_string()
+                        } else {
+                            serde_json::to_string(&output).unwrap_or_default()
+                        };
+                        messages.push(json!({
+                            "role": "tool",
+                            "tool_call_id": tool_call_id,
+                            "content": output_str,
+                        }));
+                    }
+                    "text" => {
+                        let text = block.get("text").and_then(|t| t.as_str()).unwrap_or("");
+                        parts.push(json!({"type": "text", "text": text}));
+                    }
+                    "image" => {
+                        // Convert Anthropic image format to OpenAI image_url format
+                        if let Some(source) = block.get("source") {
+                            let media_type = source
+                                .get("media_type")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("image/png");
+                            let data = source.get("data").and_then(|v| v.as_str()).unwrap_or("");
+                            let data_url = format!("data:{};base64,{}", media_type, data);
+                            parts.push(json!({
+                                "type": "image_url",
+                                "image_url": {"url": data_url}
+                            }));
+                        }
+                    }
+                    "document" => {
+                        // OpenAI doesn't natively support document blocks;
+                        // include as text description noting the document was attached
+                        if let Some(source) = block.get("source") {
+                            let media_type = source
+                                .get("media_type")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("application/octet-stream");
+                            // For models that support it, pass as image_url with data URI
+                            // Otherwise fall back to a text note
+                            let data = source.get("data").and_then(|v| v.as_str()).unwrap_or("");
+                            if media_type == "application/pdf" {
+                                // Some OpenAI-compatible APIs support PDF via file content
+                                let data_url = format!("data:{};base64,{}", media_type, data);
+                                parts.push(json!({
+                                    "type": "image_url",
+                                    "image_url": {"url": data_url}
+                                }));
+                            } else {
+                                parts.push(json!({
+                                    "type": "text",
+                                    "text": format!("[Attached document: {}]", media_type)
+                                }));
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            // Flush remaining parts
+            if !parts.is_empty() {
+                if parts.len() == 1 && parts[0].get("type").and_then(|t| t.as_str()) == Some("text")
+                {
+                    // Single text part: send as plain string for compatibility
+                    messages.push(json!({"role": "user", "content": parts[0]["text"].clone()}));
+                } else {
+                    messages.push(json!({"role": "user", "content": Value::Array(parts)}));
+                }
+            }
+            if arr.is_empty() {
+                messages.push(json!({"role": "user", "content": ""}));
+            }
+        } else {
+            // Plain string content
+            messages.push(json!({"role": "user", "content": content}));
+        }
+        messages
+    }
+
+    /// Convert an Anthropic assistant message into an OpenAI assistant message.
+    fn convert_assistant_message(content: &Value) -> Vec<Value> {
+        let mut messages: Vec<Value> = Vec::new();
+        // Convert assistant content blocks to OpenAI format
+        if let Some(arr) = content.as_array() {
+            let mut text_parts = Vec::new();
+            let mut tool_calls = Vec::new();
+            let mut reasoning_parts = Vec::new();
+
+            for block in arr {
+                let block_type = block.get("type").and_then(|t| t.as_str()).unwrap_or("");
+                match block_type {
+                    "text" => {
+                        if let Some(t) = block.get("text").and_then(|v| v.as_str()) {
+                            text_parts.push(t.to_string());
+                        }
+                    }
+                    "tool_use" => {
+                        let id = block.get("id").and_then(|v| v.as_str()).unwrap_or("");
+                        let name = block.get("name").and_then(|v| v.as_str()).unwrap_or("");
+                        let input = block.get("input").cloned().unwrap_or(json!({}));
+                        tool_calls.push(json!({
+                            "id": id,
+                            "type": "function",
+                            "function": {
+                                "name": name,
+                                "arguments": serde_json::to_string(&input).unwrap_or_default(),
+                            }
+                        }));
+                    }
+                    "thinking" => {
+                        if let Some(t) = block.get("thinking").and_then(|v| v.as_str()) {
+                            reasoning_parts.push(t.to_string());
+                        }
+                    }
+                    _ => {}
+                }
+            }
+
+            let mut msg = json!({"role": "assistant"});
+            let text = text_parts.join("");
+            if !text.is_empty() || tool_calls.is_empty() {
+                msg["content"] = Value::String(text);
+            }
+            if !tool_calls.is_empty() {
+                msg["tool_calls"] = Value::Array(tool_calls);
+            }
+            // DeepSeek requires reasoning_content to be passed back on all assistant messages
+            // when thinking mode is active. Include it even if empty.
+            let reasoning = reasoning_parts.join("");
+            msg["reasoning_content"] = Value::String(reasoning);
+            messages.push(msg);
+        } else {
+            messages.push(json!({"role": "assistant", "content": content}));
+        }
+        messages
+    }
+
+    /// Convert a mid-conversation system or other-role message to an OpenAI message.
+    ///
+    /// Mid-conversation system messages (e.g. CompactBoundary) become user
+    /// messages, since many OpenAI-compatible APIs (GLM, etc.) only allow
+    /// system role at the start of the conversation.
+    fn convert_other_message(role: &str, content: &Value) -> Value {
+        if role == "system" {
+            let text = match content {
+                Value::String(s) => s.clone(),
+                _ => serde_json::to_string(content).unwrap_or_default(),
+            };
+            json!({"role": "user", "content": format!("[System context]\n{}", text)})
+        } else {
+            json!({"role": role, "content": content})
+        }
+    }
+
+    /// Convert Anthropic tool definitions to OpenAI function tool definitions.
+    fn convert_tools(tools: &Option<Vec<Value>>) -> Option<Vec<Value>> {
+        tools.as_ref().map(|tools| {
             tools
                 .iter()
                 .map(|t| {
@@ -286,23 +313,7 @@ impl OpenAiClient {
                     })
                 })
                 .collect()
-        });
-
-        let mut body = json!({
-            "model": req.model,
-            "messages": messages,
-            "max_tokens": req.max_tokens,
-            "stream": true,
-            "stream_options": {"include_usage": true},
-        });
-
-        if let Some(tools) = tools {
-            if !tools.is_empty() {
-                body["tools"] = Value::Array(tools);
-            }
-        }
-
-        body
+        })
     }
 
     /// Send a streaming chat completion request and return an ApiStreamEvent stream.
@@ -425,14 +436,7 @@ impl OpenAiSseStream {
         let mut events = Vec::new();
 
         if data == "[DONE]" {
-            // Emit content_block_stop for any open blocks, then message_stop
-            for tc in &self.tool_call_states {
-                if tc.started {
-                    events.push(Ok(ApiStreamEvent::ContentBlockStop { index: tc.index }));
-                }
-            }
-            events.push(Ok(ApiStreamEvent::MessageStop));
-            self.finished = true;
+            self.handle_done(&mut events);
             return events;
         }
 
@@ -446,18 +450,7 @@ impl OpenAiSseStream {
 
         // Emit message_start on first chunk
         if !self.sent_message_start {
-            self.sent_message_start = true;
-            let usage = chunk.get("usage").cloned().unwrap_or(json!({}));
-            events.push(Ok(ApiStreamEvent::MessageStart {
-                message: json!({
-                    "id": chunk.get("id").cloned().unwrap_or(Value::Null),
-                    "model": chunk.get("model").cloned().unwrap_or(Value::Null),
-                    "usage": {
-                        "input_tokens": usage.get("prompt_tokens").cloned().unwrap_or(json!(0)),
-                        "output_tokens": json!(0),
-                    }
-                }),
-            }));
+            self.handle_message_start(&chunk, &mut events);
         }
 
         let choices = chunk.get("choices").and_then(|c| c.as_array());
@@ -466,165 +459,231 @@ impl OpenAiSseStream {
                 let delta = &choice["delta"];
                 let finish_reason = choice.get("finish_reason").and_then(|v| v.as_str());
 
-                // Text content
-                if let Some(content) = delta.get("content").and_then(|c| c.as_str()) {
-                    if !content.is_empty() {
-                        // If we were in thinking mode, close thinking block first
-                        if self.in_thinking {
-                            events.push(Ok(ApiStreamEvent::ContentBlockStop { index: 0 }));
-                            self.in_thinking = false;
-                            self.content_index = 1;
-                        }
-                        // Emit content_block_start on first text
-                        if !self.text_started && self.tool_call_states.is_empty() {
-                            events.push(Ok(ApiStreamEvent::ContentBlockStart {
-                                index: self.content_index,
-                                content_block: json!({"type": "text", "text": ""}),
-                            }));
-                            self.text_started = true;
-                            self.text_block_index = self.content_index;
-                            self.content_index += 1;
-                        }
-                        events.push(Ok(ApiStreamEvent::ContentBlockDelta {
-                            index: self.text_block_index,
-                            delta: json!({"type": "text_delta", "text": content}),
-                        }));
-                    }
-                }
-
-                // DeepSeek reasoning_content (thinking/chain-of-thought)
-                if let Some(reasoning) = delta.get("reasoning_content").and_then(|c| c.as_str()) {
-                    if !reasoning.is_empty() {
-                        if !self.in_thinking {
-                            events.push(Ok(ApiStreamEvent::ContentBlockStart {
-                                index: 0,
-                                content_block: json!({"type": "thinking", "thinking": ""}),
-                            }));
-                            self.in_thinking = true;
-                        }
-                        events.push(Ok(ApiStreamEvent::ContentBlockDelta {
-                            index: 0,
-                            delta: json!({"type": "thinking_delta", "thinking": reasoning}),
-                        }));
-                    }
-                }
-
-                // Tool calls
-                if let Some(tool_calls) = delta.get("tool_calls").and_then(|tc| tc.as_array()) {
-                    for tc in tool_calls {
-                        let tc_index =
-                            tc.get("index").and_then(|i| i.as_u64()).unwrap_or(0) as usize;
-                        let tc_id = tc
-                            .get("id")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("")
-                            .to_string();
-                        let func = &tc["function"];
-                        let name = func
-                            .get("name")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("")
-                            .to_string();
-                        let args_chunk =
-                            func.get("arguments").and_then(|v| v.as_str()).unwrap_or("");
-
-                        // Ensure we have a state for this tool call
-                        while self.tool_call_states.len() <= tc_index {
-                            let idx = self.content_index + self.tool_call_states.len() as u32;
-                            self.tool_call_states.push(ToolCallState {
-                                index: idx,
-                                id: String::new(),
-                                name: String::new(),
-                                arguments: String::new(),
-                                started: false,
-                            });
-                        }
-
-                        let state = &mut self.tool_call_states[tc_index];
-                        if !tc_id.is_empty() {
-                            state.id = tc_id;
-                        }
-                        if !name.is_empty() {
-                            state.name = name;
-                        }
-                        state.arguments.push_str(args_chunk);
-
-                        // Emit content_block_start on first chunk for this tool call
-                        if !state.started {
-                            // Close thinking block if open
-                            if self.in_thinking {
-                                events.push(Ok(ApiStreamEvent::ContentBlockStop { index: 0 }));
-                                self.in_thinking = false;
-                            }
-                            // Close text block if open
-                            if self.text_started && tc_index == 0 {
-                                events.push(Ok(ApiStreamEvent::ContentBlockStop {
-                                    index: self.text_block_index,
-                                }));
-                                self.text_started = false;
-                            } else if self.content_index == 1 && tc_index == 0 {
-                                events.push(Ok(ApiStreamEvent::ContentBlockStop { index: 0 }));
-                            }
-                            state.started = true;
-                            events.push(Ok(ApiStreamEvent::ContentBlockStart {
-                                index: state.index,
-                                content_block: json!({
-                                    "type": "tool_use",
-                                    "id": state.id,
-                                    "name": state.name,
-                                    "input": {},
-                                }),
-                            }));
-                        }
-
-                        // Emit argument delta
-                        if !args_chunk.is_empty() {
-                            events.push(Ok(ApiStreamEvent::ContentBlockDelta {
-                                index: state.index,
-                                delta: json!({"type": "input_json_delta", "partial_json": args_chunk}),
-                            }));
-                        }
-                    }
-                }
-
-                // Finish reason
-                if let Some(reason) = finish_reason {
-                    // Close open thinking block
-                    if self.in_thinking {
-                        events.push(Ok(ApiStreamEvent::ContentBlockStop { index: 0 }));
-                        self.in_thinking = false;
-                    }
-                    // Close open text block
-                    if self.text_started {
-                        events.push(Ok(ApiStreamEvent::ContentBlockStop {
-                            index: self.text_block_index,
-                        }));
-                    } else if self.content_index == 1 && self.tool_call_states.is_empty() {
-                        events.push(Ok(ApiStreamEvent::ContentBlockStop { index: 0 }));
-                    }
-
-                    let stop_reason = match reason {
-                        "stop" => "end_turn",
-                        "tool_calls" => "tool_use",
-                        "length" => "max_tokens",
-                        "content_filter" => "end_turn",
-                        other => other,
-                    };
-
-                    // Usage from the final chunk
-                    let usage = chunk.get("usage").cloned().unwrap_or(json!({}));
-                    events.push(Ok(ApiStreamEvent::MessageDelta {
-                        delta: json!({"stop_reason": stop_reason}),
-                        usage: json!({
-                            "input_tokens": usage.get("prompt_tokens").cloned().unwrap_or(json!(0)),
-                            "output_tokens": usage.get("completion_tokens").cloned().unwrap_or(json!(0)),
-                        }),
-                    }));
-                }
+                self.handle_text_delta(delta, &mut events);
+                self.handle_reasoning_delta(delta, &mut events);
+                self.handle_tool_call_deltas(delta, &mut events);
+                self.handle_finish_reason(finish_reason, &chunk, &mut events);
             }
         }
 
         events
+    }
+
+    /// Handle the `[DONE]` sentinel: stop open blocks, then emit message_stop.
+    fn handle_done(&mut self, events: &mut Vec<Result<ApiStreamEvent, ApiError>>) {
+        // Emit content_block_stop for any open blocks, then message_stop
+        for tc in &self.tool_call_states {
+            if tc.started {
+                events.push(Ok(ApiStreamEvent::ContentBlockStop { index: tc.index }));
+            }
+        }
+        events.push(Ok(ApiStreamEvent::MessageStop));
+        self.finished = true;
+    }
+
+    /// Emit message_start from the first chunk (id, model, prompt-token usage).
+    fn handle_message_start(
+        &mut self,
+        chunk: &Value,
+        events: &mut Vec<Result<ApiStreamEvent, ApiError>>,
+    ) {
+        self.sent_message_start = true;
+        let usage = chunk.get("usage").cloned().unwrap_or(json!({}));
+        events.push(Ok(ApiStreamEvent::MessageStart {
+            message: json!({
+                "id": chunk.get("id").cloned().unwrap_or(Value::Null),
+                "model": chunk.get("model").cloned().unwrap_or(Value::Null),
+                "usage": {
+                    "input_tokens": usage.get("prompt_tokens").cloned().unwrap_or(json!(0)),
+                    "output_tokens": json!(0),
+                }
+            }),
+        }));
+    }
+
+    /// Handle a text content delta: open/close blocks as needed, emit text_delta.
+    fn handle_text_delta(
+        &mut self,
+        delta: &Value,
+        events: &mut Vec<Result<ApiStreamEvent, ApiError>>,
+    ) {
+        // Text content
+        if let Some(content) = delta.get("content").and_then(|c| c.as_str()) {
+            if !content.is_empty() {
+                // If we were in thinking mode, close thinking block first
+                if self.in_thinking {
+                    events.push(Ok(ApiStreamEvent::ContentBlockStop { index: 0 }));
+                    self.in_thinking = false;
+                    self.content_index = 1;
+                }
+                // Emit content_block_start on first text
+                if !self.text_started && self.tool_call_states.is_empty() {
+                    events.push(Ok(ApiStreamEvent::ContentBlockStart {
+                        index: self.content_index,
+                        content_block: json!({"type": "text", "text": ""}),
+                    }));
+                    self.text_started = true;
+                    self.text_block_index = self.content_index;
+                    self.content_index += 1;
+                }
+                events.push(Ok(ApiStreamEvent::ContentBlockDelta {
+                    index: self.text_block_index,
+                    delta: json!({"type": "text_delta", "text": content}),
+                }));
+            }
+        }
+    }
+
+    /// Handle a DeepSeek reasoning_content delta (thinking/chain-of-thought).
+    fn handle_reasoning_delta(
+        &mut self,
+        delta: &Value,
+        events: &mut Vec<Result<ApiStreamEvent, ApiError>>,
+    ) {
+        // DeepSeek reasoning_content (thinking/chain-of-thought)
+        if let Some(reasoning) = delta.get("reasoning_content").and_then(|c| c.as_str()) {
+            if !reasoning.is_empty() {
+                if !self.in_thinking {
+                    events.push(Ok(ApiStreamEvent::ContentBlockStart {
+                        index: 0,
+                        content_block: json!({"type": "thinking", "thinking": ""}),
+                    }));
+                    self.in_thinking = true;
+                }
+                events.push(Ok(ApiStreamEvent::ContentBlockDelta {
+                    index: 0,
+                    delta: json!({"type": "thinking_delta", "thinking": reasoning}),
+                }));
+            }
+        }
+    }
+
+    /// Handle streamed tool-call deltas: maintain tool call state, emit
+    /// block start/stop transitions and input_json_delta events.
+    fn handle_tool_call_deltas(
+        &mut self,
+        delta: &Value,
+        events: &mut Vec<Result<ApiStreamEvent, ApiError>>,
+    ) {
+        // Tool calls
+        if let Some(tool_calls) = delta.get("tool_calls").and_then(|tc| tc.as_array()) {
+            for tc in tool_calls {
+                let tc_index = tc.get("index").and_then(|i| i.as_u64()).unwrap_or(0) as usize;
+                let tc_id = tc
+                    .get("id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let func = &tc["function"];
+                let name = func
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let args_chunk = func.get("arguments").and_then(|v| v.as_str()).unwrap_or("");
+
+                // Ensure we have a state for this tool call
+                while self.tool_call_states.len() <= tc_index {
+                    let idx = self.content_index + self.tool_call_states.len() as u32;
+                    self.tool_call_states.push(ToolCallState {
+                        index: idx,
+                        id: String::new(),
+                        name: String::new(),
+                        arguments: String::new(),
+                        started: false,
+                    });
+                }
+
+                let state = &mut self.tool_call_states[tc_index];
+                if !tc_id.is_empty() {
+                    state.id = tc_id;
+                }
+                if !name.is_empty() {
+                    state.name = name;
+                }
+                state.arguments.push_str(args_chunk);
+
+                // Emit content_block_start on first chunk for this tool call
+                if !state.started {
+                    // Close thinking block if open
+                    if self.in_thinking {
+                        events.push(Ok(ApiStreamEvent::ContentBlockStop { index: 0 }));
+                        self.in_thinking = false;
+                    }
+                    // Close text block if open
+                    if self.text_started && tc_index == 0 {
+                        events.push(Ok(ApiStreamEvent::ContentBlockStop {
+                            index: self.text_block_index,
+                        }));
+                        self.text_started = false;
+                    } else if self.content_index == 1 && tc_index == 0 {
+                        events.push(Ok(ApiStreamEvent::ContentBlockStop { index: 0 }));
+                    }
+                    state.started = true;
+                    events.push(Ok(ApiStreamEvent::ContentBlockStart {
+                        index: state.index,
+                        content_block: json!({
+                            "type": "tool_use",
+                            "id": state.id,
+                            "name": state.name,
+                            "input": {},
+                        }),
+                    }));
+                }
+
+                // Emit argument delta
+                if !args_chunk.is_empty() {
+                    events.push(Ok(ApiStreamEvent::ContentBlockDelta {
+                        index: state.index,
+                        delta: json!({"type": "input_json_delta", "partial_json": args_chunk}),
+                    }));
+                }
+            }
+        }
+    }
+
+    /// Handle a finish_reason: close open blocks and emit the final
+    /// message_delta with stop reason and usage totals.
+    fn handle_finish_reason(
+        &mut self,
+        finish_reason: Option<&str>,
+        chunk: &Value,
+        events: &mut Vec<Result<ApiStreamEvent, ApiError>>,
+    ) {
+        // Finish reason
+        if let Some(reason) = finish_reason {
+            // Close open thinking block
+            if self.in_thinking {
+                events.push(Ok(ApiStreamEvent::ContentBlockStop { index: 0 }));
+                self.in_thinking = false;
+            }
+            // Close open text block
+            if self.text_started {
+                events.push(Ok(ApiStreamEvent::ContentBlockStop {
+                    index: self.text_block_index,
+                }));
+            } else if self.content_index == 1 && self.tool_call_states.is_empty() {
+                events.push(Ok(ApiStreamEvent::ContentBlockStop { index: 0 }));
+            }
+
+            let stop_reason = match reason {
+                "stop" => "end_turn",
+                "tool_calls" => "tool_use",
+                "length" => "max_tokens",
+                "content_filter" => "end_turn",
+                other => other,
+            };
+
+            // Usage from the final chunk
+            let usage = chunk.get("usage").cloned().unwrap_or(json!({}));
+            events.push(Ok(ApiStreamEvent::MessageDelta {
+                delta: json!({"stop_reason": stop_reason}),
+                usage: json!({
+                    "input_tokens": usage.get("prompt_tokens").cloned().unwrap_or(json!(0)),
+                    "output_tokens": usage.get("completion_tokens").cloned().unwrap_or(json!(0)),
+                }),
+            }));
+        }
     }
 }
 

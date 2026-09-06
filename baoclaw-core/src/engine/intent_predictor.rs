@@ -131,284 +131,238 @@ impl Default for IntentPredictor {
     }
 }
 
+/// Seed entry for a common intent pattern (see `SEED_PATTERNS`).
+struct SeedPattern {
+    /// HashMap key (intent string key).
+    key: &'static str,
+    /// Keywords that trigger this intent.
+    keywords: &'static [&'static str],
+    /// Tools typically used for this intent.
+    tools_used: &'static [&'static str],
+    /// Files typically accessed for this intent (by extension).
+    file_extensions: &'static [&'static str],
+    /// How many times this pattern was observed at seed time.
+    observation_count: u32,
+    /// Transition: what intent typically follows this one.
+    next_intent: Option<UserIntent>,
+    /// Transition probability.
+    next_intent_prob: f64,
+}
+
+/// Common patterns used to seed a fresh `IntentPredictor`.
+const SEED_PATTERNS: &[SeedPattern] = &[
+    SeedPattern {
+        key: "debugging",
+        keywords: &[
+            "error",
+            "bug",
+            "fix",
+            "crash",
+            "fail",
+            "broken",
+            "traceback",
+            "panic",
+        ],
+        tools_used: &["Bash", "FileRead"],
+        file_extensions: &[".rs", ".log"],
+        observation_count: 10, // seeded
+        next_intent: Some(UserIntent::CodeWriting),
+        next_intent_prob: 0.6,
+    },
+    SeedPattern {
+        key: "code_writing",
+        keywords: &[
+            "create",
+            "add",
+            "implement",
+            "write",
+            "build",
+            "new feature",
+            "新增",
+            "实现",
+        ],
+        tools_used: &["FileEdit", "FileWrite"],
+        file_extensions: &[".rs", ".toml", ".md"],
+        observation_count: 10,
+        next_intent: Some(UserIntent::Testing),
+        next_intent_prob: 0.5,
+    },
+    SeedPattern {
+        key: "refactoring",
+        keywords: &["refactor", "restructure", "clean up", "simplify", "重构"],
+        tools_used: &["FileEdit", "FileRead"],
+        file_extensions: &[".rs"],
+        observation_count: 5,
+        next_intent: Some(UserIntent::Testing),
+        next_intent_prob: 0.7,
+    },
+    SeedPattern {
+        key: "testing",
+        keywords: &["test", "verify", "check", "测试", "验证"],
+        tools_used: &["Bash"],
+        file_extensions: &[".rs"],
+        observation_count: 5,
+        next_intent: Some(UserIntent::Debugging),
+        next_intent_prob: 0.4,
+    },
+    SeedPattern {
+        key: "git_ops",
+        keywords: &["commit", "push", "merge", "branch", "pull request", "提交"],
+        tools_used: &["Bash"],
+        file_extensions: &[],
+        observation_count: 5,
+        next_intent: None,
+        next_intent_prob: 0.0,
+    },
+    SeedPattern {
+        key: "research",
+        keywords: &["search", "find", "lookup", "what is", "how to", "查找"],
+        tools_used: &["WebSearch", "WebFetch"],
+        file_extensions: &[],
+        observation_count: 3,
+        next_intent: Some(UserIntent::CodeWriting),
+        next_intent_prob: 0.5,
+    },
+    SeedPattern {
+        key: "code_edit",
+        keywords: &[
+            "edit",
+            "modify",
+            "change",
+            "update",
+            "rename",
+            "修改",
+            "改一下",
+        ],
+        tools_used: &["FileEdit", "FileRead"],
+        file_extensions: &[".rs", ".ts"],
+        observation_count: 5,
+        next_intent: Some(UserIntent::Testing),
+        next_intent_prob: 0.4,
+    },
+    SeedPattern {
+        key: "search",
+        keywords: &[
+            "grep",
+            "where is",
+            "locate",
+            "which file",
+            "搜索",
+            "哪个文件",
+        ],
+        tools_used: &["Bash", "FileRead"],
+        file_extensions: &[],
+        observation_count: 5,
+        next_intent: Some(UserIntent::CodeEdit),
+        next_intent_prob: 0.5,
+    },
+    SeedPattern {
+        key: "doc_write",
+        keywords: &[
+            "document",
+            "readme",
+            "docs",
+            "comment",
+            "documentation",
+            "文档",
+            "注释",
+        ],
+        tools_used: &["FileWrite", "FileRead"],
+        file_extensions: &[".md"],
+        observation_count: 5,
+        next_intent: None,
+        next_intent_prob: 0.0,
+    },
+    SeedPattern {
+        key: "image",
+        keywords: &[
+            "image",
+            "picture",
+            "draw",
+            "generate an image",
+            "logo",
+            "图片",
+            "画",
+        ],
+        tools_used: &["ImageGenerator", "ImageEditor"],
+        file_extensions: &[".png", ".jpg"],
+        observation_count: 3,
+        next_intent: None,
+        next_intent_prob: 0.0,
+    },
+    SeedPattern {
+        key: "web",
+        keywords: &[
+            "http://", "https://", "url", "website", "fetch", "browse", "网页",
+        ],
+        tools_used: &["WebFetch", "WebSearch"],
+        file_extensions: &[],
+        observation_count: 3,
+        next_intent: None,
+        next_intent_prob: 0.0,
+    },
+    SeedPattern {
+        key: "deployment",
+        keywords: &[
+            "deploy",
+            "docker",
+            "kubernetes",
+            "k8s",
+            "release",
+            "ci/cd",
+            "部署",
+            "发布",
+        ],
+        tools_used: &["Bash"],
+        file_extensions: &[".yaml", ".yml"],
+        observation_count: 3,
+        next_intent: None,
+        next_intent_prob: 0.0,
+    },
+    SeedPattern {
+        key: "code_review",
+        keywords: &[
+            "review",
+            "explain",
+            "understand",
+            "what does",
+            "审查",
+            "解释",
+        ],
+        tools_used: &["FileRead"],
+        file_extensions: &[".rs", ".ts"],
+        observation_count: 3,
+        next_intent: Some(UserIntent::CodeEdit),
+        next_intent_prob: 0.3,
+    },
+    SeedPattern {
+        key: "file_management",
+        keywords: &["move", "copy", "delete file", "mkdir", "list files", "移动"],
+        tools_used: &["Bash"],
+        file_extensions: &[],
+        observation_count: 3,
+        next_intent: None,
+        next_intent_prob: 0.0,
+    },
+];
+
 impl IntentPredictor {
     pub fn new() -> Self {
-        let mut patterns = HashMap::new();
-
         // Seed with common patterns
-        patterns.insert(
-            "debugging".into(),
-            IntentPattern {
-                keywords: vec![
-                    "error".into(),
-                    "bug".into(),
-                    "fix".into(),
-                    "crash".into(),
-                    "fail".into(),
-                    "broken".into(),
-                    "traceback".into(),
-                    "panic".into(),
-                ],
-                tools_used: vec!["Bash".into(), "FileRead".into()],
-                file_extensions: vec![".rs".into(), ".log".into()],
-                observation_count: 10, // seeded
-                next_intent: Some(UserIntent::CodeWriting),
-                next_intent_prob: 0.6,
-            },
-        );
-
-        patterns.insert(
-            "code_writing".into(),
-            IntentPattern {
-                keywords: vec![
-                    "create".into(),
-                    "add".into(),
-                    "implement".into(),
-                    "write".into(),
-                    "build".into(),
-                    "new feature".into(),
-                    "新增".into(),
-                    "实现".into(),
-                ],
-                tools_used: vec!["FileEdit".into(), "FileWrite".into()],
-                file_extensions: vec![".rs".into(), ".toml".into(), ".md".into()],
-                observation_count: 10,
-                next_intent: Some(UserIntent::Testing),
-                next_intent_prob: 0.5,
-            },
-        );
-
-        patterns.insert(
-            "refactoring".into(),
-            IntentPattern {
-                keywords: vec![
-                    "refactor".into(),
-                    "restructure".into(),
-                    "clean up".into(),
-                    "simplify".into(),
-                    "重构".into(),
-                ],
-                tools_used: vec!["FileEdit".into(), "FileRead".into()],
-                file_extensions: vec![".rs".into()],
-                observation_count: 5,
-                next_intent: Some(UserIntent::Testing),
-                next_intent_prob: 0.7,
-            },
-        );
-
-        patterns.insert(
-            "testing".into(),
-            IntentPattern {
-                keywords: vec![
-                    "test".into(),
-                    "verify".into(),
-                    "check".into(),
-                    "测试".into(),
-                    "验证".into(),
-                ],
-                tools_used: vec!["Bash".into()],
-                file_extensions: vec![".rs".into()],
-                observation_count: 5,
-                next_intent: Some(UserIntent::Debugging),
-                next_intent_prob: 0.4,
-            },
-        );
-
-        patterns.insert(
-            "git_ops".into(),
-            IntentPattern {
-                keywords: vec![
-                    "commit".into(),
-                    "push".into(),
-                    "merge".into(),
-                    "branch".into(),
-                    "pull request".into(),
-                    "提交".into(),
-                ],
-                tools_used: vec!["Bash".into()],
-                file_extensions: vec![],
-                observation_count: 5,
-                next_intent: None,
-                next_intent_prob: 0.0,
-            },
-        );
-
-        patterns.insert(
-            "research".into(),
-            IntentPattern {
-                keywords: vec![
-                    "search".into(),
-                    "find".into(),
-                    "lookup".into(),
-                    "what is".into(),
-                    "how to".into(),
-                    "查找".into(),
-                ],
-                tools_used: vec!["WebSearch".into(), "WebFetch".into()],
-                file_extensions: vec![],
-                observation_count: 3,
-                next_intent: Some(UserIntent::CodeWriting),
-                next_intent_prob: 0.5,
-            },
-        );
-
-        patterns.insert(
-            "code_edit".into(),
-            IntentPattern {
-                keywords: vec![
-                    "edit".into(),
-                    "modify".into(),
-                    "change".into(),
-                    "update".into(),
-                    "rename".into(),
-                    "修改".into(),
-                    "改一下".into(),
-                ],
-                tools_used: vec!["FileEdit".into(), "FileRead".into()],
-                file_extensions: vec![".rs".into(), ".ts".into()],
-                observation_count: 5,
-                next_intent: Some(UserIntent::Testing),
-                next_intent_prob: 0.4,
-            },
-        );
-
-        patterns.insert(
-            "search".into(),
-            IntentPattern {
-                keywords: vec![
-                    "grep".into(),
-                    "where is".into(),
-                    "locate".into(),
-                    "which file".into(),
-                    "搜索".into(),
-                    "哪个文件".into(),
-                ],
-                tools_used: vec!["Bash".into(), "FileRead".into()],
-                file_extensions: vec![],
-                observation_count: 5,
-                next_intent: Some(UserIntent::CodeEdit),
-                next_intent_prob: 0.5,
-            },
-        );
-
-        patterns.insert(
-            "doc_write".into(),
-            IntentPattern {
-                keywords: vec![
-                    "document".into(),
-                    "readme".into(),
-                    "docs".into(),
-                    "comment".into(),
-                    "documentation".into(),
-                    "文档".into(),
-                    "注释".into(),
-                ],
-                tools_used: vec!["FileWrite".into(), "FileRead".into()],
-                file_extensions: vec![".md".into()],
-                observation_count: 5,
-                next_intent: None,
-                next_intent_prob: 0.0,
-            },
-        );
-
-        patterns.insert(
-            "image".into(),
-            IntentPattern {
-                keywords: vec![
-                    "image".into(),
-                    "picture".into(),
-                    "draw".into(),
-                    "generate an image".into(),
-                    "logo".into(),
-                    "图片".into(),
-                    "画".into(),
-                ],
-                tools_used: vec!["ImageGenerator".into(), "ImageEditor".into()],
-                file_extensions: vec![".png".into(), ".jpg".into()],
-                observation_count: 3,
-                next_intent: None,
-                next_intent_prob: 0.0,
-            },
-        );
-
-        patterns.insert(
-            "web".into(),
-            IntentPattern {
-                keywords: vec![
-                    "http://".into(),
-                    "https://".into(),
-                    "url".into(),
-                    "website".into(),
-                    "fetch".into(),
-                    "browse".into(),
-                    "网页".into(),
-                ],
-                tools_used: vec!["WebFetch".into(), "WebSearch".into()],
-                file_extensions: vec![],
-                observation_count: 3,
-                next_intent: None,
-                next_intent_prob: 0.0,
-            },
-        );
-
-        patterns.insert(
-            "deployment".into(),
-            IntentPattern {
-                keywords: vec![
-                    "deploy".into(),
-                    "docker".into(),
-                    "kubernetes".into(),
-                    "k8s".into(),
-                    "release".into(),
-                    "ci/cd".into(),
-                    "部署".into(),
-                    "发布".into(),
-                ],
-                tools_used: vec!["Bash".into()],
-                file_extensions: vec![".yaml".into(), ".yml".into()],
-                observation_count: 3,
-                next_intent: None,
-                next_intent_prob: 0.0,
-            },
-        );
-
-        patterns.insert(
-            "code_review".into(),
-            IntentPattern {
-                keywords: vec![
-                    "review".into(),
-                    "explain".into(),
-                    "understand".into(),
-                    "what does".into(),
-                    "审查".into(),
-                    "解释".into(),
-                ],
-                tools_used: vec!["FileRead".into()],
-                file_extensions: vec![".rs".into(), ".ts".into()],
-                observation_count: 3,
-                next_intent: Some(UserIntent::CodeEdit),
-                next_intent_prob: 0.3,
-            },
-        );
-
-        patterns.insert(
-            "file_management".into(),
-            IntentPattern {
-                keywords: vec![
-                    "move".into(),
-                    "copy".into(),
-                    "delete file".into(),
-                    "mkdir".into(),
-                    "list files".into(),
-                    "移动".into(),
-                ],
-                tools_used: vec!["Bash".into()],
-                file_extensions: vec![],
-                observation_count: 3,
-                next_intent: None,
-                next_intent_prob: 0.0,
-            },
-        );
+        let mut patterns = HashMap::new();
+        for seed in SEED_PATTERNS {
+            patterns.insert(
+                seed.key.into(),
+                IntentPattern {
+                    keywords: seed.keywords.iter().map(|s| s.to_string()).collect(),
+                    tools_used: seed.tools_used.iter().map(|s| s.to_string()).collect(),
+                    file_extensions: seed.file_extensions.iter().map(|s| s.to_string()).collect(),
+                    observation_count: seed.observation_count,
+                    next_intent: seed.next_intent.clone(),
+                    next_intent_prob: seed.next_intent_prob,
+                },
+            );
+        }
 
         Self {
             patterns,
