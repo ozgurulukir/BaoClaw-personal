@@ -17,19 +17,19 @@ const MAX_FILE_SIZE: u64 = 10 * 1024 * 1024;
 /// Errors that can occur during document processing.
 #[derive(Debug, Error)]
 pub enum DocError {
-    #[error("文件不存在: {0}")]
+    #[error("File not found: {0}")]
     FileNotFound(String),
 
-    #[error("文件过大，最大支持 10MB")]
+    #[error("File too large (max 10MB)")]
     FileTooLarge,
 
-    #[error("不支持的文件格式: {0}")]
+    #[error("Unsupported file format: {0}")]
     UnsupportedFormat(String),
 
-    #[error("文档解析失败: {0}")]
+    #[error("Document parsing failed: {0}")]
     ParseError(String),
 
-    #[error("IO 错误: {0}")]
+    #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
 }
 

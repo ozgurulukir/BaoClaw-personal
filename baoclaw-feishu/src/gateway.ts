@@ -80,8 +80,16 @@ interface StreamEvent {
 
 // ── Config ─────────────────────────────────────────────────────────────────
 
-const BOT_OPEN_ID = "ou_0c3d070e43739551854de5a3b546e821";
+// This deployment's bot identity, used to ignore message echoes. Override via
+// env when pointing the gateway at a different Feishu app.
+const BOT_OPEN_ID =
+  process.env.BAOCLAW_FEISHU_BOT_OPEN_ID ??
+  "ou_0c3d070e43739551854de5a3b546e821";
 const MAX_MSG_LEN = 15000;
+/** Characters of auxiliary text (stderr, JSON payload) kept in messages. */
+const PREVIEW_CHARS = 200;
+/** Characters of tool output kept in error notifications. */
+const TOOL_OUTPUT_PREVIEW_CHARS = 500;
 const PID_FILE = path.join(process.env.HOME || "/tmp", ".baoclaw-feishu.pid");
 const LOG_DIR = path.join(process.env.HOME || "/tmp", ".baoclaw", "logs");
 
@@ -157,7 +165,9 @@ function sendFeishuMessage(
       if (code === 0) resolve();
       else
         reject(
-          new Error(`messages-send exited ${code}: ${stderr.slice(0, 200)}`),
+          new Error(
+            `messages-send exited ${code}: ${stderr.slice(0, PREVIEW_CHARS)}`,
+          ),
         );
     });
     proc.on("error", reject);
@@ -190,7 +200,11 @@ function sendFeishuCard(
     proc.on("close", (code) => {
       if (code === 0) resolve();
       else
-        reject(new Error(`card send exited ${code}: ${stderr.slice(0, 200)}`));
+        reject(
+          new Error(
+            `card send exited ${code}: ${stderr.slice(0, PREVIEW_CHARS)}`,
+          ),
+        );
     });
     proc.on("error", reject);
   });
@@ -342,7 +356,10 @@ class DaemonBridge {
         break;
       }
       case "permission_request": {
-        const preview = JSON.stringify(event.input ?? {}).slice(0, 200);
+        const preview = JSON.stringify(event.input ?? {}).slice(
+          0,
+          PREVIEW_CHARS,
+        );
         const toolName = event.tool_name || "unknown";
         logger.info(`Permission request: ${toolName} (${event.tool_use_id})`);
         // Card-first (rich buttons); an older lark-cli that rejects
@@ -396,7 +413,7 @@ class DaemonBridge {
               : JSON.stringify(event.output);
           sendFeishuMessage(
             chatId,
-            `⚠️ Tool error: ${out.slice(0, 500)}`,
+            `⚠️ Tool error: ${out.slice(0, TOOL_OUTPUT_PREVIEW_CHARS)}`,
           ).catch(() => {});
         }
         break;

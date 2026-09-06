@@ -3,6 +3,11 @@ use serde_json::{json, Value};
 
 use crate::tools::trait_def::*;
 
+/// Timeout for the image-generation API call (generation is slow).
+const IMAGE_API_TIMEOUT_SECS: u64 = 120;
+/// Timeout for downloading the generated image bytes.
+const IMAGE_DOWNLOAD_TIMEOUT_SECS: u64 = 60;
+
 /// Image generation tool — calls CogView-4 via GLM OpenAI-compatible API
 pub struct ImageGenTool {
     http_client: reqwest::Client,
@@ -108,7 +113,7 @@ impl Tool for ImageGenTool {
             .header("Authorization", format!("Bearer {}", api_key))
             .header("Content-Type", "application/json")
             .json(&body)
-            .timeout(std::time::Duration::from_secs(120))
+            .timeout(std::time::Duration::from_secs(IMAGE_API_TIMEOUT_SECS))
             .send()
             .await
             .map_err(|e| ToolError::ExecutionFailed(format!("API request failed: {}", e)))?;
@@ -141,7 +146,7 @@ impl Tool for ImageGenTool {
         let image_response = self
             .http_client
             .get(image_url)
-            .timeout(std::time::Duration::from_secs(60))
+            .timeout(std::time::Duration::from_secs(IMAGE_DOWNLOAD_TIMEOUT_SECS))
             .send()
             .await
             .map_err(|e| ToolError::ExecutionFailed(format!("Failed to download image: {}", e)))?;

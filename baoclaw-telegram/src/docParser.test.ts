@@ -15,7 +15,10 @@ describe("docParser", () => {
         "test.doc",
       );
       assert.equal(res.text, "");
-      assert.equal(res.error, "不支持旧版 .doc 格式，请转换为 .docx 后重试。");
+      assert.equal(
+        res.error,
+        "Legacy .doc format is not supported. Please convert it to .docx and try again.",
+      );
     });
 
     test("rejects unsupported file mime/types", async () => {
@@ -27,7 +30,7 @@ describe("docParser", () => {
       assert.equal(res.text, "");
       assert.match(
         res.error || "",
-        /不支持的文件类型: application\/zip \(zip\)/,
+        /Unsupported file type: application\/zip \(zip\)/,
       );
     });
 

@@ -12,6 +12,10 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
+/// How often the accept loop re-checks the shutdown flag while no client is
+/// connecting.
+const SHUTDOWN_CHECK_INTERVAL_MS: u64 = 500;
+
 use baoclaw_core::{api, config, engine, ipc, permissions, state, tools};
 
 use api::client::ApiClientConfig;
@@ -903,7 +907,8 @@ pub(super) async fn run_accept_loop(
             result = server.accept() => Some(result),
             _ = async {
                 loop {
-                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                    tokio::time::sleep(std::time::Duration::from_millis(SHUTDOWN_CHECK_INTERVAL_MS))
+                        .await;
                     if should_exit_clone.load(Ordering::Relaxed) {
                         break;
                     }

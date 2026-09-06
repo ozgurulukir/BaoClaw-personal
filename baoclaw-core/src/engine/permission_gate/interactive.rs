@@ -23,22 +23,22 @@ impl InteractivePrompter {
 
         lines.push(String::new());
         lines.push("╔══════════════════════════════════════════╗".to_string());
-        lines.push("║  ⚠️  权限请求 (Permission Request)       ║".to_string());
+        lines.push("║  ⚠️  Permission Request                  ║".to_string());
         lines.push("╠══════════════════════════════════════════╣".to_string());
         lines.push(format!(
-            "║  工具 (Tool):  {:24} ║",
+            "║  Tool:          {:24} ║",
             truncate(&request.tool, 24)
         ));
         lines.push(format!(
-            "║  操作 (Action): {:24} ║",
+            "║  Action:        {:24} ║",
             truncate(&request.action, 24)
         ));
         lines.push(format!(
-            "║  目标 (Target): {:24} ║",
+            "║  Target:        {:24} ║",
             truncate(&request.target, 24)
         ));
         lines.push("╠══════════════════════════════════════════╣".to_string());
-        lines.push("║  可用操作:                               ║".to_string());
+        lines.push("║  Available actions:                      ║".to_string());
 
         for action in Self::quick_actions(request) {
             lines.push(format!("║    {}", action));
@@ -86,11 +86,11 @@ impl InteractivePrompter {
     /// Each string describes one available action and its shortcut.
     pub fn quick_actions(_request: &PermissionRequest) -> Vec<String> {
         vec![
-            "[y] 允许本次 (Allow this once)".to_string(),
-            "[n] 拒绝 (Deny)".to_string(),
-            "[o] 允许本次 (Allow once)".to_string(),
-            "[s] 本次会话允许 (Allow this session)".to_string(),
-            "[a] 永久允许 (Always allow)".to_string(),
+            "[y] Allow this once".to_string(),
+            "[n] Deny".to_string(),
+            "[o] Allow once".to_string(),
+            "[s] Allow this session".to_string(),
+            "[a] Always allow".to_string(),
         ]
     }
 
@@ -98,7 +98,7 @@ impl InteractivePrompter {
     pub fn parse_response_or_error(response: &str) -> Result<DecisionType, String> {
         Self::parse_response(response).ok_or_else(|| {
             format!(
-                "无法识别的响应 '{}'。有效选项: y/yes, n/no, o/once, s/session, a/always",
+                "Unrecognized response '{}'. Valid options: y/yes, n/no, o/once, s/session, a/always",
                 response
             )
         })
@@ -126,7 +126,7 @@ mod tests {
     fn test_prompt_formatting() {
         let request = make_request();
         let prompt = InteractivePrompter::prompt(&request);
-        assert!(prompt.contains("权限请求"));
+        assert!(prompt.contains("Permission Request"));
         assert!(prompt.contains("Bash"));
         assert!(prompt.contains("npm install express"));
         assert!(prompt.contains("node_modules"));
@@ -243,7 +243,7 @@ mod tests {
         assert!(InteractivePrompter::parse_response_or_error("y").is_ok());
         assert!(InteractivePrompter::parse_response_or_error("bad").is_err());
         let err = InteractivePrompter::parse_response_or_error("bad").unwrap_err();
-        assert!(err.contains("无法识别的响应"));
+        assert!(err.contains("Unrecognized response"));
     }
 
     #[test]

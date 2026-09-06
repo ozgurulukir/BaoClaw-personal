@@ -695,11 +695,19 @@ impl SpecEngine {
         if let Some(ref req_ref) = task.requirement_ref {
             if let Ok(requirements) = self.store.read_doc(feature_name, "requirements.md") {
                 context.push_str("## Relevant Requirements\n\n");
-                // Extract sections matching the requirement references
+                // Extract sections matching the requirement references.
+                // Requirements docs may be written in English or Chinese
+                // (mirrors the bilingual `_Requirements:`/`_需求:` refs).
                 for req_id in req_ref.split(',').map(|s| s.trim()) {
-                    let pattern =
-                        format!("### 需求 {}:", req_id.split('.').next().unwrap_or(req_id));
-                    if let Some(start) = requirements.find(&pattern) {
+                    let section_id = req_id.split('.').next().unwrap_or(req_id);
+                    let patterns = [
+                        format!("### Requirement {}:", section_id),
+                        format!("### 需求 {}:", section_id),
+                    ];
+                    let start = patterns
+                        .iter()
+                        .find_map(|pattern| requirements.find(pattern));
+                    if let Some(start) = start {
                         let section = &requirements[start..];
                         let end = section[1..]
                             .find("\n### ")

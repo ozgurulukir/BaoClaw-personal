@@ -9,6 +9,11 @@ use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
 const IPC_PROTOCOL_VERSION: &str = "1";
+/// Poll interval while waiting for a turn's submit-drain task to finish.
+const SUBMIT_DRAIN_POLL_MS: u64 = 100;
+/// Poll interval for the service supervisor watching the daemon subprocess.
+#[cfg(windows)]
+const SERVICE_CHILD_POLL_MS: u64 = 500;
 use std::path::PathBuf;
 use tokio::sync::Mutex as TokioMutex;
 
@@ -532,7 +537,7 @@ async fn handle_client(mut conn: IpcConnection, shared: SharedState) {
         // first drain is still writing — wait for the drain instead. It
         // notices a dead socket on its next event, so this is short-lived.
         while session.is_active_submitter(client_id).await {
-            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            tokio::time::sleep(std::time::Duration::from_millis(SUBMIT_DRAIN_POLL_MS)).await;
         }
 
         // Client disconnect handling (Task 6.1)
@@ -1017,7 +1022,7 @@ pub fn run_daemon_main_with_shutdown_check() {
             }
             Ok(None) => {
                 // Still running, wait a bit
-                std::thread::sleep(std::time::Duration::from_millis(500));
+                std::thread::sleep(std::time::Duration::from_millis(SERVICE_CHILD_POLL_MS));
             }
             Err(e) => {
                 eprintln!("[service] Error waiting for daemon: {}", e);

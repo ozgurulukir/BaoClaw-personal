@@ -1,7 +1,9 @@
 /**
- * BaoClaw 对话导出模块 — 将 talkTail RPC 返回的对话条目格式化为 Markdown 及 PDF。
- * 逻辑与 baoclaw-core/src/engine/export.rs 保持一致。
- * baoclaw-telegram/src/export.ts 是本模块的 re-export shim，请勿在两边各自修改。
+ * BaoClaw conversation export module — formats transcript entries returned by
+ * the talkTail RPC into Markdown and PDF.
+ * Kept consistent with baoclaw-core/src/engine/export.rs.
+ * baoclaw-telegram/src/export.ts is a re-export shim of this module; do not
+ * edit both sides independently.
  */
 
 import fs from "fs";
@@ -33,33 +35,33 @@ export function formatTranscriptToMarkdown(
   options?: ExportOptions,
 ): string {
   const exportTime = new Date().toLocaleString("sv-SE").replace("T", " ");
-  const sessionId = options?.sessionId ?? "未知";
+  const sessionId = options?.sessionId ?? "Unknown";
   const includeToolCalls = options?.includeToolCalls ?? true;
 
   let md = "";
 
   // Header
-  md += "# BaoClaw 对话导出\n";
-  md += `**会话**: ${sessionId}\n`;
-  md += `**时间**: ${exportTime}\n`;
-  md += `**消息数**: ${entries.length}\n`;
+  md += "# BaoClaw Conversation Export\n";
+  md += `**Session**: ${sessionId}\n`;
+  md += `**Time**: ${exportTime}\n`;
+  md += `**Messages**: ${entries.length}\n`;
   md += "\n---\n\n";
 
   for (const entry of entries) {
     const ts = entry.timestamp ?? "";
 
     if (entry.role === "user") {
-      md += `## 用户 (${ts})\n`;
+      md += `## User (${ts})\n`;
       md += entry.text;
       md += "\n";
     } else {
-      md += `## 助手 (${ts})\n`;
+      md += `## Assistant (${ts})\n`;
       md += entry.text;
       md += "\n";
 
       // Render tool calls if present and enabled
       if (includeToolCalls && entry.tools && entry.tools.length > 0) {
-        md += "\n### 工具调用\n";
+        md += "\n### Tool Call\n";
         for (const tool of entry.tools) {
           const detail = tool.detail ? `: ${tool.detail}` : "";
           md += `- ⚡ ${tool.name}${detail}\n`;

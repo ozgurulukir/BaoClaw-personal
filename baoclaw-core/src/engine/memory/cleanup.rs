@@ -16,6 +16,11 @@ use crate::engine::memory::{DecayConfig, MemoryArchive, MemoryStore};
 
 // DEFAULT_CLEANUP_INTERVAL_HOURS is now configured via DecayConfig.cleanup_interval_hours
 
+/// How often the scheduler wakes to check whether cleanup is due. Deliberately
+/// shorter than the cleanup interval itself, for precise timing and quick
+/// shutdown response.
+const CLEANUP_CHECK_INTERVAL_SECS: u64 = 300;
+
 /// Result of a cleanup run.
 #[derive(Debug, Clone)]
 pub struct CleanupResult {
@@ -208,10 +213,8 @@ impl MemoryCleanupScheduler {
                     );
                 }
 
-                // Sleep for a check interval (5 minutes)
-                // We check more frequently than the cleanup interval to allow
-                // for precise timing and quick shutdown response
-                tokio::time::sleep(Duration::from_secs(300)).await;
+                // Sleep for a check interval
+                tokio::time::sleep(Duration::from_secs(CLEANUP_CHECK_INTERVAL_SECS)).await;
             }
 
             eprintln!("Memory cleanup scheduler stopped");

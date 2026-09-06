@@ -58,9 +58,13 @@ export async function parseDocument(
   }
   // For .doc (legacy Word), we can't easily parse without LibreOffice
   if (ext === "doc") {
-    return { text: "", error: "不支持旧版 .doc 格式，请转换为 .docx 后重试。" };
+    return {
+      text: "",
+      error:
+        "Legacy .doc format is not supported. Please convert it to .docx and try again.",
+    };
   }
-  return { text: "", error: `不支持的文件类型: ${mimeType} (${ext})` };
+  return { text: "", error: `Unsupported file type: ${mimeType} (${ext})` };
 }
 
 /**

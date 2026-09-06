@@ -73,11 +73,11 @@ export function formatPermissionRequest(
 ): string {
   const preview = inputPreview ? escapeHtml(inputPreview) : "—";
   return [
-    "🔐 <b>权限请求</b>",
-    `工具: <code>${escapeHtml(toolName)}</code>`,
-    `输入: <code>${preview}</code>`,
+    "🔐 <b>Permission Request</b>",
+    `Tool: <code>${escapeHtml(toolName)}</code>`,
+    `Input: <code>${preview}</code>`,
     "",
-    "回复 <b>y</b> 允许 / <b>a</b> 总是允许 / <b>n</b> 拒绝（60秒后自动拒绝）",
+    "Reply <b>y</b> to allow / <b>a</b> to always allow / <b>n</b> to deny (auto-denied after 60s)",
   ].join("\n");
 }
 
@@ -86,10 +86,10 @@ export function buildPermissionKeyboard(): Record<string, unknown> {
   return {
     inline_keyboard: [
       [
-        { text: "✅ 允许", callback_data: "perm:allow" },
-        { text: "❌ 拒绝", callback_data: "perm:deny" },
+        { text: "✅ Allow", callback_data: "perm:allow" },
+        { text: "❌ Deny", callback_data: "perm:deny" },
       ],
-      [{ text: "🔁 总是允许此工具", callback_data: "perm:always" }],
+      [{ text: "🔁 Always allow this tool", callback_data: "perm:always" }],
     ],
   };
 }

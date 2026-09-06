@@ -172,7 +172,7 @@ export function isRegisteredCommand(text: string): boolean {
  * Format a list of registered tools as plain text.
  */
 export function formatTools(tools: ToolInfo[], count: number): string {
-  if (count === 0) return "暂无已注册的工具。";
+  if (count === 0) return "No tools registered.";
 
   // Group by type
   const groups: Record<string, ToolInfo[]> = {};
@@ -182,7 +182,7 @@ export function formatTools(tools: ToolInfo[], count: number): string {
     groups[type].push(t);
   }
 
-  let out = `🔧 已注册工具 (${count})\n\n`;
+  let out = `🔧 Registered Tools (${count})\n\n`;
   for (const [type, items] of Object.entries(groups)) {
     out += `── ${type} (${items.length}) ──\n`;
     for (const t of items) {
@@ -202,8 +202,8 @@ export function formatTools(tools: ToolInfo[], count: number): string {
  * Format a list of loaded skills as plain text.
  */
 export function formatSkills(skills: SkillInfo[], count: number): string {
-  if (count === 0) return "暂无已加载的技能。";
-  let out = `📚 已加载技能 (${count})\n\n`;
+  if (count === 0) return "No skills loaded.";
+  let out = `📚 Loaded Skills (${count})\n\n`;
   for (const s of skills) {
     out += `• ${s.name} [${s.source}]\n`;
     if (s.description) {
@@ -220,8 +220,8 @@ export function formatMcpServers(
   servers: McpServerInfo[],
   count: number,
 ): string {
-  if (count === 0) return "暂无已配置的 MCP 服务器。";
-  let out = `🌐 MCP 服务器 (${count})\n\n`;
+  if (count === 0) return "No MCP servers configured.";
+  let out = `🌐 MCP Servers (${count})\n\n`;
   for (const srv of servers) {
     const status = srv.disabled ? "🔴" : "🟢";
     out += `${status} ${srv.name}  [${srv.server_type}] [${srv.source}]\n`;
@@ -233,8 +233,8 @@ export function formatMcpServers(
  * Format a list of installed plugins as plain text.
  */
 export function formatPlugins(plugins: PluginInfo[], count: number): string {
-  if (count === 0) return "暂无已安装的插件。";
-  let out = `🧩 已安装插件 (${count})\n\n`;
+  if (count === 0) return "No plugins installed.";
+  let out = `🧩 Installed Plugins (${count})\n\n`;
   for (const p of plugins) {
     const ver = p.version ? ` v${p.version}` : "";
     const features: string[] = [];
@@ -263,11 +263,11 @@ export function formatCompact(result: CompactResult): string {
       ? ((result.tokens_saved / result.tokens_before) * 100).toFixed(0)
       : "0";
   return (
-    `🗜️ 上下文已压缩\n\n` +
-    `压缩前  ${result.tokens_before.toLocaleString()} tokens\n` +
-    `压缩后  ${result.tokens_after.toLocaleString()} tokens\n` +
-    `节省    ${result.tokens_saved.toLocaleString()} tokens (${pct}%)\n` +
-    `摘要    ${result.summary_tokens.toLocaleString()} tokens`
+    `🗜️ Context Compacted\n\n` +
+    `Before  ${result.tokens_before.toLocaleString()} tokens\n` +
+    `After   ${result.tokens_after.toLocaleString()} tokens\n` +
+    `Saved   ${result.tokens_saved.toLocaleString()} tokens (${pct}%)\n` +
+    `Summary ${result.summary_tokens.toLocaleString()} tokens`
   );
 }
 
@@ -276,17 +276,17 @@ export function formatCompact(result: CompactResult): string {
  */
 export function formatGitStatus(result: GitStatusResult): string {
   const branch = result.branch ?? "(detached)";
-  let out = `📂 Git 状态\n\n分支: ${branch}\n`;
+  let out = `📂 Git Status\n\nBranch: ${branch}\n`;
   if (result.staged_files.length > 0) {
-    out += `\n暂存文件 (${result.staged_files.length}):\n`;
+    out += `\nStaged files (${result.staged_files.length}):\n`;
     for (const f of result.staged_files) out += `  ✅ ${f}\n`;
   }
   if (result.modified_files.length > 0) {
-    out += `\n已修改文件 (${result.modified_files.length}):\n`;
+    out += `\nModified files (${result.modified_files.length}):\n`;
     for (const f of result.modified_files) out += `  ✏️ ${f}\n`;
   }
   if (result.untracked_files.length > 0) {
-    out += `\n未跟踪文件 (${result.untracked_files.length}):\n`;
+    out += `\nUntracked files (${result.untracked_files.length}):\n`;
     for (const f of result.untracked_files) out += `  ❓ ${f}\n`;
   }
   if (
@@ -294,7 +294,7 @@ export function formatGitStatus(result: GitStatusResult): string {
     result.modified_files.length === 0 &&
     result.untracked_files.length === 0
   ) {
-    out += "\n工作区干净，无变更。";
+    out += "\nWorking tree clean — no changes.";
   }
   return out;
 }
@@ -303,7 +303,7 @@ export function formatGitStatus(result: GitStatusResult): string {
  * Format git diff output. Returns friendly message when empty.
  */
 export function formatGitDiff(result: GitDiffResult): string {
-  if (!result.diff || result.diff.trim() === "") return "无变更。";
+  if (!result.diff || result.diff.trim() === "") return "No changes.";
   return `📝 Git Diff\n\n${result.diff}`;
 }
 
@@ -311,7 +311,7 @@ export function formatGitDiff(result: GitDiffResult): string {
  * Format git commit result showing hash and message.
  */
 export function formatGitCommit(result: GitCommitResult): string {
-  return `✅ 提交成功\n\nHash: ${result.hash}\n消息: ${result.message}`;
+  return `✅ Committed\n\nHash: ${result.hash}\nMessage: ${result.message}`;
 }
 
 /**
@@ -319,10 +319,10 @@ export function formatGitCommit(result: GitCommitResult): string {
  */
 export function formatThinkToggle(enabled: boolean, budget?: number): string {
   if (enabled) {
-    const budgetStr = budget != null ? ` (预算: ${budget} tokens)` : "";
-    return `🧠 扩展思考已开启${budgetStr}`;
+    const budgetStr = budget != null ? ` (budget: ${budget} tokens)` : "";
+    return `🧠 Extended thinking enabled${budgetStr}`;
   }
-  return "🧠 扩展思考已关闭";
+  return "🧠 Extended thinking disabled";
 }
 
 /**
@@ -332,15 +332,15 @@ export function formatModelInfo(
   activeModel: string,
   fallbackModels: string[],
 ): string {
-  let out = `🤖 模型配置\n\n当前模型: ${activeModel}\n`;
+  let out = `🤖 Model\n\nCurrent model: ${activeModel}\n`;
   if (fallbackModels.length > 0) {
-    out += `\n回退链:\n`;
-    out += `  0. ${activeModel} (主模型)\n`;
+    out += `\nFallback chain:\n`;
+    out += `  0. ${activeModel} (primary)\n`;
     for (let i = 0; i < fallbackModels.length; i++) {
       out += `  ${i + 1}. ${fallbackModels[i]}\n`;
     }
   } else {
-    out += "\n未配置回退模型。";
+    out += "\nNo fallback models configured.";
   }
   return out;
 }
@@ -349,21 +349,21 @@ export function formatModelInfo(
  * Format model switch confirmation.
  */
 export function formatModelSwitch(model: string): string {
-  return `✅ 已切换到模型: ${model}`;
+  return `✅ Switched to model: ${model}`;
 }
 
 /**
  * Format commit usage hint when no message is provided.
  */
 export function formatCommitUsage(): string {
-  return "用法: /commit <message>";
+  return "Usage: /commit <message>";
 }
 
 /**
  * Format abort confirmation message.
  */
 export function formatAbortConfirm(): string {
-  return "⛔ 当前任务已中止。";
+  return "⛔ Current task aborted.";
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -375,16 +375,16 @@ export function formatAbortConfirm(): string {
  */
 export function formatError(err: unknown): string {
   if (err instanceof Error) {
-    return `❌ 命令失败: ${err.message}`;
+    return `❌ Command failed: ${err.message}`;
   }
-  return `❌ 命令失败: ${String(err)}`;
+  return `❌ Command failed: ${String(err)}`;
 }
 
 /**
  * Format a daemon disconnected warning.
  */
 export function formatDisconnected(): string {
-  return "⚠️ Daemon 连接已断开，请重启网关。";
+  return "⚠️ Daemon connection lost. Please restart the gateway.";
 }
 
 /**
@@ -395,7 +395,7 @@ export function formatHelp(
 ): string {
   // Group commands by category for cleaner display
   const groups: Record<string, string[]> = {
-    "💬 对话": [
+    "💬 Conversation": [
       "/compact",
       "/think",
       "/model",
@@ -404,13 +404,20 @@ export function formatHelp(
       "/export",
       "/abort",
     ],
-    "📂 项目 & Git": ["/projects", "/git", "/diff", "/commit"],
-    "🔧 工具 & 扩展": ["/tools", "/mcp", "/skills", "/plugins"],
-    "⚙️ 自动化": ["/task", "/cron", "/memory"],
-    "🔌 会话": ["/help", "/status", "/start", "/clear", "/quit", "/shutdown"],
+    "📂 Projects & Git": ["/projects", "/git", "/diff", "/commit"],
+    "🔧 Tools & Extensions": ["/tools", "/mcp", "/skills", "/plugins"],
+    "⚙️ Automation": ["/task", "/cron", "/memory"],
+    "🔌 Session": [
+      "/help",
+      "/status",
+      "/start",
+      "/clear",
+      "/quit",
+      "/shutdown",
+    ],
   };
 
-  let out = "📖 可用命令\n\n";
+  let out = "📖 Available Commands\n\n";
   for (const [group, cmds] of Object.entries(groups)) {
     out += `${group}\n`;
     for (const cmd of cmds) {
@@ -448,8 +455,8 @@ export function formatStatus(
   metrics?: { reconnectCount: number; lastConnectAt: Date | null },
 ): string {
   const sessionLine = sessionState.resumed
-    ? `🔄 已恢复会话 (${sessionState.messageCount} 条消息)`
-    : "🆕 新会话";
+    ? `🔄 Resumed session (${sessionState.messageCount} messages)`
+    : "🆕 New session";
   return (
     `🐾 BaoClaw Status\n\n` +
     `Daemon   pid=${daemonInfo.pid}\n` +
@@ -477,7 +484,7 @@ export function formatStart(
     `Your chat ID: ${chatId}\n\n` +
     `Send me any message to chat with BaoClaw.`;
   if (sessionState.resumed) {
-    msg += `\n\n🔄 已恢复之前的对话 (${sessionState.messageCount} 条消息)`;
+    msg += `\n\n🔄 Resumed previous conversation (${sessionState.messageCount} messages)`;
   }
   return msg;
 }
@@ -494,14 +501,14 @@ export function formatSearchResults(
   results: SearchResult[],
   query: string,
 ): string {
-  if (!results.length) return "未找到匹配内容";
-  let out = `🔍 搜索结果: "${query}" (${results.length})\n\n`;
+  if (!results.length) return "No matching results found.";
+  let out = `🔍 Search results: "${query}" (${results.length})\n\n`;
   for (const r of results) {
     const ts = r.timestamp?.slice(0, 19).replace("T", " ") || "";
-    const role = r.entry_type === "UserMessage" ? "用户" : "助手";
+    const role = r.entry_type === "UserMessage" ? "User" : "Assistant";
     out += `[${ts}] ${role}\n${r.snippet || r.context || ""}\n\n`;
     if (out.length > 3800) {
-      out += "…(更多结果已截断)";
+      out += "…(more results truncated)";
       break;
     }
   }

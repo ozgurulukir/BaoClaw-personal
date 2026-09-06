@@ -10,6 +10,8 @@ use std::sync::Arc;
 use tokio::sync::{broadcast, Mutex};
 
 const CRON_FILE: &str = "cron.json";
+/// How often the scheduler wakes up to check whether jobs are due.
+const CRON_TICK_INTERVAL_SECS: u64 = 30;
 
 // ── Data structures ──
 
@@ -220,7 +222,7 @@ impl CronManager {
             std::collections::HashMap::new();
 
         loop {
-            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+            tokio::time::sleep(std::time::Duration::from_secs(CRON_TICK_INTERVAL_SECS)).await;
 
             let jobs = self.jobs.lock().await.clone();
             let now = chrono::Utc::now();

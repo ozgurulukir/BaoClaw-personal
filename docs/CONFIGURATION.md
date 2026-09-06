@@ -116,6 +116,7 @@ Environment variables:
 - `ANTHROPIC_MODEL` — overrides the active model name
 - `ANTHROPIC_BASE_URL` — used as the base URL when `base_url` / `openai_base_url` is not set in config
 - `BRAVE_SEARCH_API_KEY` — for WebSearch tool
+- `BAOCLAW_FEISHU_BOT_OPEN_ID` — Feishu gateway: bot identity used to ignore message echoes (per-deployment override)
 
 ### `<project>/.baoclaw/BAOCLAW.md` — Project Instructions
 

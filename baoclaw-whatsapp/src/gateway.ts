@@ -56,6 +56,8 @@ import { MediaHandler, isImageFile } from "./media.js";
 const logger = createLogger("whatsapp");
 
 const SHUTDOWN_TIMEOUT_MS = 10_000;
+/** Characters of the raw tool input shown when no description is available. */
+const TOOL_INPUT_PREVIEW_CHARS = 200;
 
 export interface GatewayOptions {
   configPath?: string;
@@ -579,7 +581,8 @@ export class WhatsAppGateway {
             // description — render a truncated preview so the user isn't
             // approving blind.
             const desc =
-              pr.description || JSON.stringify(pr.input ?? {}).slice(0, 200);
+              pr.description ||
+              JSON.stringify(pr.input ?? {}).slice(0, TOOL_INPUT_PREVIEW_CHARS);
             const text = this.permissionManager.formatPermissionRequest(
               pr.tool_use_id,
               pr.tool_name,

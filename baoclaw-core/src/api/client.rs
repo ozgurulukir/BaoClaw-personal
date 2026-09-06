@@ -314,16 +314,20 @@ const DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
 const DEFAULT_MAX_RETRIES: u32 = 3;
 const API_VERSION: &str = "2023-06-01";
 
+// Long timeouts for streaming — SSE connections can stay open for minutes.
+const API_CONNECT_TIMEOUT_SECS: u64 = 30;
+const API_POOL_IDLE_TIMEOUT_SECS: u64 = 600;
+const API_TCP_KEEPALIVE_SECS: u64 = 30;
+
 impl AnthropicClient {
     /// Creates a new AnthropicClient with the given configuration.
     /// The HTTP client supports HTTP/2 with automatic gzip/brotli/deflate decompression.
     /// Set BAOCLAW_HTTP1_ONLY=1 to force HTTP/1.1 (for third-party gateways with HTTP/2 issues).
     pub fn new(config: ApiClientConfig) -> Self {
         let mut builder = reqwest::Client::builder()
-            // Long timeouts for streaming — SSE connections can stay open for minutes
-            .connect_timeout(std::time::Duration::from_secs(30))
-            .pool_idle_timeout(std::time::Duration::from_secs(600))
-            .tcp_keepalive(std::time::Duration::from_secs(30))
+            .connect_timeout(std::time::Duration::from_secs(API_CONNECT_TIMEOUT_SECS))
+            .pool_idle_timeout(std::time::Duration::from_secs(API_POOL_IDLE_TIMEOUT_SECS))
+            .tcp_keepalive(std::time::Duration::from_secs(API_TCP_KEEPALIVE_SECS))
             // Explicitly request identity encoding headers — decompression is automatic
             // via the gzip/brotli/deflate features
             .user_agent("baoclaw/1.0.0");

@@ -1,5 +1,5 @@
 /**
- * BaoClaw 对话导出 — Telegram gateway re-export shim.
+ * BaoClaw conversation export — Telegram gateway re-export shim.
  *
  * The canonical implementation lives in baoclaw-web/src/export.ts (kept in
  * sync with baoclaw-core/src/engine/export.rs). Make all changes there; this

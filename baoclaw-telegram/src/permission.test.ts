@@ -35,7 +35,7 @@ test("formatPermissionRequest includes tool name and escaped preview", () => {
   const text = formatPermissionRequest("Bash", '{"command":"echo <hi>"}');
   assert.match(text, /Bash/);
   assert.match(text, /&lt;hi&gt;/);
-  assert.match(text, /60秒/);
+  assert.match(text, /auto-denied after 60s/);
 });
 
 test("buildPermissionKeyboard carries decision-only callback_data", () => {

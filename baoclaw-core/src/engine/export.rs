@@ -48,9 +48,9 @@ pub fn format_transcript_to_markdown(entries: &[ExportEntry]) -> String {
     let mut md = String::new();
 
     // Header
-    md.push_str("# BaoClaw 对话导出\n\n");
-    md.push_str(&format!("**时间**: {}\n", export_time));
-    md.push_str(&format!("**消息数**: {}\n", message_count));
+    md.push_str("# BaoClaw Conversation Export\n\n");
+    md.push_str(&format!("**Time**: {}\n", export_time));
+    md.push_str(&format!("**Messages**: {}\n", message_count));
     md.push_str("\n---\n\n");
 
     for entry in entries {
@@ -61,12 +61,12 @@ pub fn format_transcript_to_markdown(entries: &[ExportEntry]) -> String {
 
         match entry.role.as_str() {
             "user" => {
-                md.push_str(&format!("## 用户 ({})\n\n", entry.timestamp));
+                md.push_str(&format!("## User ({})\n\n", entry.timestamp));
                 md.push_str(&entry.text);
                 md.push_str("\n\n");
             }
             "assistant" => {
-                md.push_str(&format!("## 助手 ({})\n\n", entry.timestamp));
+                md.push_str(&format!("## Assistant ({})\n\n", entry.timestamp));
                 if !entry.text.is_empty() {
                     md.push_str(&entry.text);
                     md.push_str("\n\n");
@@ -75,7 +75,7 @@ pub fn format_transcript_to_markdown(entries: &[ExportEntry]) -> String {
                 // Render tool calls if present
                 if let Some(tools) = &entry.tools {
                     for tool in tools {
-                        md.push_str(&format!("### 工具调用: {}\n\n", tool.name));
+                        md.push_str(&format!("### Tool Call: {}\n\n", tool.name));
                         if let Some(detail) = &tool.detail {
                             md.push_str(&format!("{}\n\n", detail));
                         }
@@ -99,14 +99,14 @@ pub fn format_transcript_to_markdown(entries: &[ExportEntry]) -> String {
                                     }
                                 }
                             };
-                            md.push_str(&format!("**结果**: {}\n\n", result_str));
+                            md.push_str(&format!("**Result**: {}\n\n", result_str));
                         }
                     }
                 }
             }
             _ => {
                 // System messages
-                md.push_str(&format!("## 系统 ({})\n\n", entry.timestamp));
+                md.push_str(&format!("## System ({})\n\n", entry.timestamp));
                 md.push_str(&entry.text);
                 md.push_str("\n\n");
             }
@@ -132,8 +132,8 @@ mod tests {
     fn test_format_empty_entries() {
         let entries: Vec<ExportEntry> = vec![];
         let md = format_transcript_to_markdown(&entries);
-        assert!(md.contains("# BaoClaw 对话导出"));
-        assert!(md.contains("**消息数**: 0"));
+        assert!(md.contains("# BaoClaw Conversation Export"));
+        assert!(md.contains("**Messages**: 0"));
     }
 
     #[test]
@@ -159,10 +159,10 @@ mod tests {
             },
         ];
         let md = format_transcript_to_markdown(&entries);
-        assert!(md.contains("**消息数**: 2"));
-        assert!(md.contains("## 用户 (2024-01-15 10:30:00)"));
+        assert!(md.contains("**Messages**: 2"));
+        assert!(md.contains("## User (2024-01-15 10:30:00)"));
         assert!(md.contains("你好"));
-        assert!(md.contains("## 助手 (2024-01-15 10:30:01)"));
+        assert!(md.contains("## Assistant (2024-01-15 10:30:01)"));
         assert!(md.contains("你好！有什么可以帮助你的？"));
     }
 
@@ -183,9 +183,9 @@ mod tests {
             cost_usd: None,
         }];
         let md = format_transcript_to_markdown(&entries);
-        assert!(md.contains("### 工具调用: Bash"));
+        assert!(md.contains("### Tool Call: Bash"));
         assert!(md.contains("command: ls -la"));
-        assert!(md.contains("**结果**: file.txt\ndir/"));
+        assert!(md.contains("**Result**: file.txt\ndir/"));
     }
 
     #[test]
@@ -212,7 +212,7 @@ mod tests {
         ];
         let md = format_transcript_to_markdown(&entries);
         // Tool result should be skipped, only real message counted
-        assert!(md.contains("**消息数**: 1"));
+        assert!(md.contains("**Messages**: 1"));
         assert!(!md.contains("tool result content"));
         assert!(md.contains("real message"));
     }

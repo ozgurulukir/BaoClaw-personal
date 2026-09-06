@@ -13,6 +13,11 @@ use super::client::{ApiClientConfig, ApiError, ApiStreamEvent, CreateMessageRequ
 
 const DEFAULT_OPENAI_URL: &str = "https://api.openai.com";
 
+/// TCP connect timeout — fail fast when the endpoint is unreachable.
+const OPENAI_CONNECT_TIMEOUT_SECS: u64 = 30;
+/// Idle keep-alive window before pooled connections are dropped.
+const OPENAI_POOL_IDLE_TIMEOUT_SECS: u64 = 90;
+
 /// OpenAI-compatible API client.
 pub struct OpenAiClient {
     http_client: reqwest::Client,
@@ -23,8 +28,10 @@ pub struct OpenAiClient {
 impl OpenAiClient {
     pub fn new(config: ApiClientConfig) -> Self {
         let mut builder = reqwest::Client::builder()
-            .connect_timeout(std::time::Duration::from_secs(30))
-            .pool_idle_timeout(std::time::Duration::from_secs(90))
+            .connect_timeout(std::time::Duration::from_secs(OPENAI_CONNECT_TIMEOUT_SECS))
+            .pool_idle_timeout(std::time::Duration::from_secs(
+                OPENAI_POOL_IDLE_TIMEOUT_SECS,
+            ))
             .user_agent("baoclaw/1.0.0");
         if std::env::var("BAOCLAW_HTTP1_ONLY").ok().as_deref() == Some("1") {
             builder = builder.http1_only();

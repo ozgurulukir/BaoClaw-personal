@@ -15,8 +15,8 @@ describe("export module (shared re-export)", () => {
       { role: "user", text: "ping", timestamp: "2026-01-01 10:00:00" },
     ];
     const markdown = formatTranscriptToMarkdown(entries, { sessionId: "s1" });
-    assert.match(markdown, /## 用户 \(2026-01-01 10:00:00\)/);
-    assert.match(markdown, /\*\*会话\*\*: s1/);
+    assert.match(markdown, /## User \(2026-01-01 10:00:00\)/);
+    assert.match(markdown, /\*\*Session\*\*: s1/);
 
     const pdfBuffer = await markdownToPdf(markdown);
     assert.ok(Buffer.isBuffer(pdfBuffer));

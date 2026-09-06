@@ -3,6 +3,11 @@ use serde_json::{json, Value};
 
 use crate::tools::trait_def::*;
 
+/// Timeout for the image-edit API call (generation is slow).
+const IMAGE_API_TIMEOUT_SECS: u64 = 120;
+/// Timeout for downloading the generated image bytes.
+const IMAGE_DOWNLOAD_TIMEOUT_SECS: u64 = 60;
+
 /// Image editing tool — combines vision understanding with CogView-4 regeneration
 pub struct ImageEditTool {
     http_client: reqwest::Client,
@@ -121,7 +126,7 @@ impl Tool for ImageEditTool {
             .header("Authorization", format!("Bearer {}", api_key))
             .header("Content-Type", "application/json")
             .json(&body)
-            .timeout(std::time::Duration::from_secs(120))
+            .timeout(std::time::Duration::from_secs(IMAGE_API_TIMEOUT_SECS))
             .send()
             .await
             .map_err(|e| ToolError::ExecutionFailed(format!("API request failed: {}", e)))?;
@@ -153,7 +158,7 @@ impl Tool for ImageEditTool {
         let image_response = self
             .http_client
             .get(image_url)
-            .timeout(std::time::Duration::from_secs(60))
+            .timeout(std::time::Duration::from_secs(IMAGE_DOWNLOAD_TIMEOUT_SECS))
             .send()
             .await
             .map_err(|e| ToolError::ExecutionFailed(format!("Failed to download image: {}", e)))?;

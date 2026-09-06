@@ -12,6 +12,10 @@ use std::time::{Duration, Instant};
 use super::config::SandboxConfigFile;
 use super::profile::SandboxProfile;
 
+/// Default lifetime for a temporary escalation grant when the caller does not
+/// supply an explicit duration.
+const DEFAULT_ESCALATION_TTL_SECS: u64 = 3600;
+
 /// Escalation grant record.
 #[derive(Clone, Debug)]
 struct EscalationGrant {
@@ -302,9 +306,9 @@ impl PermissionManager {
                 target: request.target.clone(),
                 profile: actual_profile.clone(),
                 granted_at: Instant::now(),
-                expires_at: duration
-                    .map(|d| Instant::now() + d)
-                    .or(Some(Instant::now() + Duration::from_secs(3600))),
+                expires_at: duration.map(|d| Instant::now() + d).or(Some(
+                    Instant::now() + Duration::from_secs(DEFAULT_ESCALATION_TTL_SECS),
+                )),
             };
 
             if let Ok(mut grants) = self.temp_grants.lock() {

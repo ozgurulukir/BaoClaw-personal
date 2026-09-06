@@ -4,6 +4,13 @@ use serde_json::{json, Value};
 
 use crate::tools::trait_def::*;
 
+/// Overall HTTP request timeout for search queries.
+const SEARCH_TIMEOUT_SECS: u64 = 30;
+/// TCP connect timeout — fail fast when the network is unreachable.
+const SEARCH_CONNECT_TIMEOUT_SECS: u64 = 10;
+/// Idle keep-alive window before pooled connections are dropped.
+const SEARCH_POOL_IDLE_TIMEOUT_SECS: u64 = 90;
+
 /// Web search tool — searches the web via Brave Search API
 pub struct WebSearchTool {
     http_client: reqwest::Client,
@@ -20,9 +27,11 @@ impl WebSearchTool {
     pub fn new() -> Self {
         let mut builder = reqwest::Client::builder()
             .user_agent("BaoClaw/1.0")
-            .timeout(std::time::Duration::from_secs(30))
-            .connect_timeout(std::time::Duration::from_secs(10))
-            .pool_idle_timeout(std::time::Duration::from_secs(90));
+            .timeout(std::time::Duration::from_secs(SEARCH_TIMEOUT_SECS))
+            .connect_timeout(std::time::Duration::from_secs(SEARCH_CONNECT_TIMEOUT_SECS))
+            .pool_idle_timeout(std::time::Duration::from_secs(
+                SEARCH_POOL_IDLE_TIMEOUT_SECS,
+            ));
 
         // Set BAOCLAW_HTTP1_ONLY=1 to force HTTP/1.1 (for networks with HTTP/2 issues)
         if std::env::var("BAOCLAW_HTTP1_ONLY").is_ok() {

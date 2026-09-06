@@ -57,6 +57,10 @@ process.on("unhandledRejection", (err) => {
 
 const PID_FILE = path.join(os.homedir(), ".baoclaw", "telegram-gateway.pid");
 const MAX_TG_MSG = 4096;
+/** Characters of thinking text / tool input shown as a preview. */
+const PREVIEW_CHARS = 200;
+/** Characters of tool output kept in error notifications. */
+const TOOL_OUTPUT_PREVIEW_CHARS = 500;
 
 // ═══════════════════════════════════════════════════════════════
 // Main gateway — bot construction, event wiring, shutdown
@@ -231,11 +235,13 @@ async function main() {
     } catch {}
     const label =
       decision === "allow"
-        ? "✅ 已允许"
+        ? "✅ Allowed"
         : decision === "allow_always"
-          ? "🔁 已允许并记住此工具"
-          : "❌ 已拒绝";
-    const stale = delivered ? "" : "\n\n<i>(请求已在别处处理)</i>";
+          ? "🔁 Always allowed this tool"
+          : "❌ Denied";
+    const stale = delivered
+      ? ""
+      : "\n\n<i>(request already handled elsewhere)</i>";
     if (pending.message_id !== undefined) {
       // Replacing the text also drops the inline keyboard.
       bot.api
@@ -265,8 +271,8 @@ async function main() {
         if (thinkingAcc && thinkingAcc.length > 0) {
           const thinkLen = Math.round(thinkingAcc.length / 4);
           const preview =
-            thinkingAcc.length > 200
-              ? thinkingAcc.slice(0, 200) + "…"
+            thinkingAcc.length > PREVIEW_CHARS
+              ? thinkingAcc.slice(0, PREVIEW_CHARS) + "…"
               : thinkingAcc;
           try {
             await sendMessage(
@@ -304,7 +310,7 @@ async function main() {
           tool_name: string;
           input?: unknown;
         };
-        const preview = JSON.stringify(pr.input ?? {}).slice(0, 200);
+        const preview = JSON.stringify(pr.input ?? {}).slice(0, PREVIEW_CHARS);
         try {
           const sent = await sendMessage(
             chatId,
@@ -334,7 +340,10 @@ async function main() {
               } catch {}
               if (delivered && reason === "timeout") {
                 try {
-                  await sendMessage(cid, "⏰ 权限请求已超时，自动拒绝。");
+                  await sendMessage(
+                    cid,
+                    "⏰ Permission request timed out and was auto-denied.",
+                  );
                 } catch {}
               }
             },
@@ -351,7 +360,9 @@ async function main() {
               ? tr.output
               : JSON.stringify(tr.output);
           const truncated =
-            output.length > 500 ? output.slice(0, 500) + "..." : output;
+            output.length > TOOL_OUTPUT_PREVIEW_CHARS
+              ? output.slice(0, TOOL_OUTPUT_PREVIEW_CHARS) + "..."
+              : output;
           try {
             await sendMessage(chatId, `❌ Tool error: ${truncated}`);
           } catch {}
@@ -419,7 +430,9 @@ async function main() {
             fs.writeFileSync(tmpFile, img.buffer);
             const cap =
               caption ||
-              (index === 0 ? "📸 图片已生成" : `📸 图片已生成 (${index + 1})`);
+              (index === 0
+                ? "📸 Image generated"
+                : `📸 Image generated (${index + 1})`);
             await sendPhoto(chatId, tmpFile, { caption: cap });
             try {
               fs.unlinkSync(tmpFile);
@@ -445,7 +458,7 @@ async function main() {
               const buffer = Buffer.from(parsed.source.data, "base64");
               const caption = parsed.prompt
                 ? `📸 ${parsed.prompt}`
-                : "📸 图片已生成";
+                : "📸 Image generated";
               await sendToolResultImage(
                 chatId,
                 { buffer, mediaType: ext },
@@ -492,7 +505,9 @@ async function main() {
                   `baoclaw-img-${Date.now()}.png`,
                 );
                 fs.writeFileSync(tmpFile, Buffer.from(b64Match[1], "base64"));
-                await sendPhoto(chatId, tmpFile, { caption: "📸 图片已生成" });
+                await sendPhoto(chatId, tmpFile, {
+                  caption: "📸 Image generated",
+                });
                 try {
                   fs.unlinkSync(tmpFile);
                 } catch {}
@@ -632,7 +647,7 @@ async function main() {
     if (activeChatId !== null && activeChatId !== chatId) {
       await sendMessage(
         chatId,
-        "⏳ 另一个会话正在处理中，请等当前请求完成后再试。",
+        "⏳ Another session is being processed. Please wait for the current request to finish and try again.",
       );
       return;
     }
@@ -661,7 +676,7 @@ async function main() {
         try {
           await sendMessage(
             chatId,
-            "⏳ 会话正忙，另一个客户端正在提交消息，请稍后再试。",
+            "⏳ Session busy — another client is submitting a message. Please try again later.",
           );
         } catch {}
       } else {
@@ -711,10 +726,10 @@ async function main() {
       const doc = msg.document;
       const fileName = doc.file_name || "unknown";
       const mimeType = doc.mime_type || "application/octet-stream";
-      const caption = msg.caption || `请分析这个文件: ${fileName}`;
+      const caption = msg.caption || `Please analyze this file: ${fileName}`;
 
       try {
-        await sendMessage(chatId, `📄 正在处理文件: ${fileName}...`);
+        await sendMessage(chatId, `📄 Processing file: ${fileName}...`);
         const fileLink = await getFileLink(doc.file_id);
         const resp = await fetch(fileLink);
         const buffer = Buffer.from(await resp.arrayBuffer());
@@ -739,7 +754,10 @@ async function main() {
           return;
         }
         if (!parsed.text.trim()) {
-          await sendMessage(chatId, "⚠️ 文件内容为空或无法提取文本。");
+          await sendMessage(
+            chatId,
+            "⚠️ File content is empty or no text could be extracted.",
+          );
           return;
         }
 
@@ -749,10 +767,10 @@ async function main() {
         if (docText.length > maxChars) {
           docText =
             docText.slice(0, maxChars) +
-            `\n\n[... 文档已截断，共 ${parsed.text.length} 字符]`;
+            `\n\n[... document truncated, ${parsed.text.length} characters total]`;
         }
 
-        const prompt = `[文件: ${fileName}${parsed.pageCount ? ` (${parsed.pageCount}页)` : ""}]\n\n${docText}\n\n---\n${caption}`;
+        const prompt = `[File: ${fileName}${parsed.pageCount ? ` (${parsed.pageCount} pages)` : ""}]\n\n${docText}\n\n---\n${caption}`;
         chatQueue.enqueue(chatId, prompt);
         if (!chatQueue.isProcessing(chatId)) {
           processQueue(chatId);
@@ -760,7 +778,10 @@ async function main() {
       } catch (err: any) {
         logger.error(`Document processing error: ${err.message}`);
         try {
-          await sendMessage(chatId, `❌ 文件处理失败: ${err.message}`);
+          await sendMessage(
+            chatId,
+            `❌ File processing failed: ${err.message}`,
+          );
         } catch {}
       }
       return;
@@ -769,10 +790,10 @@ async function main() {
     // ── Handle photo uploads ──
     if (msg.photo && msg.photo.length > 0) {
       const photo = msg.photo[msg.photo.length - 1]; // highest resolution
-      const caption = msg.caption || "请描述这张图片";
+      const caption = msg.caption || "Please describe this image";
 
       try {
-        await sendMessage(chatId, "🖼️ 正在处理图片...");
+        await sendMessage(chatId, "🖼️ Processing image...");
         const fileLink = await getFileLink(photo.file_id);
         const resp = await fetch(fileLink);
         const buffer = Buffer.from(await resp.arrayBuffer());
@@ -797,7 +818,10 @@ async function main() {
       } catch (err: any) {
         logger.error(`Photo processing error: ${err.message}`);
         try {
-          await sendMessage(chatId, `❌ 图片处理失败: ${err.message}`);
+          await sendMessage(
+            chatId,
+            `❌ Image processing failed: ${err.message}`,
+          );
         } catch {}
       }
       return;
@@ -815,7 +839,9 @@ async function main() {
         const outcome = await applyPermissionDecision(chatId, decision);
         await sendMessage(
           chatId,
-          outcome === "applied" ? "✅ 已处理。" : "⚠️ 该请求已过期。",
+          outcome === "applied"
+            ? "✅ Processed."
+            : "⚠️ This request has expired.",
         );
         return;
       }
@@ -868,27 +894,27 @@ async function main() {
       const decision = cq?.data ? decisions[cq.data] : undefined;
       const chatId = cq?.message?.chat?.id;
       if (!decision || chatId === undefined) {
-        await ctx.answerCallbackQuery({ text: "无效请求" });
+        await ctx.answerCallbackQuery({ text: "Invalid request" });
         return;
       }
       // Allowlist keys on the CHAT id (same policy as text messages) — never
       // on cq.from.id, which in groups is a member, not the chat.
       if (!isAllowedChat(chatId, config.allowedChatIds)) {
-        await ctx.answerCallbackQuery({ text: "未授权的会话" });
+        await ctx.answerCallbackQuery({ text: "Unauthorized chat" });
         return;
       }
       const outcome = await applyPermissionDecision(chatId, decision);
       await ctx.answerCallbackQuery({
         text:
           outcome === "applied"
-            ? "已处理"
+            ? "Processed"
             : outcome === "stale"
-              ? "此请求已过期"
-              : "无待处理请求",
+              ? "This request has expired"
+              : "No pending request",
       });
     } catch {
       try {
-        await ctx.answerCallbackQuery({ text: "处理失败" });
+        await ctx.answerCallbackQuery({ text: "Failed to process" });
       } catch {}
     }
   });

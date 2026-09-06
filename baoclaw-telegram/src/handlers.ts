@@ -160,7 +160,7 @@ export function createCommandHandlers(
     } catch (err: any) {
       const msg = err?.message || "";
       if (msg.includes("session busy") || msg.includes("mutate busy")) {
-        return "⏳ 会话正忙，无法执行此操作。";
+        return "⏳ Session busy — unable to perform this operation.";
       }
       return formatError(err);
     }
@@ -200,7 +200,7 @@ export function createCommandHandlers(
     } catch (err: any) {
       const msg = err?.message || "";
       if (msg.includes("session busy") || msg.includes("mutate busy")) {
-        return "⏳ 会话正忙，无法执行此操作。";
+        return "⏳ Session busy — unable to perform this operation.";
       }
       return formatError(err);
     }
@@ -277,7 +277,7 @@ export function createCommandHandlers(
     try {
       await ipcClient.request("shutdown");
       // Daemon will exit, which triggers our onDisconnect handler
-      return "🛑 Daemon 正在关闭...";
+      return "🛑 Daemon is shutting down...";
     } catch (err) {
       return formatError(err);
     }
@@ -289,7 +289,7 @@ export function createCommandHandlers(
       logger.info("Quit requested via Telegram");
       quitGateway();
     }, 500);
-    return "👋 Telegram Gateway 正在断开...（Daemon 保持运行）";
+    return "👋 Telegram Gateway is disconnecting... (daemon keeps running)";
   }
 
   async function handleMemory(args: string): Promise<string> {
@@ -304,8 +304,8 @@ export function createCommandHandlers(
           memories: any[];
           count: number;
         }>("memoryList");
-        if (result.count === 0) return "暂无长期记忆。";
-        let out = `🧠 长期记忆 (${result.count})\n\n`;
+        if (result.count === 0) return "No long-term memories.";
+        let out = `🧠 Long-term Memory (${result.count})\n\n`;
         for (const m of result.memories) {
           out += `• [${m.id}] [${m.category}] ${m.content}\n`;
         }
@@ -321,26 +321,28 @@ export function createCommandHandlers(
           content = parts.slice(2).join(" ");
         }
         if (!content)
-          return "用法: /memory add [fact|preference|decision] <内容>";
+          return "Usage: /memory add [fact|preference|decision] <content>";
         const result = await ipcClient.request<{ memory: any }>("memoryAdd", {
           content,
           category,
         });
-        return `✅ 记忆已添加 [${result.memory.id}] ${result.memory.content}`;
+        return `✅ Memory added [${result.memory.id}] ${result.memory.content}`;
       } else if (subCmd === "delete" || subCmd === "del" || subCmd === "rm") {
-        if (!rest) return "用法: /memory delete <id>";
+        if (!rest) return "Usage: /memory delete <id>";
         const result = await ipcClient.request<{ deleted: boolean }>(
           "memoryDelete",
           { id: rest },
         );
-        return result.deleted ? "✅ 记忆已删除" : `❌ 未找到记忆: ${rest}`;
+        return result.deleted
+          ? "✅ Memory deleted"
+          : `❌ Memory not found: ${rest}`;
       } else if (subCmd === "clear") {
         const result = await ipcClient.request<{ cleared: number }>(
           "memoryClear",
         );
-        return `✅ 已清除 ${result.cleared} 条记忆`;
+        return `✅ Cleared ${result.cleared} memories`;
       } else {
-        return "🧠 记忆命令\n\n/memory list — 列出所有记忆\n/memory add [分类] <内容> — 添加记忆\n/memory delete <id> — 删除记忆\n/memory clear — 清除所有记忆";
+        return "🧠 Memory commands\n\n/memory list — list all memories\n/memory add [category] <content> — add a memory\n/memory delete <id> — delete a memory\n/memory clear — clear all memories";
       }
     } catch (err) {
       return formatError(err);
@@ -356,8 +358,8 @@ export function createCommandHandlers(
         count: number;
         total: number;
       }>("talkTail", { count });
-      if (result.count === 0) return "暂无对话记录。";
-      let out = `📜 最近对话 (${result.count}/${result.total})\n\n`;
+      if (result.count === 0) return "No conversation history.";
+      let out = `📜 Recent conversation (${result.count}/${result.total})\n\n`;
       for (const m of result.messages) {
         const ts = m.timestamp ? m.timestamp.slice(11, 19) : "";
         if (m.role === "user") {
@@ -384,7 +386,7 @@ export function createCommandHandlers(
         count: number;
         total: number;
       }>("talkTail", { count: 9999 });
-      if (result.count === 0) return "当前会话无对话记录";
+      if (result.count === 0) return "No conversation history in this session";
 
       const entries = result.messages.map((m: any) => ({
         role: m.role as "user" | "assistant",
@@ -411,7 +413,9 @@ export function createCommandHandlers(
 
       try {
         await sendDocument(chatId, filepath, {
-          caption: isPdf ? "📄 对话导出 (PDF)" : "📄 对话导出",
+          caption: isPdf
+            ? "📄 Conversation Export (PDF)"
+            : "📄 Conversation Export",
         });
       } finally {
         try {
@@ -426,7 +430,7 @@ export function createCommandHandlers(
   }
 
   async function handleSearch(args: string): Promise<string> {
-    if (!args.trim()) return "用法: /search <关键词>";
+    if (!args.trim()) return "Usage: /search <query>";
     if (!ipcClient.connected) return formatDisconnected();
     try {
       const result = await ipcClient.request<{ results: SearchResult[] }>(
@@ -450,7 +454,7 @@ export function createCommandHandlers(
         const result = await ipcClient.request<{ specs: any[] }>("specList");
         const specs = result.specs || [];
         if (specs.length === 0)
-          return "暂无 Spec。使用 /spec new <feature-name> 创建。";
+          return "No specs yet. Use /spec new <feature-name> to create one.";
         let out = `📋 Specs (${specs.length})\n\n`;
         for (const s of specs) {
           const progress = s.task_progress
@@ -461,40 +465,40 @@ export function createCommandHandlers(
         return out;
       } else if (subCmd === "new") {
         if (!featureName)
-          return "用法: /spec new <feature-name> [requirements|design]";
+          return "Usage: /spec new <feature-name> [requirements|design]";
         const workflow = parts[2] || "requirements";
         const result = await ipcClient.request<any>("specNew", {
           feature_name: featureName,
           workflow,
         });
-        return `✅ Spec "${featureName}" 已创建 (${workflow})`;
+        return `✅ Spec "${featureName}" created (${workflow})`;
       } else if (subCmd === "show") {
-        if (!featureName) return "用法: /spec show <feature-name>";
+        if (!featureName) return "Usage: /spec show <feature-name>";
         const result = await ipcClient.request<any>("specShow", {
           feature_name: featureName,
         });
         const progress = result.task_progress
-          ? `\n进度: ${result.task_progress.completed}/${result.task_progress.total}`
+          ? `\nProgress: ${result.task_progress.completed}/${result.task_progress.total}`
           : "";
-        return `📄 ${result.feature_name}\n阶段: ${result.phase}\n类型: ${result.spec_type}${progress}`;
+        return `📄 ${result.feature_name}\nPhase: ${result.phase}\nType: ${result.spec_type}${progress}`;
       } else if (subCmd === "status") {
-        if (!featureName) return "用法: /spec status <feature-name>";
+        if (!featureName) return "Usage: /spec status <feature-name>";
         const result = await ipcClient.request<any>("specStatus", {
           feature_name: featureName,
         });
-        return `📊 ${featureName}\n总计: ${result.total} | 完成: ${result.completed} | 进行中: ${result.in_progress}`;
+        return `📊 ${featureName}\nTotal: ${result.total} | Completed: ${result.completed} | In progress: ${result.in_progress}`;
       } else if (subCmd === "run") {
-        if (!featureName) return "用法: /spec run <feature-name> [task-id]";
+        if (!featureName) return "Usage: /spec run <feature-name> [task-id]";
         const taskId = parts[2] || undefined;
         const result = await ipcClient.request<any>("specRun", {
           feature_name: featureName,
           task_id: taskId,
         });
-        if (result.status === "all_complete") return "✅ 所有任务已完成";
-        return `▶️ 准备执行: [${result.task_id}] ${result.task_description}`;
+        if (result.status === "all_complete") return "✅ All tasks completed";
+        return `▶️ Ready to run: [${result.task_id}] ${result.task_description}`;
       } else if (subCmd === "edit") {
         if (!featureName)
-          return "用法: /spec edit <feature-name> [requirements|design|tasks]";
+          return "Usage: /spec edit <feature-name> [requirements|design|tasks]";
         const phase = parts[2] || "requirements";
         const result = await ipcClient.request<any>("specEdit", {
           feature_name: featureName,
@@ -502,11 +506,11 @@ export function createCommandHandlers(
         });
         const content = result.content || "";
         if (content.length > 4000) {
-          return content.slice(0, 4000) + "\n\n...[内容过长，已截断]";
+          return content.slice(0, 4000) + "\n\n...[message truncated]";
         }
         return content;
       } else {
-        return "用法: /spec [list|new|show|status|run|edit] <feature-name>";
+        return "Usage: /spec [list|new|show|status|run|edit] <feature-name>";
       }
     } catch (err) {
       return formatError(err);
@@ -524,11 +528,12 @@ export function createCommandHandlers(
         const result = await ipcClient.request<{ jobs: any[]; count: number }>(
           "cronList",
         );
-        if (result.count === 0) return "暂无定时任务。使用 /cron add 创建。";
-        let out = `⏰ 定时任务 (${result.count})\n\n`;
+        if (result.count === 0)
+          return "No cron jobs. Use /cron add to create one.";
+        let out = `⏰ Cron Jobs (${result.count})\n\n`;
         for (const j of result.jobs) {
           const status = j.enabled ? "✅" : "⏸️";
-          const last = j.last_run ? j.last_run.slice(0, 19) : "未运行";
+          const last = j.last_run ? j.last_run.slice(0, 19) : "never run";
           const prompt =
             j.prompt.length > 50 ? j.prompt.slice(0, 50) + "…" : j.prompt;
           out += `${status} [${j.id}] ${j.name}  ${j.schedule}\n`;
@@ -538,31 +543,31 @@ export function createCommandHandlers(
       } else if (subCmd === "add") {
         const match = args.match(/add\s+"([^"]+)"\s+"([^"]+)"\s+(.+)/);
         if (!match)
-          return '用法: /cron add "任务名" "every 1h" 提示词\n\n支持: every 30m, daily 09:00, weekly mon 09:00';
+          return 'Usage: /cron add "name" "every 1h" prompt\n\nSupported: every 30m, daily 09:00, weekly mon 09:00';
         const result = await ipcClient.request<{ job: any }>("cronAdd", {
           name: match[1],
           schedule: match[2],
           prompt: match[3],
         });
-        return `✅ 定时任务已创建 [${result.job.id}] ${result.job.name} (${result.job.schedule})`;
+        return `✅ Cron job created [${result.job.id}] ${result.job.name} (${result.job.schedule})`;
       } else if (subCmd === "remove" || subCmd === "rm") {
         const jobId = parts[1];
-        if (!jobId) return "用法: /cron remove <id>";
+        if (!jobId) return "Usage: /cron remove <id>";
         const result = await ipcClient.request<{ removed: boolean }>(
           "cronRemove",
           { id: jobId },
         );
-        return result.removed ? "✅ 已删除" : "❌ 未找到该任务";
+        return result.removed ? "✅ Deleted" : "❌ Job not found";
       } else if (subCmd === "toggle") {
         const jobId = parts[1];
-        if (!jobId) return "用法: /cron toggle <id>";
+        if (!jobId) return "Usage: /cron toggle <id>";
         const result = await ipcClient.request<{ enabled: boolean }>(
           "cronToggle",
           { id: jobId },
         );
-        return result.enabled ? "✅ 已启用" : "⏸️ 已禁用";
+        return result.enabled ? "✅ Enabled" : "⏸️ Disabled";
       } else {
-        return '⏰ 定时任务命令\n\n/cron list — 列出所有任务\n/cron add "名称" "计划" 提示词\n/cron remove <id>\n/cron toggle <id>';
+        return '⏰ Cron job commands\n\n/cron list — list all jobs\n/cron add "name" "schedule" prompt\n/cron remove <id>\n/cron toggle <id>';
       }
     } catch (err) {
       return formatError(err);
@@ -581,15 +586,16 @@ export function createCommandHandlers(
           count: number;
         }>("projectsList");
         if (result.count === 0)
-          return "暂无项目。使用 /projects new <路径> [描述] 创建。";
-        let out = `📂 项目列表 (${result.count})\n\n`;
+          return "No projects. Use /projects new <path> [description] to create one.";
+        let out = `📂 Projects (${result.count})\n\n`;
         for (const p of result.projects) {
           const last = p.last_accessed ? p.last_accessed.slice(0, 10) : "";
           const sid = p.session_id ? `  session:${p.session_id}` : "";
           out += `[${p.id}] ${p.description}${last ? "  (" + last + ")" : ""}${sid}\n`;
           out += `  ${p.cwd}\n\n`;
         }
-        out += "切换: /projects <id>  ·  新建: /projects new <路径> [描述]";
+        out +=
+          "Switch: /projects <id>  ·  New: /projects new <path> [description]";
         return out;
       } else if (subCmd === "new") {
         const rest = args.slice(3).trim();
@@ -602,23 +608,23 @@ export function createCommandHandlers(
         } else {
           targetPath = rest;
         }
-        if (!targetPath) return "用法: /projects new <路径> [描述]";
+        if (!targetPath) return "Usage: /projects new <path> [description]";
         const params: Record<string, unknown> = { cwd: targetPath };
         if (desc) params.description = desc;
         const result = await ipcClient.request<{ project: any }>(
           "projectsNew",
           params,
         );
-        return `✅ 已创建并切换到: ${result.project.description}\n  [${result.project.id}] ${result.project.cwd}`;
+        return `✅ Created and switched to: ${result.project.description}\n  [${result.project.id}] ${result.project.cwd}`;
       } else {
         // /projects <id_prefix> — switch
         const result = await ipcClient.request<{
           project: any;
           message_count: number;
         }>("projectsSwitch", { id_prefix: subCmd });
-        let msg = `📂 已切换到: ${result.project.description}\n  [${result.project.id}] ${result.project.cwd}`;
+        let msg = `📂 Switched to: ${result.project.description}\n  [${result.project.id}] ${result.project.cwd}`;
         if (result.message_count > 0)
-          msg += `\n  已恢复 ${result.message_count} 条消息`;
+          msg += `\n  Restored ${result.message_count} messages`;
         return msg;
       }
     } catch (err) {
@@ -637,18 +643,18 @@ export function createCommandHandlers(
           .slice(3)
           .trim()
           .replace(/^["']|["']$/g, "");
-        if (!desc) return '用法: /task run "任务描述"';
+        if (!desc) return 'Usage: /task run "task description"';
         const result = await ipcClient.request<{ task_id: string }>(
           "taskCreate",
           { description: desc, prompt: desc },
         );
-        return `✅ 后台任务已创建 [${result.task_id}]`;
+        return `✅ Background task created [${result.task_id}]`;
       } else if (subCmd === "list" || subCmd === "") {
         const result = await ipcClient.request<{ tasks: any[]; count: number }>(
           "taskList",
         );
-        if (result.count === 0) return "暂无后台任务。";
-        let out = `📋 后台任务 (${result.count})\n\n`;
+        if (result.count === 0) return "No background tasks.";
+        let out = `📋 Background Tasks (${result.count})\n\n`;
         for (const t of result.tasks) {
           const status =
             typeof t.status === "string" ? t.status : JSON.stringify(t.status);
@@ -657,21 +663,21 @@ export function createCommandHandlers(
         return out;
       } else if (subCmd === "status") {
         const taskId = parts[1];
-        if (!taskId) return "用法: /task status <id>";
+        if (!taskId) return "Usage: /task status <id>";
         const t = await ipcClient.request<any>("taskStatus", {
           task_id: taskId,
         });
-        return `📋 任务 ${t.id}\n状态: ${typeof t.status === "string" ? t.status : JSON.stringify(t.status)}\n描述: ${t.description}`;
+        return `📋 Task ${t.id}\nStatus: ${typeof t.status === "string" ? t.status : JSON.stringify(t.status)}\nDescription: ${t.description}`;
       } else if (subCmd === "stop") {
         const taskId = parts[1];
-        if (!taskId) return "用法: /task stop <id>";
+        if (!taskId) return "Usage: /task stop <id>";
         const result = await ipcClient.request<{ stopped: boolean }>(
           "taskStop",
           { task_id: taskId },
         );
-        return result.stopped ? "✅ 已停止" : "❌ 未找到或未在运行";
+        return result.stopped ? "✅ Stopped" : "❌ Not found or not running";
       } else {
-        return '📋 后台任务命令\n\n/task run "描述" — 创建任务\n/task list — 列出任务\n/task status <id> — 查看状态\n/task stop <id> — 停止任务';
+        return '📋 Background task commands\n\n/task run "description" — create a task\n/task list — list tasks\n/task status <id> — show task status\n/task stop <id> — stop a task';
       }
     } catch (err) {
       return formatError(err);

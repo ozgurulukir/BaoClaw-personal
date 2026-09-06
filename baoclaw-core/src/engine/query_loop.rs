@@ -30,6 +30,9 @@ use crate::engine::tool_loop::{
     extract_tool_uses,
 };
 
+/// Hard ceiling for a single streaming LLM API call.
+const API_CALL_TIMEOUT_SECS: u64 = 300; // 5 min
+
 /// Append a transcript entry; failures are logged, never fatal
 /// (a broken transcript must not take down the query loop).
 fn append_transcript(writer: &mut Option<TranscriptWriter>, entry: &TranscriptEntry) {
@@ -615,7 +618,7 @@ async fn call_api_with_fallback(
 
     // Call LLM API (streaming) with rate-limit fallback handling and timeout
     let stream_result = tokio::time::timeout(
-        std::time::Duration::from_secs(300), // 5 min max per API call
+        std::time::Duration::from_secs(API_CALL_TIMEOUT_SECS),
         config.api_client.create_message_stream(request),
     )
     .await;
@@ -1207,7 +1210,8 @@ async fn context_overflow_compact(
     eprintln!("Context window exceeded, auto-compacting...");
     let _ = tx
         .send(EngineEvent::AssistantChunk {
-            content: "🗜️ 上下文窗口已满，正在自动压缩对话历史...\n".to_string(),
+            content: "🗜️ Context window full — auto-compacting conversation history...\n"
+                .to_string(),
             tool_use_id: None,
         })
         .await;
@@ -1324,7 +1328,7 @@ async fn context_overflow_compact(
     }
     let _ = tx
         .send(EngineEvent::AssistantChunk {
-            content: "✅ 压缩完成，正在重试...\n\n".to_string(),
+            content: "✅ Compaction complete — retrying...\n\n".to_string(),
             tool_use_id: None,
         })
         .await;
@@ -1847,8 +1851,13 @@ fn record_telemetry_turn(
 /// Adaptive compact policy: clamp the tracker's recommendation to a safe
 /// band. The tracker starts at 10, matching the historical hardcoded default,
 /// so the first compact behaves exactly as before adaptation kicks in.
+const ADAPTIVE_KEEP_RECENT_MIN: usize = 8;
+const ADAPTIVE_KEEP_RECENT_MAX: usize = 30;
+
 fn adaptive_keep_recent(adaptive: &AdaptiveCompactTracker) -> usize {
-    adaptive.recommended_keep_recent().clamp(8, 30)
+    adaptive
+        .recommended_keep_recent()
+        .clamp(ADAPTIVE_KEEP_RECENT_MIN, ADAPTIVE_KEEP_RECENT_MAX)
 }
 
 /// Feed a completed compact back into the tracker so the next keep_recent

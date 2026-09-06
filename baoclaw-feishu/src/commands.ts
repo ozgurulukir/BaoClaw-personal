@@ -9,6 +9,10 @@ import * as fs from "fs";
 import * as os from "os";
 
 const MAX_OUTPUT = 4000;
+/** Characters of log output shown by /logs. */
+const LOG_TAIL_CHARS = 3000;
+/** Characters of each tool call's content shown in history listings. */
+const TOOL_CONTENT_PREVIEW_CHARS = 100;
 
 // ── Adapted CommandContext for Feishu ──
 
@@ -222,7 +226,9 @@ function formatHistory(entries: HistoryEntry[]): string {
   for (const e of entries) {
     const role = e.role === "user" ? "👤" : "🤖";
     const content =
-      e.content.length > 100 ? e.content.slice(0, 100) + "…" : e.content;
+      e.content.length > TOOL_CONTENT_PREVIEW_CHARS
+        ? e.content.slice(0, TOOL_CONTENT_PREVIEW_CHARS) + "…"
+        : e.content;
     out += `${role} ${content}\n\n`;
     if (out.length > MAX_OUTPUT) {
       out += "…";
@@ -553,7 +559,7 @@ async function handleGateway(_ctx: CommandContext): Promise<string> {
         const lines = content.trim().split("\n");
         const recent = lines.slice(-Math.min(n, 50));
         if (recent.length === 0) return "📄 Log is empty";
-        return `📄 Last ${recent.length} log lines\n\n${recent.join("\n").slice(0, 3000)}`;
+        return `📄 Last ${recent.length} log lines\n\n${recent.join("\n").slice(0, LOG_TAIL_CHARS)}`;
       } catch (e: any) {
         return `⚠️ Cannot read log: ${e.message}`;
       }

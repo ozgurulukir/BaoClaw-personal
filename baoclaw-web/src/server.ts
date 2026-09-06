@@ -18,6 +18,10 @@ import {
   selectNewestDaemon,
 } from "baoclaw-ipc";
 
+// ─── Server defaults ────────────────────────────────────────────
+const DEFAULT_WEB_HOST = "127.0.0.1";
+const DEFAULT_WEB_PORT = 8080;
+
 function loadExpectedToken(): string {
   if (process.env.BAOCLAW_WEB_TOKEN) {
     return process.env.BAOCLAW_WEB_TOKEN;
@@ -167,10 +171,12 @@ async function main() {
   const host =
     hostIdx >= 0 && args[hostIdx + 1]
       ? args[hostIdx + 1]
-      : (process.env.BAOCLAW_WEB_HOST ?? "127.0.0.1");
+      : (process.env.BAOCLAW_WEB_HOST ?? DEFAULT_WEB_HOST);
   const portIdx = args.indexOf("--port");
   const port =
-    portIdx >= 0 && args[portIdx + 1] ? parseInt(args[portIdx + 1], 10) : 8080;
+    portIdx >= 0 && args[portIdx + 1]
+      ? parseInt(args[portIdx + 1], 10)
+      : DEFAULT_WEB_PORT;
   const cwd = process.cwd();
   const expectedToken = loadExpectedToken();
 

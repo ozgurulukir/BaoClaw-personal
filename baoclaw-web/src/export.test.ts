@@ -31,14 +31,14 @@ describe("export module", () => {
         sessionId: "session-123",
       });
 
-      assert.match(markdown, /# BaoClaw 对话导出/);
-      assert.match(markdown, /\*\*会话\*\*: session-123/);
-      assert.match(markdown, /\*\*消息数\*\*: 2/);
-      assert.match(markdown, /## 用户 \(2025-01-01 10:00:00\)/);
+      assert.match(markdown, /# BaoClaw Conversation Export/);
+      assert.match(markdown, /\*\*Session\*\*: session-123/);
+      assert.match(markdown, /\*\*Messages\*\*: 2/);
+      assert.match(markdown, /## User \(2025-01-01 10:00:00\)/);
       assert.match(markdown, /Hello BaoClaw/);
-      assert.match(markdown, /## 助手 \(2025-01-01 10:00:05\)/);
+      assert.match(markdown, /## Assistant \(2025-01-01 10:00:05\)/);
       assert.match(markdown, /Hello! How can I help\?/);
-      assert.match(markdown, /### 工具调用/);
+      assert.match(markdown, /### Tool Call/);
       assert.match(markdown, /- ⚡ bash_execute: ls -la/);
       assert.match(markdown, /- ⚡ read_file/);
     });
@@ -56,14 +56,14 @@ describe("export module", () => {
         includeToolCalls: false,
       });
 
-      assert.doesNotMatch(markdown, /### 工具调用/);
+      assert.doesNotMatch(markdown, /### Tool Call/);
       assert.doesNotMatch(markdown, /bash_execute/);
     });
 
     test("handles empty entries and default options", () => {
       const markdown = formatTranscriptToMarkdown([]);
-      assert.match(markdown, /\*\*会话\*\*: 未知/);
-      assert.match(markdown, /\*\*消息数\*\*: 0/);
+      assert.match(markdown, /\*\*Session\*\*: Unknown/);
+      assert.match(markdown, /\*\*Messages\*\*: 0/);
     });
   });
 
@@ -79,22 +79,22 @@ describe("export module", () => {
 
   describe("markdownToPdf", () => {
     test("converts Markdown content to a valid PDF buffer", async () => {
-      const sampleMd = `# BaoClaw 对话导出
-**会话**: test-session
-**时间**: 2026-03-03 12:00:00
-**消息数**: 2
+      const sampleMd = `# BaoClaw Conversation Export
+**Session**: test-session
+**Time**: 2026-03-03 12:00:00
+**Messages**: 2
 
 ---
 
-## 用户 (12:00:00)
-请为我生成 PDF。
+## User (12:00:00)
+Please generate a PDF for me.
 
 ---
 
-## 助手 (12:00:01)
-好的，正在生成。
+## Assistant (12:00:01)
+Sure, generating now.
 
-### 工具调用
+### Tool Call
 - ⚡ generate_pdf: { format: "pdf" }
 
 \`\`\`json

@@ -1843,7 +1843,7 @@ async fn scm_doc_upload(writer: WriterRef<'_>, id: RequestId, file_path: String)
         }
         Err(e) => {
             let _ = conn_guard
-                .send_error(Some(id), -32000, format!("文档上传失败: {}", e))
+                .send_error(Some(id), -32000, format!("Document upload failed: {}", e))
                 .await;
         }
     }
@@ -1887,7 +1887,11 @@ async fn scm_export(
     if export_entries.is_empty() {
         let mut conn_guard = writer.lock().await;
         let _ = conn_guard
-            .send_error(Some(id), -32000, "当前会话无对话记录".to_string())
+            .send_error(
+                Some(id),
+                -32000,
+                "No conversation history in the current session".to_string(),
+            )
             .await;
     } else {
         let markdown = engine::export::format_transcript_to_markdown(&export_entries);
@@ -1914,7 +1918,11 @@ async fn scm_export(
             }
             Err(e) => {
                 let _ = conn_guard
-                    .send_error(Some(id), -32000, format!("导出文件写入失败: {}", e))
+                    .send_error(
+                        Some(id),
+                        -32000,
+                        format!("Failed to write export file: {}", e),
+                    )
                     .await;
             }
         }
@@ -3337,7 +3345,7 @@ async fn scm_config_model(shared: &SharedState, writer: WriterRef<'_>, id: Reque
                 format!("{}****{}", prefix, suffix)
             }
             Some(_k) => "****".to_string(),
-            None => "(未配置)".to_string(),
+            None => "(not configured)".to_string(),
         }
     };
 
