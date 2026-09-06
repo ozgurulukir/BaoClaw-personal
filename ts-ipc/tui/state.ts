@@ -2,6 +2,7 @@
 import {
   TuiState,
   Action,
+  ActionType,
   Message,
   ContentBlock,
   Session,
@@ -32,277 +33,300 @@ export const INITIAL_STATE: TuiState = {
   },
 };
 
-export function reducer(state: TuiState, action: Action): TuiState {
-  switch (action.type) {
-    case "ADD_MESSAGE": {
-      const msg = action.payload as Message;
-      return {
-        ...state,
-        messages: [...state.messages, msg],
-      };
-    }
+type ActionHandler = (state: TuiState, action: Action) => TuiState;
 
-    case "SET_STREAMING": {
-      const isStarting = action.payload as boolean;
-      return {
-        ...state,
-        isStreaming: isStarting,
-        streamingContent: "",
-        currentTools: isStarting ? [] : state.currentTools,
-        selectedToolIndex: 0,
-      };
-    }
+function addMessage(state: TuiState, action: Action): TuiState {
+  const msg = action.payload as Message;
+  return {
+    ...state,
+    messages: [...state.messages, msg],
+  };
+}
 
-    case "APPEND_STREAM": {
-      const content = action.payload as string;
-      return {
-        ...state,
-        streamingContent: state.streamingContent + content,
-      };
-    }
+function setStreaming(state: TuiState, action: Action): TuiState {
+  const isStarting = action.payload as boolean;
+  return {
+    ...state,
+    isStreaming: isStarting,
+    streamingContent: "",
+    currentTools: isStarting ? [] : state.currentTools,
+    selectedToolIndex: 0,
+  };
+}
 
-    case "SET_THINKING": {
-      return {
-        ...state,
-        thinkingContent: action.payload as string,
-      };
-    }
+function appendStream(state: TuiState, action: Action): TuiState {
+  const content = action.payload as string;
+  return {
+    ...state,
+    streamingContent: state.streamingContent + content,
+  };
+}
 
-    case "APPEND_THINKING": {
-      const content = action.payload as string;
-      return {
-        ...state,
-        thinkingContent: state.thinkingContent + content,
-      };
-    }
+function setThinking(state: TuiState, action: Action): TuiState {
+  return {
+    ...state,
+    thinkingContent: action.payload as string,
+  };
+}
 
-    case "SET_TOOLS": {
-      return {
-        ...state,
-        currentTools: action.payload as ToolProgress[],
-      };
-    }
+function appendThinking(state: TuiState, action: Action): TuiState {
+  const content = action.payload as string;
+  return {
+    ...state,
+    thinkingContent: state.thinkingContent + content,
+  };
+}
 
-    case "UPDATE_TOOL": {
-      const { id, update } = action.payload as {
-        id: string;
-        update: Partial<ToolProgress>;
-      };
-      return {
-        ...state,
-        currentTools: state.currentTools.map((tool) =>
-          tool.id === id || tool.name === id ? { ...tool, ...update } : tool,
-        ),
-      };
-    }
+function setTools(state: TuiState, action: Action): TuiState {
+  return {
+    ...state,
+    currentTools: action.payload as ToolProgress[],
+  };
+}
 
-    case "SET_SESSION": {
-      return {
-        ...state,
-        session: action.payload as Session,
-      };
-    }
+function updateTool(state: TuiState, action: Action): TuiState {
+  const { id, update } = action.payload as {
+    id: string;
+    update: Partial<ToolProgress>;
+  };
+  return {
+    ...state,
+    currentTools: state.currentTools.map((tool) =>
+      tool.id === id || tool.name === id ? { ...tool, ...update } : tool,
+    ),
+  };
+}
 
-    case "UPDATE_USAGE": {
-      const usage = action.payload as Partial<TuiState["usage"]>;
-      return {
-        ...state,
-        usage: {
-          ...state.usage,
-          ...usage,
-        },
-      };
-    }
+function setSession(state: TuiState, action: Action): TuiState {
+  return {
+    ...state,
+    session: action.payload as Session,
+  };
+}
 
-    case "SET_NAV_MODE": {
-      return {
-        ...state,
-        mode: action.payload as "insert" | "normal",
-      };
-    }
+function updateUsage(state: TuiState, action: Action): TuiState {
+  const usage = action.payload as Partial<TuiState["usage"]>;
+  return {
+    ...state,
+    usage: {
+      ...state.usage,
+      ...usage,
+    },
+  };
+}
 
-    case "SET_SELECTED_TOOL_INDEX": {
-      const idx = action.payload as number;
-      const maxIdx = Math.max(0, state.currentTools.length - 1);
-      return {
-        ...state,
-        selectedToolIndex: Math.max(0, Math.min(idx, maxIdx)),
-      };
-    }
+function setNavMode(state: TuiState, action: Action): TuiState {
+  return {
+    ...state,
+    mode: action.payload as "insert" | "normal",
+  };
+}
 
-    case "TOGGLE_TOOL_EXPAND": {
-      const { index, toolId } =
-        (action.payload as {
-          index?: number;
-          toolId?: string;
-        }) || {};
-      const targetIdx =
-        index !== undefined
-          ? index
-          : toolId
-            ? state.currentTools.findIndex((t) => t.id === toolId)
-            : state.selectedToolIndex;
+function setSelectedToolIndex(state: TuiState, action: Action): TuiState {
+  const idx = action.payload as number;
+  const maxIdx = Math.max(0, state.currentTools.length - 1);
+  return {
+    ...state,
+    selectedToolIndex: Math.max(0, Math.min(idx, maxIdx)),
+  };
+}
 
-      if (targetIdx >= 0 && targetIdx < state.currentTools.length) {
-        const tools = [...state.currentTools];
-        tools[targetIdx] = {
-          ...tools[targetIdx],
-          isExpanded: !tools[targetIdx].isExpanded,
-        };
-        return { ...state, currentTools: tools };
-      }
-      return state;
-    }
+function toggleToolExpand(state: TuiState, action: Action): TuiState {
+  const { index, toolId } =
+    (action.payload as {
+      index?: number;
+      toolId?: string;
+    }) || {};
+  const targetIdx =
+    index !== undefined
+      ? index
+      : toolId
+        ? state.currentTools.findIndex((t) => t.id === toolId)
+        : state.selectedToolIndex;
 
-    case "ADD_TOOL_USE": {
-      const { toolName, toolId, input } = action.payload as {
-        toolName: string;
-        toolId: string;
-        input: unknown;
-      };
-      const block: ContentBlock = {
-        type: "tool_use",
-        content: JSON.stringify(input, null, 2),
-        toolName,
-        toolId,
-        input,
-        isExpanded: false,
-      };
-
-      const newTool: ToolProgress = {
-        id: toolId,
-        name: toolName,
-        status: "running",
-        input,
-        isExpanded: false,
-      };
-
-      const currentTools = [...state.currentTools, newTool];
-
-      // Append to last assistant message's content
-      const messages = [...state.messages];
-      if (
-        messages.length > 0 &&
-        messages[messages.length - 1].role === "assistant"
-      ) {
-        const last = messages[messages.length - 1];
-        messages[messages.length - 1] = {
-          ...last,
-          content: [...last.content, block],
-        };
-      } else {
-        // No ongoing assistant message, create one
-        messages.push({
-          id: generateId(),
-          role: "assistant",
-          content: [block],
-          timestamp: new Date(),
-        });
-      }
-      return { ...state, messages, currentTools };
-    }
-
-    case "ADD_TOOL_RESULT": {
-      const { toolId, output, isError } = action.payload as {
-        toolId: string;
-        output: string;
-        isError: boolean;
-      };
-      const block: ContentBlock = {
-        type: "tool_result",
-        content: output,
-        toolId,
-        isError,
-        isExpanded: false,
-      };
-
-      const currentTools = state.currentTools.map((t) =>
-        t.id === toolId
-          ? {
-              ...t,
-              output,
-              status: (isError
-                ? "error"
-                : "completed") as ToolProgress["status"],
-            }
-          : t,
-      );
-
-      const messages = [...state.messages];
-      // Append to last assistant message
-      if (
-        messages.length > 0 &&
-        messages[messages.length - 1].role === "assistant"
-      ) {
-        const last = messages[messages.length - 1];
-        messages[messages.length - 1] = {
-          ...last,
-          content: [...last.content, block],
-        };
-      }
-      return { ...state, messages, currentTools };
-    }
-
-    case "SET_INPUT": {
-      return {
-        ...state,
-        input: action.payload as string,
-      };
-    }
-
-    case "SET_ERROR": {
-      return {
-        ...state,
-        error: action.payload as string,
-      };
-    }
-
-    case "CLEAR_ERROR": {
-      return {
-        ...state,
-        error: null,
-      };
-    }
-
-    case "SET_FLASH": {
-      return {
-        ...state,
-        flashMessage: action.payload as string | null,
-      };
-    }
-
-    case "QUEUE_PERMISSION": {
-      const request = action.payload as PendingPermission;
-      return {
-        ...state,
-        pendingPermissions: [...state.pendingPermissions, request],
-      };
-    }
-
-    case "RESOLVE_PERMISSION": {
-      const toolUseId = action.payload as string;
-      return {
-        ...state,
-        pendingPermissions: state.pendingPermissions.filter(
-          (p) => p.toolUseId !== toolUseId,
-        ),
-      };
-    }
-
-    case "SET_AUTO_ALLOW": {
-      return {
-        ...state,
-        autoAllow: action.payload as boolean,
-      };
-    }
-
-    case "RESET": {
-      return INITIAL_STATE;
-    }
-
-    default:
-      return state;
+  if (targetIdx >= 0 && targetIdx < state.currentTools.length) {
+    const tools = [...state.currentTools];
+    tools[targetIdx] = {
+      ...tools[targetIdx],
+      isExpanded: !tools[targetIdx].isExpanded,
+    };
+    return { ...state, currentTools: tools };
   }
+  return state;
+}
+
+function addToolUse(state: TuiState, action: Action): TuiState {
+  const { toolName, toolId, input } = action.payload as {
+    toolName: string;
+    toolId: string;
+    input: unknown;
+  };
+  const block: ContentBlock = {
+    type: "tool_use",
+    content: JSON.stringify(input, null, 2),
+    toolName,
+    toolId,
+    input,
+    isExpanded: false,
+  };
+
+  const newTool: ToolProgress = {
+    id: toolId,
+    name: toolName,
+    status: "running",
+    input,
+    isExpanded: false,
+  };
+
+  const currentTools = [...state.currentTools, newTool];
+
+  // Append to last assistant message's content
+  const messages = [...state.messages];
+  if (
+    messages.length > 0 &&
+    messages[messages.length - 1].role === "assistant"
+  ) {
+    const last = messages[messages.length - 1];
+    messages[messages.length - 1] = {
+      ...last,
+      content: [...last.content, block],
+    };
+  } else {
+    // No ongoing assistant message, create one
+    messages.push({
+      id: generateId(),
+      role: "assistant",
+      content: [block],
+      timestamp: new Date(),
+    });
+  }
+  return { ...state, messages, currentTools };
+}
+
+function addToolResult(state: TuiState, action: Action): TuiState {
+  const { toolId, output, isError } = action.payload as {
+    toolId: string;
+    output: string;
+    isError: boolean;
+  };
+  const block: ContentBlock = {
+    type: "tool_result",
+    content: output,
+    toolId,
+    isError,
+    isExpanded: false,
+  };
+
+  const currentTools = state.currentTools.map((t) =>
+    t.id === toolId
+      ? {
+          ...t,
+          output,
+          status: (isError ? "error" : "completed") as ToolProgress["status"],
+        }
+      : t,
+  );
+
+  const messages = [...state.messages];
+  // Append to last assistant message
+  if (
+    messages.length > 0 &&
+    messages[messages.length - 1].role === "assistant"
+  ) {
+    const last = messages[messages.length - 1];
+    messages[messages.length - 1] = {
+      ...last,
+      content: [...last.content, block],
+    };
+  }
+  return { ...state, messages, currentTools };
+}
+
+function setInput(state: TuiState, action: Action): TuiState {
+  return {
+    ...state,
+    input: action.payload as string,
+  };
+}
+
+function setError(state: TuiState, action: Action): TuiState {
+  return {
+    ...state,
+    error: action.payload as string,
+  };
+}
+
+function clearError(state: TuiState): TuiState {
+  return {
+    ...state,
+    error: null,
+  };
+}
+
+function setFlash(state: TuiState, action: Action): TuiState {
+  return {
+    ...state,
+    flashMessage: action.payload as string | null,
+  };
+}
+
+function queuePermission(state: TuiState, action: Action): TuiState {
+  const request = action.payload as PendingPermission;
+  return {
+    ...state,
+    pendingPermissions: [...state.pendingPermissions, request],
+  };
+}
+
+function resolvePermission(state: TuiState, action: Action): TuiState {
+  const toolUseId = action.payload as string;
+  return {
+    ...state,
+    pendingPermissions: state.pendingPermissions.filter(
+      (p) => p.toolUseId !== toolUseId,
+    ),
+  };
+}
+
+function setAutoAllow(state: TuiState, action: Action): TuiState {
+  return {
+    ...state,
+    autoAllow: action.payload as boolean,
+  };
+}
+
+function reset(): TuiState {
+  return INITIAL_STATE;
+}
+
+const handlers: Record<ActionType, ActionHandler> = {
+  ADD_MESSAGE: addMessage,
+  SET_STREAMING: setStreaming,
+  APPEND_STREAM: appendStream,
+  SET_THINKING: setThinking,
+  APPEND_THINKING: appendThinking,
+  SET_TOOLS: setTools,
+  UPDATE_TOOL: updateTool,
+  ADD_TOOL_USE: addToolUse,
+  ADD_TOOL_RESULT: addToolResult,
+  TOGGLE_TOOL_EXPAND: toggleToolExpand,
+  SET_SESSION: setSession,
+  UPDATE_USAGE: updateUsage,
+  SET_NAV_MODE: setNavMode,
+  SET_SELECTED_TOOL_INDEX: setSelectedToolIndex,
+  SET_INPUT: setInput,
+  SET_ERROR: setError,
+  CLEAR_ERROR: clearError,
+  SET_FLASH: setFlash,
+  QUEUE_PERMISSION: queuePermission,
+  RESOLVE_PERMISSION: resolvePermission,
+  SET_AUTO_ALLOW: setAutoAllow,
+  RESET: reset,
+};
+
+export function reducer(state: TuiState, action: Action): TuiState {
+  const handler = handlers[action.type];
+  return handler ? handler(state, action) : state;
 }
 
 // Helper to generate unique IDs
