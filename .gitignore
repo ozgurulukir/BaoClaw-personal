@@ -1,4 +1,5 @@
 # Rust
+/target/
 claude-core/target/
 baoclaw-core/target/
 **/*.rs.bk
@@ -44,3 +45,13 @@ BAOCLAW.md
 history_part2.txt
 session_history_turns34-99.txt
 docs/plans/
+
+# Local agent-tool artifacts and session plans (not part of the repo)
+.code-tandem/
+.nova/
+.rubik/
+_plan/
+.baoclaw/todo.json
+
+# Throwaway smoke-test scripts
+.smoke-*.mjs
