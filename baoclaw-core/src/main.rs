@@ -1,40 +1,37 @@
+// `lc_*` handlers take `&PathBuf` to mirror the verbatim former inline code
+// (same allowance as `shared_client.rs`).
+#![allow(clippy::ptr_arg)]
+
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
 const IPC_PROTOCOL_VERSION: &str = "1";
 use std::path::PathBuf;
 use tokio::sync::Mutex as TokioMutex;
 
-use baoclaw_core::{api, config, discovery, engine, ipc, models, permissions, state, tools};
+use baoclaw_core::{api, config, engine, ipc, models, permissions, state, tools};
 
 mod shared_client;
+mod startup;
 
 #[cfg(target_os = "windows")]
 mod windows_service;
 
-use api::client::ApiClientConfig;
 use api::unified::UnifiedClient;
 use config::BaoclawConfig;
-use engine::query_engine::{
-    EngineEvent, QueryEngine, QueryEngineConfig, ThinkingConfig, EMPTY_USAGE,
-};
+use engine::query_engine::{EngineEvent, QueryEngine, QueryEngineConfig, ThinkingConfig};
 use engine::shared_session::{ClientId, SessionRegistry, SharedSession};
 use engine::task_manager::TaskManager;
 use ipc::events::engine_event_to_notification;
 use ipc::protocol::JsonRpcMessage;
 use ipc::router::{parse_client_method, ClientMethod};
-use ipc::server::{IpcConnection, IpcError, IpcServer, IpcWriter};
+use ipc::server::{IpcConnection, IpcError, IpcWriter};
 use permissions::gate::PermissionGate;
 use permissions::PermissionBridge;
-use state::manager::{CoreState, StateManager};
-use tools::builtins::{
-    AgentTool, BashTool, FileEditTool, FileReadTool, FileWriteTool, ImageEditTool, ImageGenTool,
-    MemoryTool, NotebookEditTool, ProjectNoteTool, TodoWriteTool, ToolSearchTool, WebFetchTool,
-    WebSearchTool,
-};
+use state::manager::StateManager;
 
 /// Shared state cloned into each spawned client task.
 #[derive(Clone)]
@@ -405,87 +402,12 @@ impl Drop for SubmitterGuard {
 /// Handle a single client connection. Each client gets its own QueryEngine
 /// with independent conversation history.
 async fn handle_client(mut conn: IpcConnection, shared: SharedState) {
-    // Wait for initialize request
-    let init_msg = match conn.recv_message().await {
-        Ok(msg) => msg,
-        Err(IpcError::ConnectionClosed) => {
-            eprintln!("Client disconnected before initialize");
-            return;
-        }
-        Err(e) => {
-            eprintln!("Error reading init: {}", e);
-            return;
-        }
-    };
-
-    let (
-        init_id,
-        init_cwd,
-        init_model,
-        init_resume_session_id,
-        init_shared_session_id,
-        init_protocol_version,
-    ) = match init_msg {
-        JsonRpcMessage::Request(req) => {
-            let id = req.id.clone();
-            match parse_client_method(&req) {
-                Ok(ClientMethod::Initialize {
-                    cwd: c,
-                    model: m,
-                    protocol_version: p,
-                    resume_session_id: r,
-                    shared_session_id: s,
-                    ..
-                }) => (id, c, m, r, s, p),
-                Ok(_) => {
-                    let _ = conn
-                        .send_error(
-                            Some(req.id),
-                            -32600,
-                            "Expected 'initialize' as first request".into(),
-                        )
-                        .await;
-                    return;
-                }
-                Err(e) => {
-                    let _ = conn
-                        .send_error(Some(req.id), -32600, format!("Invalid init: {}", e))
-                        .await;
-                    return;
-                }
-            }
-        }
-        _ => {
-            return;
-        }
-    };
-
-    if let Some(protocol_version) = init_protocol_version {
-        if protocol_version != IPC_PROTOCOL_VERSION {
-            let _ = conn
-                .send_error(
-                    Some(init_id),
-                    -32001,
-                    format!(
-                        "Incompatible IPC protocol version '{}'; daemon supports '{}'. Upgrade the client or daemon.",
-                        protocol_version, IPC_PROTOCOL_VERSION
-                    ),
-                )
-                .await;
-            return;
-        }
-    }
-
-    if init_resume_session_id.is_some() {
-        let _ = conn
-            .send_error(
-                Some(init_id),
-                -32602,
-                "resume_session_id is not supported; use shared_session_id instead".into(),
-            )
-            .await;
-        return;
-    }
+    // Wait for initialize request (handshake + protocol/resume validation)
+    let (init_id, init_cwd, init_model, init_shared_session_id) =
+        match lc_read_initialize(&mut conn).await {
+            Some(t) => t,
+            None => return,
+        };
 
     let model = init_model
         .or_else(|| std::env::var("ANTHROPIC_MODEL").ok())
@@ -546,7 +468,7 @@ async fn handle_client(mut conn: IpcConnection, shared: SharedState) {
         let model_clone = model.clone();
         let work_cwd_clone = work_cwd.clone();
 
-        let (session, is_new, mut resumed) = shared
+        let (session, is_new, resumed) = shared
             .session_registry
             .get_or_create_with_restore(&session_id_clone, || {
                 build_shared_engine(
@@ -565,97 +487,7 @@ async fn handle_client(mut conn: IpcConnection, shared: SharedState) {
             .await;
 
         // ── Resume session history: snapshot-first, legacy transcript fallback ──
-        // Inspired by Claude Code: load pre-written summary + recent tail,
-        // NEVER rebuild the full history or do on-demand API summarization.
-        let current_msg_count = session.engine_read().await.get_messages().len();
-        if (is_new || current_msg_count == 0) && !resumed {
-            let cwd_str_for_resume = work_cwd.to_string_lossy().to_string();
-            if let Some(rid) = engine::transcript::find_latest_session_for_cwd(&cwd_str_for_resume)
-            {
-                match engine::transcript::TranscriptWriter::load(&rid) {
-                    Ok(entries) => {
-                        let entry_count = entries.len();
-                        let old_summary_obj =
-                            crate::engine::session_memory::SessionMemory::load(&rid);
-                        let old_summary = old_summary_obj.get();
-                        let has_summary = old_summary_obj.is_available();
-
-                        // ── Three-tier loading strategy ──
-                        let messages = if has_summary {
-                            // Tier 1 (best): pre-written summary exists
-                            // Load summary + last 200 entries only — instant
-                            let tail_size = 200.min(entry_count);
-                            eprintln!("Session resume: loading pre-written summary + {} recent entries (of {} total)",
-                                tail_size, entry_count);
-                            engine::transcript::rebuild_messages_from_transcript_limited(
-                                &entries,
-                                tail_size,
-                                Some(&old_summary),
-                            )
-                        } else if entry_count <= 400 {
-                            // Tier 2: small session, no summary — safe to rebuild all
-                            eprintln!(
-                                "Session resume: small session ({} entries), rebuilding all",
-                                entry_count
-                            );
-                            engine::transcript::rebuild_messages_from_transcript(&entries)
-                        } else {
-                            // Tier 3 (fallback): large session with NO summary
-                            // Don't rebuild all (would cause 10-min auto-compact).
-                            // Load last 200 entries with a warning header instead.
-                            let tail_size = 200.min(entry_count);
-                            eprintln!(
-                                "WARNING: Large session ({} entries) with no pre-written summary. \
-                                 Loading only last {} entries. Context from earlier turns may be lost. \
-                                 (Summary will be generated during this session for next time.)",
-                                entry_count, tail_size
-                            );
-                            let tail_entries = &entries[entry_count - tail_size..];
-                            let mut msgs =
-                                engine::transcript::rebuild_messages_from_transcript(tail_entries);
-
-                            // Prepend a warning so the LLM knows context is incomplete
-                            if !msgs.is_empty() {
-                                let warning = crate::models::message::Message {
-                                    uuid: uuid::Uuid::new_v4().to_string(),
-                                    timestamp: chrono::Utc::now().to_rfc3339(),
-                                    content: crate::models::message::MessageContent::System {
-                                        subtype: crate::models::message::SystemSubtype::CompactBoundary,
-                                        content: format!(
-                                            "[Session resumed — {} earlier conversation entries were omitted because no summary was available. \
-                                             The current session will generate one for next time.]",
-                                            entry_count - tail_size
-                                        ),
-                                    },
-                                };
-                                msgs.insert(0, warning);
-                            }
-                            msgs
-                        };
-
-                        if !messages.is_empty() {
-                            let mut engine = session.engine_write().await;
-                            engine.set_messages(messages);
-
-                            // Load and apply persisted token baseline
-                            engine.load_token_baseline(&rid).await;
-
-                            // Seed the new session's memory with the old summary
-                            engine.seed_session_memory(&old_summary);
-
-                            eprintln!(
-                                "Resumed session {} ({} entries → {} messages)",
-                                rid,
-                                entry_count,
-                                engine.get_messages().len()
-                            );
-                            resumed = true;
-                        }
-                    }
-                    Err(e) => eprintln!("Failed to resume session {}: {}", rid, e),
-                }
-            }
-        }
+        let resumed = lc_restore_session_history(&session, is_new, resumed, &work_cwd).await;
 
         let (client_id, broadcast_rx) = session.add_client().await;
         let msg_count = session.engine_read().await.get_messages().len();
@@ -699,132 +531,14 @@ async fn handle_client(mut conn: IpcConnection, shared: SharedState) {
         }
 
         // Client disconnect handling (Task 6.1)
-        let is_last = session.remove_client(client_id).await;
-        let cleanup_guard = if is_last {
-            shared_clone
-                .session_registry
-                .acquire_last_client_cleanup(&session_id_clone, &session)
-                .await
-        } else {
-            None
-        };
-        if is_last && cleanup_guard.is_some() {
-            // ── Session-close evolution hook ──
-            // Extract structured summary before removing the session.
-            {
-                let engine = session.engine_read().await;
-                let messages = engine.get_messages();
-                let usage = engine.get_usage().clone();
-                let model = engine.get_model().to_string();
-                let messages_clone = messages.to_vec();
-                drop(engine);
-
-                // Estimate session duration from first and last message timestamps
-                let duration_secs = if let [first, .., last] = messages_clone.as_slice() {
-                    let first_ts = &first.timestamp;
-                    let last_ts = &last.timestamp;
-                    (|| -> Option<u64> {
-                        let t1 = chrono::DateTime::parse_from_rfc3339(first_ts).ok()?;
-                        let t2 = chrono::DateTime::parse_from_rfc3339(last_ts).ok()?;
-                        Some((t2 - t1).num_seconds().max(0) as u64)
-                    })()
-                    .unwrap_or(0)
-                } else {
-                    0
-                };
-
-                // Estimate total cost from token usage (Claude Sonnet pricing)
-                let estimated_cost = (usage.input_tokens as f64 * 3.0e-6)
-                    + (usage.output_tokens as f64 * 15.0e-6)
-                    + (usage.cache_read_input_tokens.unwrap_or(0) as f64 * 0.3e-6);
-
-                // ── Save session memory on close if not yet written ──
-                // This ensures that even if the background updater never ran
-                // (e.g., short session), the next startup will have a summary.
-                {
-                    let engine = session.engine_read().await;
-                    if let Some(ref sm) = engine.get_session_memory() {
-                        if !sm.is_available() && messages_clone.len() >= 4 {
-                            eprintln!(
-                                "Session close: generating heuristic session memory ({} messages)",
-                                messages_clone.len()
-                            );
-
-                            let mut summary_parts = vec!["# Session Summary".to_string()];
-
-                            // Extract user messages as task list
-                            let mut task_descriptions = Vec::new();
-                            for msg in &messages_clone {
-                                if let crate::models::message::MessageContent::User {
-                                    message,
-                                    ..
-                                } = &msg.content
-                                {
-                                    if let serde_json::Value::String(s) = &message.content {
-                                        let first_line = s.lines().next().unwrap_or("");
-                                        if !first_line.is_empty() && first_line.len() < 200 {
-                                            task_descriptions.push(first_line.to_string());
-                                        }
-                                    }
-                                }
-                            }
-
-                            if !task_descriptions.is_empty() {
-                                summary_parts.push("## Tasks Discussed".to_string());
-                                for (i, task) in task_descriptions.iter().take(20).enumerate() {
-                                    summary_parts.push(format!("{}. {}", i + 1, task));
-                                }
-                            }
-
-                            summary_parts.push(format!(
-                                "\n## Stats\n- Messages: {}\n- Duration: {}s\n- Cost: ${:.4}",
-                                messages_clone.len(),
-                                duration_secs,
-                                estimated_cost
-                            ));
-
-                            let summary = summary_parts.join("\n");
-                            sm.update(summary);
-                            eprintln!("Session memory saved on close ({} chars)", sm.get().len());
-                        }
-                    }
-                }
-
-                shared_clone
-                    .evolution_engine
-                    .on_session_close(
-                        &session_id_clone,
-                        &hook_cwd,
-                        &model,
-                        &messages_clone,
-                        &usage,
-                        estimated_cost,
-                        duration_secs,
-                    )
-                    .await;
-            }
-
-            match shared_clone
-                .session_registry
-                .persist_session(&session_id_clone)
-                .await
-            {
-                Ok(()) => {
-                    shared_clone
-                        .session_registry
-                        .remove_after_last_client_cleanup(&session_id_clone)
-                        .await;
-                    eprintln!(
-                        "Shared session '{}' removed (last client disconnected)",
-                        session_id_clone
-                    );
-                }
-                Err(error) => eprintln!(
-                    "[daemon] WARNING: keeping session '{}' in memory because final persistence failed: {}",
-                    session_id_clone, error
-                ),
-            }
-        }
+        lc_session_close(
+            &shared_clone,
+            &session,
+            client_id,
+            &session_id_clone,
+            &hook_cwd,
+        )
+        .await;
 
         eprintln!("Shared client {} session ended", client_id);
         return;
@@ -839,6 +553,336 @@ async fn handle_client(mut conn: IpcConnection, shared: SharedState) {
             "shared_session_id is required".into(),
         )
         .await;
+}
+
+/// Read and validate the `initialize` handshake from a legacy connection.
+/// Returns `None` (after replying with the appropriate error) when the
+/// handshake fails and the connection must be dropped.
+async fn lc_read_initialize(
+    conn: &mut IpcConnection,
+) -> Option<(
+    ipc::protocol::RequestId,
+    PathBuf,
+    Option<String>,
+    Option<String>,
+)> {
+    // Wait for initialize request
+    let init_msg = match conn.recv_message().await {
+        Ok(msg) => msg,
+        Err(IpcError::ConnectionClosed) => {
+            eprintln!("Client disconnected before initialize");
+            return None;
+        }
+        Err(e) => {
+            eprintln!("Error reading init: {}", e);
+            return None;
+        }
+    };
+
+    let (
+        init_id,
+        init_cwd,
+        init_model,
+        init_resume_session_id,
+        init_shared_session_id,
+        init_protocol_version,
+    ) = match init_msg {
+        JsonRpcMessage::Request(req) => {
+            let id = req.id.clone();
+            match parse_client_method(&req) {
+                Ok(ClientMethod::Initialize {
+                    cwd: c,
+                    model: m,
+                    protocol_version: p,
+                    resume_session_id: r,
+                    shared_session_id: s,
+                    ..
+                }) => (id, c, m, r, s, p),
+                Ok(_) => {
+                    let _ = conn
+                        .send_error(
+                            Some(req.id),
+                            -32600,
+                            "Expected 'initialize' as first request".into(),
+                        )
+                        .await;
+                    return None;
+                }
+                Err(e) => {
+                    let _ = conn
+                        .send_error(Some(req.id), -32600, format!("Invalid init: {}", e))
+                        .await;
+                    return None;
+                }
+            }
+        }
+        _ => {
+            return None;
+        }
+    };
+
+    if let Some(protocol_version) = init_protocol_version {
+        if protocol_version != IPC_PROTOCOL_VERSION {
+            let _ = conn
+                .send_error(
+                    Some(init_id),
+                    -32001,
+                    format!(
+                        "Incompatible IPC protocol version '{}'; daemon supports '{}'. Upgrade the client or daemon.",
+                        protocol_version, IPC_PROTOCOL_VERSION
+                    ),
+                )
+                .await;
+            return None;
+        }
+    }
+
+    if init_resume_session_id.is_some() {
+        let _ = conn
+            .send_error(
+                Some(init_id),
+                -32602,
+                "resume_session_id is not supported; use shared_session_id instead".into(),
+            )
+            .await;
+        return None;
+    }
+
+    Some((init_id, init_cwd, init_model, init_shared_session_id))
+}
+
+/// Restore session history for a shared session: snapshot-first, legacy
+/// transcript fallback. Returns the final `resumed` flag.
+///
+/// Inspired by Claude Code: load pre-written summary + recent tail,
+/// NEVER rebuild the full history or do on-demand API summarization.
+async fn lc_restore_session_history(
+    session: &Arc<SharedSession>,
+    is_new: bool,
+    mut resumed: bool,
+    work_cwd: &PathBuf,
+) -> bool {
+    let current_msg_count = session.engine_read().await.get_messages().len();
+    if (is_new || current_msg_count == 0) && !resumed {
+        let cwd_str_for_resume = work_cwd.to_string_lossy().to_string();
+        if let Some(rid) = engine::transcript::find_latest_session_for_cwd(&cwd_str_for_resume) {
+            match engine::transcript::TranscriptWriter::load(&rid) {
+                Ok(entries) => {
+                    let entry_count = entries.len();
+                    let old_summary_obj = crate::engine::session_memory::SessionMemory::load(&rid);
+                    let old_summary = old_summary_obj.get();
+                    let has_summary = old_summary_obj.is_available();
+
+                    // ── Three-tier loading strategy ──
+                    let messages = if has_summary {
+                        // Tier 1 (best): pre-written summary exists
+                        // Load summary + last 200 entries only — instant
+                        let tail_size = 200.min(entry_count);
+                        eprintln!("Session resume: loading pre-written summary + {} recent entries (of {} total)",
+                            tail_size, entry_count);
+                        engine::transcript::rebuild_messages_from_transcript_limited(
+                            &entries,
+                            tail_size,
+                            Some(&old_summary),
+                        )
+                    } else if entry_count <= 400 {
+                        // Tier 2: small session, no summary — safe to rebuild all
+                        eprintln!(
+                            "Session resume: small session ({} entries), rebuilding all",
+                            entry_count
+                        );
+                        engine::transcript::rebuild_messages_from_transcript(&entries)
+                    } else {
+                        // Tier 3 (fallback): large session with NO summary
+                        // Don't rebuild all (would cause 10-min auto-compact).
+                        // Load last 200 entries with a warning header instead.
+                        let tail_size = 200.min(entry_count);
+                        eprintln!(
+                            "WARNING: Large session ({} entries) with no pre-written summary. \
+                             Loading only last {} entries. Context from earlier turns may be lost. \
+                             (Summary will be generated during this session for next time.)",
+                            entry_count, tail_size
+                        );
+                        let tail_entries = &entries[entry_count - tail_size..];
+                        let mut msgs =
+                            engine::transcript::rebuild_messages_from_transcript(tail_entries);
+
+                        // Prepend a warning so the LLM knows context is incomplete
+                        if !msgs.is_empty() {
+                            let warning = crate::models::message::Message {
+                                uuid: uuid::Uuid::new_v4().to_string(),
+                                timestamp: chrono::Utc::now().to_rfc3339(),
+                                content: crate::models::message::MessageContent::System {
+                                    subtype: crate::models::message::SystemSubtype::CompactBoundary,
+                                    content: format!(
+                                        "[Session resumed — {} earlier conversation entries were omitted because no summary was available. \
+                                         The current session will generate one for next time.]",
+                                        entry_count - tail_size
+                                    ),
+                                },
+                            };
+                            msgs.insert(0, warning);
+                        }
+                        msgs
+                    };
+
+                    if !messages.is_empty() {
+                        let mut engine = session.engine_write().await;
+                        engine.set_messages(messages);
+
+                        // Load and apply persisted token baseline
+                        engine.load_token_baseline(&rid).await;
+
+                        // Seed the new session's memory with the old summary
+                        engine.seed_session_memory(&old_summary);
+
+                        eprintln!(
+                            "Resumed session {} ({} entries → {} messages)",
+                            rid,
+                            entry_count,
+                            engine.get_messages().len()
+                        );
+                        resumed = true;
+                    }
+                }
+                Err(e) => eprintln!("Failed to resume session {}: {}", rid, e),
+            }
+        }
+    }
+    resumed
+}
+
+/// Handle client disconnect for the last client of a shared session (Task 6.1):
+/// session-close evolution hook, heuristic session memory, final persistence,
+/// and session removal.
+async fn lc_session_close(
+    shared: &SharedState,
+    session: &Arc<SharedSession>,
+    client_id: ClientId,
+    session_id: &str,
+    hook_cwd: &str,
+) {
+    let is_last = session.remove_client(client_id).await;
+    let cleanup_guard = if is_last {
+        shared
+            .session_registry
+            .acquire_last_client_cleanup(session_id, session)
+            .await
+    } else {
+        None
+    };
+    if is_last && cleanup_guard.is_some() {
+        // ── Session-close evolution hook ──
+        // Extract structured summary before removing the session.
+        {
+            let engine = session.engine_read().await;
+            let messages = engine.get_messages();
+            let usage = engine.get_usage().clone();
+            let model = engine.get_model().to_string();
+            let messages_clone = messages.to_vec();
+            drop(engine);
+
+            // Estimate session duration from first and last message timestamps
+            let duration_secs = if let [first, .., last] = messages_clone.as_slice() {
+                let first_ts = &first.timestamp;
+                let last_ts = &last.timestamp;
+                (|| -> Option<u64> {
+                    let t1 = chrono::DateTime::parse_from_rfc3339(first_ts).ok()?;
+                    let t2 = chrono::DateTime::parse_from_rfc3339(last_ts).ok()?;
+                    Some((t2 - t1).num_seconds().max(0) as u64)
+                })()
+                .unwrap_or(0)
+            } else {
+                0
+            };
+
+            // Estimate total cost from token usage (Claude Sonnet pricing)
+            let estimated_cost = (usage.input_tokens as f64 * 3.0e-6)
+                + (usage.output_tokens as f64 * 15.0e-6)
+                + (usage.cache_read_input_tokens.unwrap_or(0) as f64 * 0.3e-6);
+
+            // ── Save session memory on close if not yet written ──
+            // This ensures that even if the background updater never ran
+            // (e.g., short session), the next startup will have a summary.
+            {
+                let engine = session.engine_read().await;
+                if let Some(ref sm) = engine.get_session_memory() {
+                    if !sm.is_available() && messages_clone.len() >= 4 {
+                        eprintln!(
+                            "Session close: generating heuristic session memory ({} messages)",
+                            messages_clone.len()
+                        );
+
+                        let mut summary_parts = vec!["# Session Summary".to_string()];
+
+                        // Extract user messages as task list
+                        let mut task_descriptions = Vec::new();
+                        for msg in &messages_clone {
+                            if let crate::models::message::MessageContent::User {
+                                message, ..
+                            } = &msg.content
+                            {
+                                if let serde_json::Value::String(s) = &message.content {
+                                    let first_line = s.lines().next().unwrap_or("");
+                                    if !first_line.is_empty() && first_line.len() < 200 {
+                                        task_descriptions.push(first_line.to_string());
+                                    }
+                                }
+                            }
+                        }
+
+                        if !task_descriptions.is_empty() {
+                            summary_parts.push("## Tasks Discussed".to_string());
+                            for (i, task) in task_descriptions.iter().take(20).enumerate() {
+                                summary_parts.push(format!("{}. {}", i + 1, task));
+                            }
+                        }
+
+                        summary_parts.push(format!(
+                            "\n## Stats\n- Messages: {}\n- Duration: {}s\n- Cost: ${:.4}",
+                            messages_clone.len(),
+                            duration_secs,
+                            estimated_cost
+                        ));
+
+                        let summary = summary_parts.join("\n");
+                        sm.update(summary);
+                        eprintln!("Session memory saved on close ({} chars)", sm.get().len());
+                    }
+                }
+            }
+
+            shared
+                .evolution_engine
+                .on_session_close(
+                    session_id,
+                    hook_cwd,
+                    &model,
+                    &messages_clone,
+                    &usage,
+                    estimated_cost,
+                    duration_secs,
+                )
+                .await;
+        }
+
+        match shared.session_registry.persist_session(session_id).await {
+            Ok(()) => {
+                shared
+                    .session_registry
+                    .remove_after_last_client_cleanup(session_id)
+                    .await;
+                eprintln!(
+                    "Shared session '{}' removed (last client disconnected)",
+                    session_id
+                );
+            }
+            Err(error) => eprintln!(
+                "[daemon] WARNING: keeping session '{}' in memory because final persistence failed: {}",
+                session_id, error
+            ),
+        }
+    }
 }
 
 /// Run the daemon under a Windows service context.
@@ -959,788 +1003,51 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    let is_daemon = args.iter().any(|a| a == "--daemon");
+    // Parse CLI flags (--daemon, --cwd, --resume, --think, --sandbox)
+    let opts = startup::parse_cli_options(&args)?;
 
-    // CRITICAL: Ignore SIGPIPE so we don't die when CLI disconnects stdout/stderr
-    #[cfg(unix)]
-    unsafe {
-        libc::signal(libc::SIGPIPE, libc::SIG_IGN);
-    }
+    // Bind daemon socket, announce it on stdout, redirect logs in daemon mode
+    let (socket_path, server) = startup::bind_and_announce(&opts.cwd_str, opts.is_daemon).await?;
 
-    // Parse --cwd flag or use current directory
-    let cwd_str = args
-        .iter()
-        .position(|a| a == "--cwd")
-        .and_then(|i| args.get(i + 1))
-        .map(|s| s.to_string())
-        .unwrap_or_else(|| {
-            std::env::current_dir()
-                .map(|d| d.to_string_lossy().to_string())
-                .unwrap_or_else(|_| ".".to_string())
-        });
-    let _cwd = PathBuf::from(&cwd_str);
+    // Load config, resolve model profile, build and pre-warm the API client
+    let (baoclaw_config, api_client) = startup::load_config_and_api_client();
 
-    // Parse --resume flag for session resumption
-    let cli_resume_session_id = args
-        .iter()
-        .position(|a| a == "--resume")
-        .and_then(|i| args.get(i + 1))
-        .map(|s| s.to_string());
+    // Build engine tools (core tools + AgentTool + ToolSearchTool)
+    let (evolution_engine, engine_tools) =
+        startup::build_engine_tools(&opts.cwd_str, &opts.sandbox_config, &api_client);
 
-    // Parse --think flag for extended thinking
-    let cli_thinking_config = if args.iter().any(|a| a == "--think") {
-        let budget = args
-            .iter()
-            .position(|a| a == "--think")
-            .and_then(|i| args.get(i + 1))
-            .and_then(|s| s.parse::<u32>().ok())
-            .unwrap_or(10240);
-        ThinkingConfig::Enabled {
-            budget_tokens: budget,
-        }
-    } else {
-        ThinkingConfig::Disabled
-    };
+    // Load skill prompt + long-term memory, combine into append_system_prompt
+    let (combined_append_prompt, memory_store) =
+        startup::load_prompts_and_memory(&opts.cwd_str).await;
 
-    // Parse --sandbox flag for sandboxed command execution
-    // Usage: --sandbox bwrap | --sandbox docker | --sandbox none
-    // If flag is omitted, no sandbox is used (direct execution).
-    if let Some(mode) = args
-        .iter()
-        .position(|arg| arg == "--sandbox")
-        .and_then(|index| args.get(index + 1))
-    {
-        if !matches!(
-            mode.as_str(),
-            "bwrap" | "bubblewrap" | "docker" | "none" | "off"
-        ) {
-            return Err(format!(
-                "Unknown sandbox mode '{}'. Use bwrap, docker, or none.",
-                mode
-            )
-            .into());
-        }
-    }
-    let sandbox_config: Option<Arc<engine::sandbox::SandboxConfig>> = args
-        .iter()
-        .position(|a| a == "--sandbox")
-        .and_then(|i| args.get(i + 1))
-        .map(|s| s.as_str())
-        .map(|mode| {
-            use engine::sandbox::{SandboxBackend, SandboxConfig};
-            let backend = match mode {
-                "bwrap" | "bubblewrap" => {
-                    eprintln!("[sandbox] Using Bubblewrap (bwrap) isolation");
-                    SandboxBackend::Bubblewrap
-                }
-                "docker" => {
-                    eprintln!("[sandbox] Using Docker container isolation");
-                    SandboxBackend::Docker {
-                        image: std::env::var("BAOCLAW_SANDBOX_IMAGE")
-                            .unwrap_or_else(|_| "baoclaw-sandbox:latest".into()),
-                    }
-                }
-                "none" | "off" => {
-                    eprintln!("[sandbox] Sandbox disabled (direct execution)");
-                    SandboxBackend::None
-                }
-                _ => unreachable!("sandbox mode validated before parsing"),
-            };
-            let mut cfg = SandboxConfig {
-                backend,
-                ..SandboxConfig::default()
-            };
-            // Auto-mount the working directory as read-write
-            cfg.rw_mounts.push(cwd_str.clone());
-            // Mount ~/.baoclaw for config/memory/session data access
-            let home = std::env::var("HOME").unwrap_or_else(|_| "/root".to_string());
-            let baoclaw_dir = format!("{}/.baoclaw", home);
-            if std::path::Path::new(&baoclaw_dir).exists() {
-                cfg.rw_mounts.push(baoclaw_dir);
-            }
-            // Mount /tmp for temp file exchange between host and sandbox
-            cfg.rw_mounts.push("/tmp".to_string());
-            // Set workdir to the project CWD
-            cfg.workdir = Some(cwd_str.clone());
-            Arc::new(cfg)
-        });
-
-    // If --sandbox flag was provided without a value, use auto-detect
-    let sandbox_config = sandbox_config.or_else(|| {
-        if args.iter().any(|a| a == "--sandbox") {
-            eprintln!("[sandbox] No mode specified, auto-detecting...");
-            let mut cfg = engine::sandbox::SandboxConfig::auto_detect();
-            cfg.rw_mounts.push(cwd_str.clone());
-            let home = std::env::var("HOME").unwrap_or_else(|_| "/root".to_string());
-            let baoclaw_dir = format!("{}/.baoclaw", home);
-            if std::path::Path::new(&baoclaw_dir).exists() {
-                cfg.rw_mounts.push(baoclaw_dir);
-            }
-            cfg.rw_mounts.push("/tmp".to_string());
-            cfg.workdir = Some(cwd_str.clone());
-            eprintln!("[sandbox] Auto-detected: {}", cfg.description());
-            Some(Arc::new(cfg))
-        } else {
-            None
-        }
-    });
-
-    // Validate sandbox configuration at startup
-    if let Some(ref cfg) = sandbox_config {
-        if let Some(err) = cfg.validate() {
-            return Err(format!("Sandbox configuration invalid: {}", err).into());
-        } else {
-            eprintln!("[sandbox] ✓ Sandbox ready: {}", cfg.description());
-        }
-    }
-
-    // Create socket: prefer fixed machine-level path (P3-1c), fall back to cwd-hash
-    let socket_path = resolve_daemon_socket(&cwd_str);
-
-    // IpcServer::bind probes and removes stale sockets, avoiding a
-    // check-then-delete race during daemon startup.
-    let server = IpcServer::bind(&socket_path).await?;
-
-    // Output socket path for clients to find
-    println!("SOCKET:{}", socket_path.display());
-    use std::io::Write;
-    std::io::stdout().flush()?;
-
-    // In daemon mode, close stdout/stderr after emitting socket path
-    // so broken pipes from the launching CLI can't affect us
-    if is_daemon {
-        let log_path = socket_path.with_extension("log");
-        let log_file = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&log_path)
-            .ok();
-
-        #[cfg(unix)]
-        {
-            use std::os::unix::io::AsRawFd;
-            if let Some(ref f) = log_file {
-                unsafe {
-                    libc::dup2(f.as_raw_fd(), 2); // stderr → log
-                }
-            } else {
-                // Init-time: /dev/null is guaranteed to exist on unix targets;
-                // failure here means the fd table is exhausted — aborting startup
-                // is the correct behavior, hence unwrap is intentional.
-                let devnull = std::fs::File::open("/dev/null")
-                    .expect("/dev/null must be openable at startup");
-                unsafe {
-                    libc::dup2(devnull.as_raw_fd(), 2);
-                }
-            }
-            let devnull =
-                std::fs::File::open("/dev/null").expect("/dev/null must be openable at startup");
-            unsafe {
-                libc::dup2(devnull.as_raw_fd(), 1); // stdout → /dev/null
-            }
-        }
-
-        eprintln!(
-            "baoclaw-core daemon started (pid={}, cwd={})",
-            std::process::id(),
-            cwd_str
-        );
-    }
-
-    // Load BaoClaw config from ~/.baoclaw/config.json
-    let mut baoclaw_config = config::load_config();
-    config::apply_env_override(&mut baoclaw_config);
-
-    // === P1-1: Model profiles support ===
-    // Resolve the primary profile (auto-migrated from old format by normalize_profiles).
-    // If model_profiles is populated, use the primary profile's api_type/key/base_url.
-    // Otherwise, fall back to the old env-var-based logic for backward compatibility.
-    //
-    // resolve_api_key priority: profile.api_key → env var based on api_type
-    // resolve_base_url priority: profile.base_url → env var based on api_type
-    fn resolve_api_key(profile: &config::ModelProfile) -> String {
-        // 1. Prefer profile.api_key (new format)
-        if let Some(key) = &profile.api_key {
-            if !key.is_empty() {
-                return key.clone();
-            }
-        }
-        // 2. Fall back to environment variable (backward compat)
-        match profile.api_type.as_str() {
-            "openai" => std::env::var("OPENAI_API_KEY").unwrap_or_default(),
-            _ => std::env::var("ANTHROPIC_API_KEY").unwrap_or_default(),
-        }
-    }
-    fn resolve_base_url(profile: &config::ModelProfile) -> Option<String> {
-        if let Some(url) = &profile.base_url {
-            if !url.is_empty() {
-                return Some(url.clone());
-            }
-        }
-        match profile.api_type.as_str() {
-            "openai" => std::env::var("OPENAI_BASE_URL").ok(),
-            _ => std::env::var("ANTHROPIC_BASE_URL").ok(),
-        }
-    }
-
-    // Determine the effective primary profile for API client construction.
-    // After normalize_profiles, primary_profile is always Some if model is set.
-    let primary_profile: config::ModelProfile = {
-        let name = baoclaw_config
-            .primary_profile
-            .as_deref()
-            .unwrap_or("primary");
-        baoclaw_config
-            .model_profiles
-            .get(name)
-            .cloned()
-            .unwrap_or_else(|| {
-                // Fallback: construct from legacy fields
-                config::ModelProfile {
-                    model: baoclaw_config.model.clone(),
-                    api_type: baoclaw_config.api_type.clone(),
-                    api_key: None,
-                    base_url: baoclaw_config.openai_base_url.clone(),
-                    context_window: baoclaw_config.context_window,
-                    auto_compact_threshold_ratio: baoclaw_config.auto_compact_threshold_ratio,
-                    max_retries_per_model: baoclaw_config.max_retries_per_model,
-                }
-            })
-    };
-
-    // Get API key and config: use profile's api_type to pick env vars / credentials
-    let api_client: Arc<UnifiedClient> = {
-        let api_key = resolve_api_key(&primary_profile);
-        let base_url = resolve_base_url(&primary_profile);
-        match primary_profile.api_type.as_str() {
-            "openai" => {
-                eprintln!(
-                    "Using OpenAI-compatible API (model: {}, base_url: {})",
-                    primary_profile.model,
-                    base_url.as_deref().unwrap_or("https://api.openai.com")
-                );
-                let config = ApiClientConfig {
-                    api_key,
-                    base_url,
-                    max_retries: None,
-                    api_path: None,
-                };
-                Arc::new(UnifiedClient::new_openai(config))
-            }
-            _ => {
-                let api_path = std::env::var("ANTHROPIC_API_PATH").ok();
-                eprintln!(
-                    "Using Anthropic API (model: {}, base_url: {})",
-                    primary_profile.model,
-                    base_url.as_deref().unwrap_or("https://api.anthropic.com")
-                );
-                let config = ApiClientConfig {
-                    api_key,
-                    base_url,
-                    max_retries: None,
-                    api_path,
-                };
-                Arc::new(UnifiedClient::new_anthropic(config))
-            }
-        }
-    };
-
-    // Pre-warm the API connection pool in the background (TCP + TLS handshake
-    // before the first real request, saving 100-300ms on first query).
-    {
-        let prewarm_client = Arc::clone(&api_client);
-        tokio::spawn(async move {
-            prewarm_client.prewarm().await;
-        });
-    }
-
-    // Allow tools to access ~/.baoclaw/ in addition to project cwd
-    let home_dir = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
-    let baoclaw_home = std::path::PathBuf::from(&home_dir).join(".baoclaw");
-    let additional_dirs = vec![baoclaw_home];
-
-    // Create evolution engine for self-improvement
-    let evolution_engine = Arc::new(engine::evolution::EvolutionEngine::new(
-        std::path::Path::new(&cwd_str),
-    ));
-
-    // Build the core tool list (everything except AgentTool itself, which is added after)
-    // BashTool is optionally sandboxed based on --sandbox CLI flag
-    let bash_tool: BashTool = match &sandbox_config {
-        Some(cfg) => BashTool::with_sandbox(Arc::clone(cfg)),
-        None => BashTool::new(),
-    };
-    let core_tools: Vec<Arc<dyn tools::Tool>> = vec![
-        Arc::new(bash_tool),
-        Arc::new(FileReadTool::new(additional_dirs.clone())),
-        Arc::new(FileWriteTool::new(additional_dirs.clone())),
-        Arc::new(FileEditTool::new(additional_dirs.clone())),
-        Arc::new(WebFetchTool::new()),
-        Arc::new(WebSearchTool::new()),
-        Arc::new(ImageGenTool::new()),
-        Arc::new(ImageEditTool::new()),
-        Arc::new(NotebookEditTool::new()),
-        Arc::new(TodoWriteTool::new()),
-        Arc::new(MemoryTool::new()),
-        Arc::new(ProjectNoteTool::new()),
-        Arc::new(tools::builtins::SkillTool::new(PathBuf::from(&cwd_str))),
-        Arc::new(tools::builtins::EvolveTool::new(Arc::clone(
-            &evolution_engine,
-        ))),
-    ];
-
-    // AgentTool gets the full core tool set so sub-agents can write, edit, run bash, etc.
-    let agent_tool = AgentTool::new_with_full_tools(Arc::clone(&api_client), core_tools.clone());
-
-    let mut engine_tools: Vec<Arc<dyn tools::Tool>> = core_tools;
-    engine_tools.push(Arc::new(agent_tool));
-
-    // ToolSearchTool needs the full tool list, so register it last
-    let engine_tools: Vec<Arc<dyn tools::Tool>> = {
-        let mut all = engine_tools;
-
-        //         // MCP integration: discover and connect to MCP servers (with timeout)
-        //         // Singleton check: ensure MCP is only initialized once
-        //         if MCP_INITIALIZED.load(Ordering::SeqCst) {
-        //             eprintln!("MCP already initialized, skipping...");
-        //         } else {
-        //             MCP_INITIALIZED.store(true, Ordering::SeqCst);
-        //         let mcp_servers = discovery::mcp_config::discover_mcp_servers(std::path::Path::new(&cwd_str)).await;
-        //         for server_info in &mcp_servers {
-        //             if server_info.disabled {
-        //                 continue;
-        //             }
-        //             if let Some(ref command) = server_info.command {
-        //                 let config = mcp::McpServerConfig {
-        //                     name: server_info.name.clone(),
-        //                     command: command.clone(),
-        //                     args: server_info.args.clone(),
-        //                     env: std::collections::HashMap::new(),
-        //                     transport: mcp::McpTransportType::Stdio,
-        //                 };
-        //                 let mut client = mcp::McpClient::new(config);
-        //                 let connect_result = tokio::time::timeout(
-        //                     std::time::Duration::from_secs(30),
-        //                     client.connect_stdio(),
-        //                 ).await;
-        //                 match connect_result {
-        //                     Ok(Ok(())) => {
-        //                         let client = Arc::new(client);
-        //                         if let Ok(tools) = client.list_tools().await {
-        //                             eprintln!("MCP server '{}': {} tools discovered", server_info.name, tools.len());
-        //                             for tool_def in &tools {
-        //                                 eprintln!("  MCP tool: {}", tool_def.name);
-        //                             }
-        //                             for tool_def in tools {
-        //                                 let wrapper = McpToolWrapper::new(
-        //                                     Arc::clone(&client),
-        //                                     tool_def,
-        //                                     server_info.name.clone(),
-        //                                 );
-        //                                 all.push(Arc::new(wrapper));
-        //                             }
-        //                         } else {
-        //                             eprintln!("MCP server '{}': list_tools failed", server_info.name);
-        //                         }
-        //                         eprintln!("MCP server '{}' connected", server_info.name);
-        //                     }
-        //                     Ok(Err(e)) => {
-        //                         eprintln!("Warning: MCP server '{}' failed to connect: {}", server_info.name, e);
-        //                     }
-        //                     Err(_) => {
-        //                         eprintln!("Warning: MCP server '{}' connection timed out (30s)", server_info.name);
-        //                     }
-        //                 }
-        //             }
-        //         }
-        //
-
-        all.push(Arc::new(ToolSearchTool::new(all.clone())));
-        eprintln!("Total tools registered: {} (including MCP)", all.len());
-        all
-    };
-
-    // Load skill content for system prompt injection
-    let skill_prompt =
-        discovery::skills::load_skills_for_prompt(std::path::Path::new(&cwd_str)).await;
-    if let Some(ref sp) = skill_prompt {
-        eprintln!("Loaded skills into system prompt ({} chars)", sp.len());
-    }
-
-    // Load long-term memory
-    let memory_store = Arc::new(engine::memory::MemoryStore::load());
-    let memory_prompt = memory_store.build_prompt_fragment().await;
-    if let Some(ref mp) = memory_prompt {
-        eprintln!(
-            "Loaded long-term memory into system prompt ({} chars)",
-            mp.len()
-        );
-    }
-
-    // Combine skill + memory into append_system_prompt
-    let combined_append_prompt = {
-        let mut parts = Vec::new();
-        if let Some(sp) = skill_prompt {
-            parts.push(sp);
-        }
-        if let Some(mp) = memory_prompt {
-            parts.push(mp);
-        }
-        if parts.is_empty() {
-            None
-        } else {
-            Some(parts.join("\n\n"))
-        }
-    };
-
-    // Reuse existing project session or create new one.
-    // One project directory = one session file.
-    let cwd_key = cwd_hash(&cwd_str);
-    let session_id = match engine::transcript::find_latest_session_for_cwd(&cwd_str) {
-        Some(legacy_id) => {
-            let legacy_prefix = format!("{}-", legacy_cwd_hash(&cwd_str));
-            if let Some(suffix) = legacy_id.strip_prefix(&legacy_prefix) {
-                let normalized_id = format!("{}-{}", cwd_key, suffix);
-                let sessions_dir = engine::session_persistence::default_sessions_dir();
-                let migrated = engine::session_persistence::migrate_legacy_session(
-                    &sessions_dir,
-                    &legacy_id,
-                    &normalized_id,
-                    &cwd_str,
-                )
-                .unwrap_or(false);
-                if migrated
-                    || engine::session_persistence::load_session_state(
-                        &sessions_dir,
-                        &normalized_id,
-                    )
-                    .is_some()
-                {
-                    normalized_id
-                } else {
-                    legacy_id
-                }
-            } else {
-                legacy_id
-            }
-        }
-        None => format!("{}-{}", cwd_key, &uuid::Uuid::new_v4().to_string()[..8]),
-    };
-    eprintln!("Session ID: {} (cwd: {})", session_id, cwd_str);
+    // Reuse existing project session or create a new one
+    let session_id = startup::resolve_session_id(&opts.cwd_str);
 
     // Write metadata file for discovery by CLI
-    write_meta(&socket_path, &cwd_str, &session_id);
+    write_meta(&socket_path, &opts.cwd_str, &session_id);
 
-    let state_manager = Arc::new(StateManager::new(CoreState {
-        session_id: session_id.clone(),
-        model: baoclaw_config.model.clone(),
-        verbose: false,
-        tasks: std::collections::HashMap::new(),
-        usage: EMPTY_USAGE,
-        total_cost_usd: 0.0,
-    }));
-
-    // If daemon mode, fully detach from controlling terminal:
-    //   1. setsid() — new session + new process group, no controlling terminal
-    //   2. Ignore SIGHUP — extra safety against accidental kills
-    // This prevents zombie accumulation: without setsid(), the daemon's ppid
-    // stays as the launching terminal shell. When the terminal exits, orphaned
-    // children get reparented to init slowly, and any subprocess zombies in the
-    // daemon won't be reaped promptly.
-    if is_daemon {
-        #[cfg(unix)]
-        unsafe {
-            libc::setsid();
-            libc::signal(libc::SIGHUP, libc::SIG_IGN);
-        }
-    }
-
-    let should_exit = Arc::new(AtomicBool::new(false));
-
-    // Create PermissionGate and PermissionManager for interactive permission flow
-    let permission_gate = PermissionGate::new();
-    let permission_manager = Arc::new(tokio::sync::RwLock::new(
-        permissions::manager::PermissionManager::default(),
-    ));
-    if let Some(perms_val) = baoclaw_config.extra.get("permissions") {
-        if let Ok(ctx) =
-            serde_json::from_value::<permissions::manager::ToolPermissionContext>(perms_val.clone())
-        {
-            // main() runs inside the tokio runtime — blocking_write() here
-            // panics ("Cannot block the current thread from within a
-            // runtime"). Startup has no contenders, so a plain async write
-            // is safe.
-            let mgr = permission_manager.write().await;
-            mgr.update_context(|c| *c = ctx);
-        }
-    }
-
-    // Create TaskManager for background task execution
-    let task_manager = Arc::new(TaskManager::new(
-        Arc::clone(&api_client),
-        engine_tools.clone(),
-        baoclaw_config.context_window,
-        baoclaw_config.auto_compact_threshold_ratio,
-    ));
-
-    let team_executor = Arc::new(engine::team::TeamManager::new(
-        Arc::clone(&api_client),
-        engine_tools.clone(),
-        PathBuf::from(&cwd_str),
-        baoclaw_config.model.clone(),
-    ));
-
-    // Create memory archive and cleanup scheduler for periodic memory maintenance
-    let memory_archive = Arc::new(engine::memory::MemoryArchive::load());
-    let memory_decay_config = engine::memory::DecayConfig::load();
-    let memory_cleanup = Arc::new(engine::memory::MemoryCleanupScheduler::new(
-        Arc::clone(&memory_store),
-        Arc::clone(&memory_archive),
-        memory_decay_config,
-    ));
-
-    let shared = SharedState {
-        engine_tools,
-        api_client,
-        permission_gate,
-        permission_manager,
-        task_manager,
-        state_manager,
+    // Assemble the daemon SharedState
+    let (shared, should_exit) = startup::assemble_shared_state(
+        &opts.cwd_str,
+        opts.is_daemon,
         baoclaw_config,
-        cli_thinking_config,
-        _cli_resume_session_id: cli_resume_session_id,
-        session_id: session_id.clone(),
-        should_exit: Arc::clone(&should_exit),
-        session_registry: Arc::new(SessionRegistry::new()),
-        skill_prompt: combined_append_prompt,
-        memory_store,
-        memory_archive,
-        memory_cleanup,
+        api_client,
+        engine_tools,
         evolution_engine,
-        cron_manager: Arc::new(engine::cron::CronManager::new()),
-        project_registry: Arc::new(engine::projects::ProjectRegistry::new()),
-        file_cache: Arc::new(tokio::sync::Mutex::new(
-            engine::file_cache::FileCache::default_capacity(),
-        )),
-        tool_result_store: Some(Arc::new(
-            engine::tool_result_store::ToolResultStore::for_session(&session_id),
-        )),
-        hook_manager: Arc::new(engine::hooks::HookManager::new()),
-        team_executor,
-    };
+        memory_store,
+        combined_append_prompt,
+        opts.cli_thinking_config,
+        opts.cli_resume_session_id,
+        session_id,
+    )
+    .await;
 
-    // ══════════════════════════════════════════════════════════
-    // Start cron scheduler — runs periodic jobs in background.
-    // Each job gets a fresh QueryEngine to execute its prompt,
-    // and results are broadcast to all connected clients.
-    // ══════════════════════════════════════════════════════════
-    {
-        let cron_manager = Arc::clone(&shared.cron_manager);
-        let cron_tools = shared.engine_tools.clone();
-        let cron_api_client = Arc::clone(&shared.api_client);
-        let cron_baoclaw_config = shared.baoclaw_config.clone();
-        let cron_thinking_config = shared.cli_thinking_config.clone();
-        let cron_append_prompt = shared.skill_prompt.clone();
-        let cron_session_id = shared.session_id.clone();
-        let cron_file_cache = Arc::clone(&shared.file_cache);
-        let cron_tool_result_store = shared.tool_result_store.as_ref().map(Arc::clone);
-        let cron_hook_manager = Arc::clone(&shared.hook_manager);
+    // Start cron scheduler, memory cleanup, and shutdown signal handlers
+    startup::start_cron_scheduler(&shared).await;
+    startup::start_background_tasks(&shared);
 
-        let run_fn: Arc<
-            dyn Fn(String, Option<String>) -> tokio::task::JoinHandle<String> + Send + Sync,
-        > = Arc::new(move |prompt: String, cwd: Option<String>| {
-            let tools = cron_tools.clone();
-            let api_client = Arc::clone(&cron_api_client);
-            let baoclaw_config = cron_baoclaw_config.clone();
-            let thinking_config = cron_thinking_config.clone();
-            let append_prompt = cron_append_prompt.clone();
-            let _session_id = cron_session_id.clone();
-            let file_cache = Arc::clone(&cron_file_cache);
-            let tool_result_store = cron_tool_result_store.as_ref().map(Arc::clone);
-            let hook_manager = Arc::clone(&cron_hook_manager);
-
-            let job_session_id = format!("cron-{}", &uuid::Uuid::new_v4().to_string()[..8]);
-
-            tokio::spawn(async move {
-                let cwd_path = cwd.map(PathBuf::from).unwrap_or_else(|| {
-                    std::env::var("HOME")
-                        .map(PathBuf::from)
-                        .unwrap_or_else(|_| PathBuf::from("/tmp"))
-                });
-
-                let mut engine = QueryEngine::new(QueryEngineConfig {
-                    cwd: cwd_path,
-                    tools,
-                    api_client,
-                    model: baoclaw_config.model.clone(),
-                    thinking_config,
-                    max_turns: Some(10),
-                    max_budget_usd: Some(0.5),
-                    verbose: false,
-                    custom_system_prompt: None,
-                    append_system_prompt: append_prompt,
-                    session_id: Some(job_session_id),
-                    fallback_models: baoclaw_config.fallback_models.clone(),
-                    max_retries_per_model: baoclaw_config.max_retries_per_model,
-                    context_window: baoclaw_config.context_window,
-                    auto_compact_threshold_ratio: baoclaw_config.auto_compact_threshold_ratio,
-                    parent_turn_id: None,
-                    agent_label: Some("cron".to_string()),
-                    session_memory: None,
-                    file_cache: Some(file_cache),
-                    tool_result_store,
-                    hook_manager: Some(hook_manager),
-                    // Headless cron jobs must never hang on an interactive
-                    // permission prompt — mutating tools fail closed instead.
-                    permission: None,
-                });
-
-                let mut rx = engine.submit_message(prompt).await;
-                let mut result = String::new();
-                while let Some(event) = rx.recv().await {
-                    match event {
-                        EngineEvent::AssistantChunk { content, .. } => result.push_str(&content),
-                        EngineEvent::Result(qr) => {
-                            if let Some(text) = qr.text {
-                                if !text.is_empty() && result.is_empty() {
-                                    result = text;
-                                }
-                            }
-                            break;
-                        }
-                        EngineEvent::Error(_) => break,
-                        _ => {}
-                    }
-                }
-                if result.is_empty() {
-                    result = "(no output)".to_string();
-                }
-                result
-            })
-        });
-
-        tokio::spawn(async move {
-            cron_manager.start_scheduler(run_fn).await;
-        });
-    }
-
-    // ══════════════════════════════════════════════════════════
-    // Start memory cleanup scheduler — runs periodic memory maintenance.
-    // Applies decay to memories, archives low-importance ones,
-    // and cleans up the archive when it exceeds max_entries.
-    // ══════════════════════════════════════════════════════════
-    {
-        let memory_cleanup = Arc::clone(&shared.memory_cleanup);
-        tokio::spawn(async move {
-            let _ = memory_cleanup.start().await;
-        });
-    }
-
-    // ══════════════════════════════════════════════════════════
-    // P3-1c: Graceful shutdown handler (SIGTERM/SIGINT)
-    // On shutdown signal, persist all sessions to disk before exiting.
-    // ══════════════════════════════════════════════════════════
-    {
-        let registry = Arc::clone(&shared.session_registry);
-        tokio::spawn(async move {
-            use tokio::signal;
-
-            let ctrl_c = async {
-                let _ = signal::ctrl_c().await;
-            };
-
-            #[cfg(unix)]
-            let terminate = async {
-                let mut sig = signal::unix::signal(signal::unix::SignalKind::terminate())
-                    .expect("failed to install SIGTERM handler (init-time; no recovery possible)");
-                sig.recv().await;
-            };
-
-            #[cfg(not(unix))]
-            let terminate = std::future::pending::<()>();
-
-            tokio::select! {
-                _ = ctrl_c => {}
-                _ = terminate => {}
-            }
-
-            eprintln!("[daemon] received shutdown signal, persisting sessions...");
-            registry.persist_all().await;
-            eprintln!("[daemon] shutdown complete, exiting");
-            std::process::exit(0);
-        });
-    }
-
-    // ══════════════════════════════════════════════════════════
-    // Windows service shutdown monitor (P3-1d)
-    // When running as a child of the service host (--daemon mode),
-    // periodically check if SCM has requested stop via the service host.
-    // The service host sets the shutdown flag, and this monitor persists
-    // sessions and exits gracefully.
-    // ══════════════════════════════════════════════════════════
-    #[cfg(target_os = "windows")]
-    {
-        let reg = Arc::clone(&shared.session_registry);
-        tokio::spawn(async move {
-            loop {
-                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-                if windows_service::is_shutdown_requested() {
-                    tracing::info!("Windows SCM requested shutdown, persisting sessions...");
-                    eprintln!("[daemon] Windows SCM requested shutdown, persisting sessions...");
-                    let _ = reg.persist_all().await;
-                    eprintln!("[daemon] shutdown complete, exiting");
-                    std::process::exit(0);
-                }
-            }
-        });
-    }
-
-    // ══════════════════════════════════════════════════════════
-    // Main accept loop — spawns a task per client connection
-    // Multiple clients can be connected simultaneously, each
-    // with its own independent QueryEngine / conversation history.
-    // Only `shutdown` RPC terminates the daemon.
-    // ══════════════════════════════════════════════════════════
-    let should_exit_clone = Arc::clone(&should_exit);
-    loop {
-        if should_exit.load(Ordering::Relaxed) {
-            eprintln!("should_exit detected — breaking accept loop");
-            break;
-        }
-        eprintln!("Waiting for client connection...");
-
-        // Use select to race accept against a periodic should_exit check
-        // so shutdown actually terminates the daemon promptly
-        let accept_result = tokio::select! {
-            result = server.accept() => Some(result),
-            _ = async {
-                loop {
-                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-                    if should_exit_clone.load(Ordering::Relaxed) {
-                        break;
-                    }
-                }
-            } => None,
-        };
-
-        match accept_result {
-            None => {
-                eprintln!("should_exit watcher fired — breaking accept loop");
-                break;
-            }
-            Some(Ok(conn)) => {
-                eprintln!("Client connected");
-                let client_shared = shared.clone();
-                tokio::spawn(async move {
-                    handle_client(conn, client_shared).await;
-                });
-            }
-            Some(Err(e)) => {
-                eprintln!("Accept error: {}", e);
-                continue;
-            }
-        }
-    }
+    // Main accept loop — one task per client connection
+    startup::run_accept_loop(&server, &shared, &should_exit).await;
 
     // Cleanup
     cleanup_meta(&socket_path);
