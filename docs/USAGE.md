@@ -211,6 +211,7 @@ baoclaw-whatsapp         # long-running process
 /model       Current model configuration (API keys masked automatically)
 /config      Full configuration JSON (API keys masked automatically)
 /session     Current session info
+/rate       Rate the last interaction (good|bad|neutral) for preference data
 /clear       Clear the screen
 /exit        Exit
 ```

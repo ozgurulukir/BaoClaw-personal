@@ -8,7 +8,9 @@ A quick annotated tour of the repository, grouped by area. Verify paths locally 
 
 ### Rust core (`baoclaw-core/`)
 
-- **baoclaw-core/src/main.rs** — daemon entry point: Unix socket setup (Linux `$XDG_RUNTIME_DIR/baoclaw-sockets/baoclaw.sock`, fallback `/tmp/baoclaw-sockets/`), per-connection handling, RPC router registration, and startup config/permissions loading.
+- **baoclaw-core/src/main.rs** — daemon entry point: a short startup sequence plus the legacy connection handshake and session-close cleanup.
+- **baoclaw-core/src/startup.rs** — startup phases: CLI options, socket bind + announce (Linux `$XDG_RUNTIME_DIR/baoclaw.sock`, flat; macOS/Windows `baoclaw-sockets/baoclaw.sock`), config/API client, engine tools, prompts/memory/user profile, shared state assembly, cron scheduler, accept loop.
+- **baoclaw-core/src/shared_client.rs** — the shared-session RPC loop: one named `scm_*` handler per `ClientMethod` (90+ RPC handlers).
 - **baoclaw-core/src/ipc/router.rs** — JSON-RPC method parsing and dispatch of incoming IPC requests.
 - **baoclaw-core/src/tools/executor.rs** — the `execute_tool_with_permission` pipeline: validate → permission check → allow/deny/ask.
 - **baoclaw-core/src/permissions/manager.rs** — `ToolPermissionContext`, permission rules, and knobs (`auto_allow_channels`, `ask_timeout_secs`, `persist_grants`).
@@ -16,7 +18,7 @@ A quick annotated tour of the repository, grouped by area. Verify paths locally 
 
 ### TypeScript IPC SDK (`ts-ipc/`, package `baoclaw-ipc`)
 
-- **ts-ipc/cli.ts** — interactive CLI client for the daemon.
+- **ts-ipc/cli.ts** — interactive CLI client for the daemon (slash commands dispatch through an exact-match registry).
 - **ts-ipc/client.ts** — `IpcClient`: NDJSON JSON-RPC over the Unix domain socket.
 - **ts-ipc/controlChannel.ts** — second connection used for abort and permission decisions.
 - **ts-ipc/daemon.ts** — socket discovery conventions across Linux/macOS/Windows.
@@ -52,7 +54,7 @@ A quick annotated tour of the repository, grouped by area. Verify paths locally 
 
 ### User state at runtime (not in the repo)
 
-- **~/.baoclaw/** — per-user daemon state: `config.json`, `sessions/`, memories (`memory.jsonl`), `evolution/`, and `cron.json`.
+- **~/.baoclaw/** — per-user daemon state: `config.json`, `sessions/`, memories (`memory.jsonl`), the user profile (`USER.md`), `evolution/`, `telemetry.db`, and `cron.json`.
 
 ---
 

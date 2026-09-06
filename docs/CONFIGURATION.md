@@ -7,7 +7,8 @@
 ```
 ~/.baoclaw/                          # User-level (global, cross-project)
 ├── config.json                      # Main configuration
-├── memory.jsonl                     # Global memories (fallback)
+├── memory.jsonl                     # Global long-term memory
+├── USER.md                         # Persistent user profile (injected into the system prompt)
 ├── cron.json                        # Scheduled tasks
 ├── sessions/                        # Session transcripts (per-project)
 │   └── {cwd_hash}-{uuid}.jsonl
@@ -21,7 +22,7 @@
 ├── mcp-auth/                        # MCP OAuth tokens
 ├── models/                          # Local model files (whisper etc.)
 │   └── ggml-base.bin
-├── telemetry/                       # Telemetry events (local only)
+├── telemetry.db                    # Local telemetry (SQLite; turns + sessions)
 ├── evolution/                       # Self-evolution data
 │   ├── trajectories.jsonl           # Interaction history for RLHF
 │   ├── candidates/                  # Auto-extracted skill candidates
