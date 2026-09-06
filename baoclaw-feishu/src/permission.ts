@@ -2,8 +2,7 @@
  * PermissionManager — state machine for Feishu tool-use permission requests.
  *
  * Mirrors the WhatsApp gateway's flow (baoclaw-whatsapp/src/permission.ts),
- * reply-based because the lark-cli surface used by this gateway only sends
- * plain text/markdown (no interactive cards):
+ * card-first with a plain-text keyword fallback for older lark-clis:
  *   1. Formats a human-readable permission prompt (tool + input preview).
  *   2. Registers the request per chat with a 60-second auto-expiry; on expiry
  *      or supersede the caller denies the request with the daemon.
@@ -60,8 +59,106 @@ export function formatPermissionRequest(
     `工具: ${toolName}`,
     `输入: ${preview}`,
     "",
-    "回复 yes 允许 / always 总是允许此工具 / no 拒绝（60秒后自动拒绝）",
+    `回复 yes 允许 / always 总是允许此工具 / no 拒绝（${PERMISSION_TIMEOUT_MS / 1000}秒后自动拒绝）`,
   ].join("\n");
+}
+
+/**
+ * Build an interactive card version of the prompt (sent via
+ * `lark-cli im +messages-send --msg-type interactive`). Button values carry
+ * the DECISION ONLY — the pending request is looked up per chat, mirroring
+ * the Telegram keyboard — so the payload stays small and stable.
+ */
+export function buildPermissionCard(
+  toolName: string,
+  inputPreview: string,
+): Record<string, unknown> {
+  const preview = inputPreview || "—";
+  return {
+    config: { wide_screen_mode: false },
+    header: {
+      template: "orange",
+      title: { tag: "plain_text", content: "🔐 权限请求" },
+    },
+    elements: [
+      {
+        tag: "div",
+        text: {
+          tag: "lark_md",
+          content: `**工具:** ${toolName}\n**输入:** ${preview}`,
+        },
+      },
+      { tag: "hr" },
+      {
+        tag: "action",
+        actions: [
+          {
+            tag: "button",
+            text: { tag: "plain_text", content: "✅ 允许" },
+            type: "primary",
+            value: { perm_action: "allow" },
+          },
+          {
+            tag: "button",
+            text: { tag: "plain_text", content: "🔁 总是允许" },
+            value: { perm_action: "always" },
+          },
+          {
+            tag: "button",
+            text: { tag: "plain_text", content: "❌ 拒绝" },
+            type: "danger",
+            value: { perm_action: "deny" },
+          },
+        ],
+      },
+      {
+        tag: "note",
+        elements: [
+          {
+            tag: "plain_text",
+            content: `${PERMISSION_TIMEOUT_MS / 1000}秒后未决定将自动拒绝`,
+          },
+        ],
+      },
+    ],
+  };
+}
+
+/** Map a button `value` payload to a decision; null when unrecognized. */
+export function parseCardActionValue(
+  value: unknown,
+): PermissionDecision | null {
+  if (value === null || value === undefined) return null;
+  if (typeof value === "string") return parsePermissionReply(value);
+  if (typeof value === "object") {
+    const action = (value as Record<string, unknown>).perm_action;
+    if (typeof action === "string") return parsePermissionReply(action);
+  }
+  return null;
+}
+
+/**
+ * Extract a permission decision + chat id from a card.action.trigger NDJSON
+ * event. lark-cli's flattened envelope shape for card events is not
+ * documented, so probe the common locations (raw, `event`, `body` wrappers)
+ * for the chat id (`open_chat_id` / `chat_id`) and the button value.
+ * Returns null when the event is not a recognizable permission click.
+ */
+export function parseCardAction(
+  raw: unknown,
+): { chatId: string; decision: PermissionDecision } | null {
+  const candidates = [raw, (raw as any)?.event, (raw as any)?.body];
+  for (const c of candidates) {
+    if (!c || typeof c !== "object") continue;
+    const chatId: unknown =
+      c.open_chat_id ?? c.chat_id ?? c.context?.open_chat_id;
+    const value = c.action?.value ?? c.value;
+    const decision = parseCardActionValue(value);
+    if (typeof chatId === "string" && chatId && decision) {
+      return { chatId, decision };
+    }
+  }
+  return null;
 }
 
 /**
@@ -142,11 +239,25 @@ export class PermissionManager {
     text: string,
     client: { request: (method: string, params?: unknown) => Promise<unknown> },
   ): Promise<{ decision: PermissionDecision; delivered: boolean } | null> {
-    const pending = this.pending.get(chatId);
-    if (!pending) return null;
-
     const decision = parsePermissionReply(text);
     if (!decision) return null;
+    return this.resolvePending(chatId, decision, client);
+  }
+
+  /**
+   * Resolve the chat's pending request with an explicit decision — the
+   * single resolution path shared by text replies and card button clicks.
+   * Returns null when nothing is pending; forwards the decision to the
+   * daemon (swallowing IPC errors so the user is never stuck) and clears
+   * the pending entry + timer. `"always"` records a whole-tool allow rule.
+   */
+  async resolvePending(
+    chatId: string,
+    decision: PermissionDecision,
+    client: { request: (method: string, params?: unknown) => Promise<unknown> },
+  ): Promise<{ decision: PermissionDecision; delivered: boolean } | null> {
+    const pending = this.pending.get(chatId);
+    if (!pending) return null;
 
     let delivered = false;
     try {

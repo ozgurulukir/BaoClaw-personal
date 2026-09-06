@@ -44,7 +44,13 @@ import {
   formatHelp,
 } from "./commands.js";
 import { formatForFeishu, splitMessage } from "./formatter.js";
-import { PermissionManager, formatPermissionRequest } from "./permission.js";
+import {
+  PermissionManager,
+  buildPermissionCard,
+  formatPermissionRequest,
+  parseCardAction,
+  type PermissionDecision,
+} from "./permission.js";
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
@@ -158,6 +164,76 @@ function sendFeishuMessage(
   });
 }
 
+/** Send an interactive card (permission prompts) as raw card JSON. */
+function sendFeishuCard(
+  chatId: string,
+  card: Record<string, unknown>,
+): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const args = [
+      "im",
+      "+messages-send",
+      "--as",
+      "bot",
+      "--chat-id",
+      chatId,
+      "--msg-type",
+      "interactive",
+      "--content",
+      JSON.stringify(card),
+    ];
+    const proc = spawn("lark-cli", args, { stdio: ["ignore", "pipe", "pipe"] });
+    let stderr = "";
+    proc.stderr.on("data", (d: Buffer) => {
+      stderr += d.toString();
+    });
+    proc.on("close", (code) => {
+      if (code === 0) resolve();
+      else
+        reject(new Error(`card send exited ${code}: ${stderr.slice(0, 200)}`));
+    });
+    proc.on("error", reject);
+  });
+}
+
+/**
+ * Verify the installed lark-cli supports consuming card.action.trigger
+ * events before wiring buttons into prompts. On an unsupported CLI the
+ * gateway runs text-only (reply keywords), never sending cards whose
+ * clicks it could not receive.
+ */
+function probeCardActionSupport(): Promise<boolean> {
+  return new Promise((resolve) => {
+    const proc = spawn(
+      "lark-cli",
+      ["event", "consume", "card.action.trigger", "--as", "bot", "--dry-run"],
+      { stdio: ["ignore", "ignore", "pipe"] },
+    );
+    const timer = setTimeout(() => {
+      proc.kill("SIGKILL");
+      resolve(false);
+    }, 15_000);
+    timer.unref();
+    proc.on("close", (code) => {
+      clearTimeout(timer);
+      resolve(code === 0);
+    });
+    proc.on("error", () => {
+      clearTimeout(timer);
+      resolve(false);
+    });
+  });
+}
+
+/** Spawn the card.action.trigger event consumer (NDJSON stdout). */
+function startCardActionConsumer(): ChildProcess {
+  return spawn(
+    "lark-cli",
+    ["event", "consume", "card.action.trigger", "--as", "bot"],
+    { stdio: ["pipe", "pipe", "pipe"] },
+  );
+}
+
 // ── Message splitting for Feishu length limit ──────────────────────────────
 
 async function sendReply(chatId: string, text: string): Promise<void> {
@@ -269,10 +345,24 @@ class DaemonBridge {
         const preview = JSON.stringify(event.input ?? {}).slice(0, 200);
         const toolName = event.tool_name || "unknown";
         logger.info(`Permission request: ${toolName} (${event.tool_use_id})`);
-        sendFeishuMessage(
-          chatId,
-          formatPermissionRequest(toolName, preview),
-        ).catch(() => {});
+        // Card-first (rich buttons); an older lark-cli that rejects
+        // interactive content degrades to the plain-text prompt with the
+        // same reply keywords.
+        const promptSend: Promise<void> = cardActionSupport
+          ? sendFeishuCard(
+              chatId,
+              buildPermissionCard(toolName, preview),
+            ).catch(() =>
+              sendFeishuMessage(
+                chatId,
+                formatPermissionRequest(toolName, preview),
+              ),
+            )
+          : sendFeishuMessage(
+              chatId,
+              formatPermissionRequest(toolName, preview),
+            );
+        promptSend.catch(() => {});
         this.permissionManager.registerRequest(
           chatId,
           event.tool_use_id || "",
@@ -394,6 +484,48 @@ class DaemonBridge {
 
 const bridge = new DaemonBridge();
 
+/**
+ * Whether the installed lark-cli can consume card.action.trigger events
+ * (probed at startup). When false the gateway stays text-only: prompts are
+ * sent as plain text so no buttons exist that we could never receive.
+ */
+let cardActionSupport = false;
+
+/**
+ * Handle a parsed card.action.trigger: resolve the chat's pending permission
+ * request and acknowledge with a follow-up message. Stale clicks (already
+ * timed out or answered elsewhere) get an "expired" ack instead.
+ */
+/** Acknowledgement text for a resolved permission request. */
+function ackFor(decision: PermissionDecision): string {
+  return decision === "allow"
+    ? "✅ 已允许。"
+    : decision === "allow_always"
+      ? "🔁 已允许并记住此工具。"
+      : "❌ 已拒绝。";
+}
+
+async function handleCardAction(
+  chatId: string,
+  decision: PermissionDecision,
+): Promise<void> {
+  const reply = await bridge.permissions.resolvePending(
+    chatId,
+    decision,
+    bridge.controlChannel!,
+  );
+  if (!reply) {
+    // Clicked a card whose prompt is no longer pending (e.g. superseded).
+    await sendFeishuMessage(chatId, "⚠️ 该请求已不存在。").catch(() => {});
+    return;
+  }
+  if (!reply.delivered) {
+    await sendFeishuMessage(chatId, "⚠️ 该请求已过期。").catch(() => {});
+    return;
+  }
+  await sendFeishuMessage(chatId, ackFor(reply.decision)).catch(() => {});
+}
+
 // ── Message handling ───────────────────────────────────────────────────────
 
 /**
@@ -423,13 +555,7 @@ async function handleMessage(event: FeishuEvent): Promise<void> {
         await sendFeishuMessage(chatId, "⚠️ 该请求已过期。");
         return;
       }
-      const ack =
-        reply.decision === "allow"
-          ? "✅ 已允许。"
-          : reply.decision === "allow_always"
-            ? "🔁 已允许并记住此工具。"
-            : "❌ 已拒绝。";
-      await sendFeishuMessage(chatId, ack);
+      await sendFeishuMessage(chatId, ackFor(reply.decision));
       return;
     }
   }
@@ -550,6 +676,59 @@ async function main() {
     cleanup();
   });
 
+  // ── Card action consumer (interactive permission buttons) ──
+  let cardConsumer: ChildProcess | null = null;
+  cardActionSupport = await probeCardActionSupport();
+  if (cardActionSupport) {
+    cardConsumer = startCardActionConsumer();
+    const cardRl = readline.createInterface({
+      input: cardConsumer.stdout!,
+      crlfDelay: Infinity,
+    });
+    cardRl.on("line", (line: string) => {
+      let raw: unknown;
+      try {
+        raw = JSON.parse(line.trim());
+      } catch {
+        return;
+      }
+      const action = parseCardAction(raw);
+      if (!action) {
+        logger.debug(`Unrecognized card action event: ${line.slice(0, 300)}`);
+        return;
+      }
+      if (!isAllowedChat(action.chatId, allowedChatIds)) {
+        logger.warn(
+          `Rejected card action from unallowlisted chat ${action.chatId}`,
+        );
+        return;
+      }
+      logger.info(`Card action: ${action.decision} in chat ${action.chatId}`);
+      handleCardAction(action.chatId, action.decision).catch((err) => {
+        logger.error(`Card action error: ${err.message}`);
+      });
+    });
+    cardConsumer.stderr!.on("data", (d: Buffer) => {
+      const msg = d.toString().trim();
+      if (msg && !msg.includes("[bus]")) {
+        logger.debug(`[lark-cli card] ${msg}`);
+      }
+    });
+    cardConsumer.on("close", (code) => {
+      // Clicks would silently die with the consumer; degrade to text-only
+      // so future prompts stop carrying buttons we can no longer receive.
+      logger.warn(
+        `Card action consumer exited (code=${code}); falling back to text-only prompts`,
+      );
+      cardActionSupport = false;
+    });
+    logger.info("Interactive card permission prompts enabled");
+  } else {
+    logger.warn(
+      "lark-cli does not support card.action.trigger — using text-reply permission prompts",
+    );
+  }
+
   // ── Process events ──
   rl.on("line", (line: string) => {
     lastEventTime = Date.now();
@@ -580,6 +759,7 @@ async function main() {
     cleaningUp = true;
     logger.info("Shutting down...");
     bridge.permissions.cleanup();
+    cardConsumer?.kill("SIGTERM");
     consumer.kill("SIGTERM");
     removePidFile();
     process.exit(0);

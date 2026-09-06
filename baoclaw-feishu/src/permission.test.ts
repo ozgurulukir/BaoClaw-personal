@@ -7,7 +7,10 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   PermissionManager,
+  buildPermissionCard,
   formatPermissionRequest,
+  parseCardAction,
+  parseCardActionValue,
   parsePermissionReply,
 } from "./permission.js";
 
@@ -145,4 +148,61 @@ test("cleanup cancels pending timers so no expiry fires", async () => {
   await new Promise((r) => setTimeout(r, 60));
   assert.equal(fired.length, 0);
   assert.equal(pm.getPending("chat1"), null);
+});
+
+test("buildPermissionCard carries three decision-only buttons", () => {
+  const card = buildPermissionCard("Bash", '{"command":"ls"}') as {
+    header: { title: { content: string } };
+    elements: Array<any>;
+  };
+  assert.match(card.header.title.content, /权限请求/);
+  const action = card.elements.find((e) => e.tag === "action");
+  const buttons = action.actions as Array<{ value: { perm_action: string } }>;
+  assert.deepEqual(buttons.map((b) => b.value.perm_action).sort(), [
+    "allow",
+    "always",
+    "deny",
+  ]);
+});
+
+test("parseCardAction reads value objects and raw strings", () => {
+  assert.equal(parseCardActionValue({ perm_action: "allow" }), "allow");
+  assert.equal(parseCardActionValue({ perm_action: "always" }), "allow_always");
+  assert.equal(parseCardActionValue({ perm_action: "deny" }), "deny");
+  assert.equal(parseCardActionValue("deny"), "deny");
+  assert.equal(parseCardActionValue({ other: 1 }), null);
+  assert.equal(parseCardActionValue(undefined), null);
+});
+
+test("parseCardAction extracts chat id and decision from event wrappers", () => {
+  const flat = parseCardAction({
+    open_chat_id: "oc_a",
+    action: { value: { perm_action: "allow" } },
+  });
+  assert.deepEqual(flat, { chatId: "oc_a", decision: "allow" });
+
+  const wrapped = parseCardAction({
+    event: {
+      context: { open_chat_id: "oc_b" },
+      action: { value: { perm_action: "deny" } },
+    },
+  });
+  assert.deepEqual(wrapped, { chatId: "oc_b", decision: "deny" });
+
+  assert.equal(parseCardAction({ unrelated: true }), null);
+  assert.equal(parseCardAction("garbage"), null);
+});
+
+test("resolvePending resolves without keyword parsing and reports delivery", async () => {
+  const pm = new PermissionManager();
+  const control = fakeControl();
+  pm.registerRequest("chat1", "tu_9", "Bash", () => {});
+
+  const reply = await pm.resolvePending("chat1", "allow_always", control);
+  assert.deepEqual(reply, { decision: "allow_always", delivered: true });
+  assert.equal(control.calls[0].params.rule, "Bash");
+  assert.equal(pm.getPending("chat1"), null);
+
+  // Nothing pending → null.
+  assert.equal(await pm.resolvePending("chat1", "allow", control), null);
 });
