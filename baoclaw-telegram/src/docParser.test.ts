@@ -9,19 +9,34 @@ import {
 describe("docParser", () => {
   describe("parseDocument", () => {
     test("rejects legacy .doc format", async () => {
-      const res = await parseDocument(Buffer.from("dummy"), "application/msword", "test.doc");
+      const res = await parseDocument(
+        Buffer.from("dummy"),
+        "application/msword",
+        "test.doc",
+      );
       assert.equal(res.text, "");
       assert.equal(res.error, "不支持旧版 .doc 格式，请转换为 .docx 后重试。");
     });
 
     test("rejects unsupported file mime/types", async () => {
-      const res = await parseDocument(Buffer.from("dummy"), "application/zip", "archive.zip");
+      const res = await parseDocument(
+        Buffer.from("dummy"),
+        "application/zip",
+        "archive.zip",
+      );
       assert.equal(res.text, "");
-      assert.match(res.error || "", /不支持的文件类型: application\/zip \(zip\)/);
+      assert.match(
+        res.error || "",
+        /不支持的文件类型: application\/zip \(zip\)/,
+      );
     });
 
     test("handles pdf error gracefully with invalid pdf buffer", async () => {
-      const res = await parseDocument(Buffer.from("not a pdf"), "application/pdf", "sample.pdf");
+      const res = await parseDocument(
+        Buffer.from("not a pdf"),
+        "application/pdf",
+        "sample.pdf",
+      );
       assert.equal(res.text, "");
       assert.match(res.error || "", /PDF parse failed/);
     });
@@ -30,7 +45,7 @@ describe("docParser", () => {
       const res = await parseDocument(
         Buffer.from("not a docx"),
         "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-        "sample.docx"
+        "sample.docx",
       );
       assert.equal(res.text, "");
       assert.match(res.error || "", /DOCX parse failed/);
@@ -55,7 +70,7 @@ describe("docParser", () => {
       const buf = Buffer.from("docx data");
       const block = buildDocumentBlock(
         buf,
-        "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
       );
       assert.equal(block, null);
     });
