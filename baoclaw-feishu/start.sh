@@ -66,6 +66,16 @@ esac
 
 # ── Prerequisites ──
 
+# Check lark-cli (the gateway spawns it for every message send / event stream)
+if ! command -v lark-cli >/dev/null 2>&1; then
+  echo "[feishu] ❌ lark-cli not found on PATH"
+  echo "[feishu]    Install the official Lark CLI (larksuite/cli):"
+  echo "[feishu]    https://github.com/larksuite/cli/releases  (known-good: v1.0.93)"
+  echo "[feishu]    Then configure a profile named 'baoclaw' with your Feishu app:"
+  echo "[feishu]    lark-cli profile add baoclaw   # app id/secret of your bot"
+  exit 1
+fi
+
 # Check daemon
 if ! ls /tmp/baoclaw-sockets/*.json 2>/dev/null | head -1 | grep -q .; then
   echo "[feishu] ❌ No BaoClaw daemon found"
