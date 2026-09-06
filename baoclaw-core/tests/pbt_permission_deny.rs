@@ -146,6 +146,8 @@ proptest! {
                 always_ask_rules: HashMap::new(),
                 is_bypass_permissions_mode_available: false,
                 auto_allow_channels: HashMap::new(),
+                ask_timeout_secs: 300,
+                persist_grants: false,
             };
 
             let permission_manager = PermissionManager::new(ctx);
@@ -166,8 +168,6 @@ proptest! {
             let bridge = baoclaw_core::permissions::PermissionBridge {
                 manager: Arc::new(tokio::sync::RwLock::new(permission_manager)),
                 gate: permission_gate,
-                ask_timeout: baoclaw_core::permissions::DEFAULT_ASK_TIMEOUT,
-                persist_grants: false,
             };
             let permission_channels = PermissionChannels::new(bridge, event_tx);
 

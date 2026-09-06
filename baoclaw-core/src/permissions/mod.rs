@@ -4,26 +4,22 @@ pub mod gate;
 pub mod manager;
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use manager::PermissionManager;
-
-/// How long a tool waits for a user decision before auto-denying.
-pub const DEFAULT_ASK_TIMEOUT: Duration = Duration::from_secs(300);
 
 /// Manager + gate pair handed to a query engine so its tools can prompt the
 /// user interactively. Cloned per turn into the query loop; the gate shares
 /// its pending-request map across clones, so a `permissionResponse` arriving
 /// on any daemon connection resolves prompts from every session.
+///
+/// The prompt timeout and grant-persistence settings are NOT carried here —
+/// they live on `ToolPermissionContext` (config `extra["permissions"]`) and
+/// are read live from the shared manager at each prompt, so config changes
+/// apply without an engine restart.
 #[derive(Clone)]
 pub struct PermissionBridge {
     pub manager: Arc<tokio::sync::RwLock<PermissionManager>>,
     pub gate: gate::PermissionGate,
-    pub ask_timeout: Duration,
-    /// When true, allow-always grants are written back to config.json so
-    /// they survive a daemon restart. Interactive daemons set this; tests
-    /// and headless engines keep it false to avoid touching the real file.
-    pub persist_grants: bool,
 }
 
 /// Write the current permission rules to ~/.baoclaw/config.json

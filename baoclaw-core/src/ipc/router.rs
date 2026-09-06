@@ -305,6 +305,10 @@ pub enum ClientMethod {
     PermissionsSetMode { mode: String },
     #[serde(rename = "permissions.setAutoAllow")]
     PermissionsSetAutoAllow { channel: String, enabled: bool },
+    #[serde(rename = "permissions.setAskTimeout")]
+    PermissionsSetAskTimeout { seconds: u64 },
+    #[serde(rename = "permissions.setPersistGrants")]
+    PermissionsSetPersistGrants { enabled: bool },
 
     // ── Session Info / Token / Cost RPC (P2-2) ──
     #[serde(rename = "session.tokens")]
@@ -520,6 +524,30 @@ mod tests {
                 assert!(!enabled);
             }
             _ => panic!("Expected PermissionsSetAutoAllow"),
+        }
+    }
+
+    #[test]
+    fn test_parse_permissions_set_ask_timeout() {
+        let req = make_request("permissions.setAskTimeout", json!({"seconds": 120}));
+        let method = parse_client_method(&req).unwrap();
+        match method {
+            ClientMethod::PermissionsSetAskTimeout { seconds } => {
+                assert_eq!(seconds, 120);
+            }
+            _ => panic!("Expected PermissionsSetAskTimeout"),
+        }
+    }
+
+    #[test]
+    fn test_parse_permissions_set_persist_grants() {
+        let req = make_request("permissions.setPersistGrants", json!({"enabled": false}));
+        let method = parse_client_method(&req).unwrap();
+        match method {
+            ClientMethod::PermissionsSetPersistGrants { enabled } => {
+                assert!(!enabled);
+            }
+            _ => panic!("Expected PermissionsSetPersistGrants"),
         }
     }
 

@@ -274,8 +274,6 @@ fn build_shared_engine(
         permission: Some(PermissionBridge {
             manager: Arc::clone(&shared.permission_manager),
             gate: shared.permission_gate.clone(),
-            ask_timeout: permissions::DEFAULT_ASK_TIMEOUT,
-            persist_grants: true,
         }),
     })
 }
@@ -2724,12 +2722,9 @@ async fn handle_shared_client(
                                 let mgr = shared.permission_manager.write().await;
                                 mgr.add_rule(category, "user", &tool, rule_content.clone());
                                 if permanent {
-                                    let ctx = mgr.get_context();
-                                    if let Ok(ctx_json) = serde_json::to_value(&ctx) {
-                                        let mut cfg = config::load_config();
-                                        cfg.extra.insert("permissions".to_string(), ctx_json);
-                                        let _ = cfg.save();
-                                    }
+                                    crate::permissions::persist_context_to_config(
+                                        &mgr.get_context(),
+                                    );
                                 }
                             }
                             let mut conn_guard = writer.lock().await;
@@ -2760,12 +2755,9 @@ async fn handle_shared_client(
                                 let mgr = shared.permission_manager.write().await;
                                 let count = mgr.remove_rule(None, &tool, rule_content);
                                 if count > 0 {
-                                    let ctx = mgr.get_context();
-                                    if let Ok(ctx_json) = serde_json::to_value(&ctx) {
-                                        let mut cfg = config::load_config();
-                                        cfg.extra.insert("permissions".to_string(), ctx_json);
-                                        let _ = cfg.save();
-                                    }
+                                    crate::permissions::persist_context_to_config(
+                                        &mgr.get_context(),
+                                    );
                                 }
                                 count
                             };
@@ -2799,12 +2791,7 @@ async fn handle_shared_client(
                             {
                                 let mgr = shared.permission_manager.write().await;
                                 mgr.add_rule(&category, "config", &tool_name, rule_content.clone());
-                                let ctx = mgr.get_context();
-                                if let Ok(ctx_json) = serde_json::to_value(&ctx) {
-                                    let mut cfg = config::load_config();
-                                    cfg.extra.insert("permissions".to_string(), ctx_json);
-                                    let _ = cfg.save();
-                                }
+                                crate::permissions::persist_context_to_config(&mgr.get_context());
                             }
                             let mut conn_guard = writer.lock().await;
                             let _ = conn_guard
@@ -2833,12 +2820,9 @@ async fn handle_shared_client(
                                     rule_content.as_deref(),
                                 );
                                 if count > 0 {
-                                    let ctx = mgr.get_context();
-                                    if let Ok(ctx_json) = serde_json::to_value(&ctx) {
-                                        let mut cfg = config::load_config();
-                                        cfg.extra.insert("permissions".to_string(), ctx_json);
-                                        let _ = cfg.save();
-                                    }
+                                    crate::permissions::persist_context_to_config(
+                                        &mgr.get_context(),
+                                    );
                                 }
                                 count
                             };
@@ -2868,12 +2852,7 @@ async fn handle_shared_client(
                             {
                                 let mgr = shared.permission_manager.write().await;
                                 mgr.set_mode(parsed_mode);
-                                let ctx = mgr.get_context();
-                                if let Ok(ctx_json) = serde_json::to_value(&ctx) {
-                                    let mut cfg = config::load_config();
-                                    cfg.extra.insert("permissions".to_string(), ctx_json);
-                                    let _ = cfg.save();
-                                }
+                                crate::permissions::persist_context_to_config(&mgr.get_context());
                             }
                             let mut conn_guard = writer.lock().await;
                             let _ = conn_guard
@@ -2897,12 +2876,7 @@ async fn handle_shared_client(
                                 mgr.update_context(|c| {
                                     c.auto_allow_channels.insert(channel.clone(), enabled);
                                 });
-                                let ctx = mgr.get_context();
-                                if let Ok(ctx_json) = serde_json::to_value(&ctx) {
-                                    let mut cfg = config::load_config();
-                                    cfg.extra.insert("permissions".to_string(), ctx_json);
-                                    let _ = cfg.save();
-                                }
+                                crate::permissions::persist_context_to_config(&mgr.get_context());
                             }
                             let mut conn_guard = writer.lock().await;
                             let _ = conn_guard
@@ -2915,6 +2889,72 @@ async fn handle_shared_client(
                                         "message": format!(
                                             "Auto-allow for channel '{}' {}",
                                             channel,
+                                            if enabled { "enabled" } else { "disabled" }
+                                        )
+                                    }),
+                                )
+                                .await;
+                        }
+
+                        ClientMethod::PermissionsSetAskTimeout { seconds } => {
+                            // Persisted prompt-timeout knob, read live by the
+                            // executor at every prompt. Reject out-of-range
+                            // values with an error instead of clamping.
+                            if (5..=3600).contains(&seconds) {
+                                {
+                                    let mgr = shared.permission_manager.write().await;
+                                    mgr.update_context(|c| c.ask_timeout_secs = seconds);
+                                    crate::permissions::persist_context_to_config(
+                                        &mgr.get_context(),
+                                    );
+                                }
+                                let mut conn_guard = writer.lock().await;
+                                let _ = conn_guard
+                                    .send_response(
+                                        id,
+                                        serde_json::json!({
+                                            "success": true,
+                                            "seconds": seconds,
+                                            "message": format!(
+                                                "Permission ask timeout set to {}s",
+                                                seconds
+                                            )
+                                        }),
+                                    )
+                                    .await;
+                            } else {
+                                let mut conn_guard = writer.lock().await;
+                                let _ = conn_guard
+                                    .send_error(
+                                        Some(id),
+                                        -32000,
+                                        format!(
+                                            "ask timeout must be 5-3600 seconds, got {}",
+                                            seconds
+                                        ),
+                                    )
+                                    .await;
+                            }
+                        }
+
+                        ClientMethod::PermissionsSetPersistGrants { enabled } => {
+                            // Persisted knob: when false, allow-always grants
+                            // still allow the current tool but are not written
+                            // back to config.json.
+                            {
+                                let mgr = shared.permission_manager.write().await;
+                                mgr.update_context(|c| c.persist_grants = enabled);
+                                crate::permissions::persist_context_to_config(&mgr.get_context());
+                            }
+                            let mut conn_guard = writer.lock().await;
+                            let _ = conn_guard
+                                .send_response(
+                                    id,
+                                    serde_json::json!({
+                                        "success": true,
+                                        "enabled": enabled,
+                                        "message": format!(
+                                            "Allow-always grant persistence {}",
                                             if enabled { "enabled" } else { "disabled" }
                                         )
                                     }),

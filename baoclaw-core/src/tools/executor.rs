@@ -178,7 +178,7 @@ async fn call_tool_with_abort(
 /// Flow: validate → check PermissionManager → Allow/Deny/Ask branch → call tool.
 /// Ask branch: read-only tools proceed without prompting (same as the direct
 /// path); mutating tools send a PermissionRequest event and wait on the gate
-/// for the user's decision, auto-denying after `ask_timeout`.
+/// for the user's decision, auto-denying after the context's `ask_timeout_secs`.
 pub async fn execute_tool_with_permission(
     tool: &dyn Tool,
     request: &ToolUseRequest,
@@ -232,6 +232,15 @@ pub async fn execute_tool_with_permission(
                 return call_tool_and_wrap(tool, request, context, progress).await;
             }
 
+            // Live knob read: every prompt uses the current config values
+            // (config `extra["permissions"]`), so setAskTimeout /
+            // setPersistGrants take effect without an engine restart.
+            let (ask_timeout, persist_grants) = {
+                let manager = permission.bridge.manager.read().await;
+                let ctx = manager.get_context();
+                (ctx.ask_timeout_duration(), ctx.persist_grants)
+            };
+
             // Send PermissionRequest event to clients
             let _ = permission
                 .event_tx
@@ -244,7 +253,7 @@ pub async fn execute_tool_with_permission(
 
             // Wait for user response, auto-denying after the timeout
             let rx = permission.bridge.gate.request(&tool_use_id);
-            let decision = match tokio::time::timeout(permission.bridge.ask_timeout, rx).await {
+            let decision = match tokio::time::timeout(ask_timeout, rx).await {
                 Ok(Ok(decision)) => decision,
                 Ok(Err(_)) => PermissionDecision::Deny, // channel closed
                 Err(_) => PermissionDecision::Deny,     // timeout → auto-deny
@@ -261,7 +270,7 @@ pub async fn execute_tool_with_permission(
                         // The write guard doubles as the serialization point
                         // against the permission.* RPC handlers that save
                         // the same file.
-                        if permission.bridge.persist_grants {
+                        if persist_grants {
                             crate::permissions::persist_context_to_config(&manager.get_context());
                         }
                     }
@@ -939,22 +948,31 @@ mod tests {
             always_ask_rules: std::collections::HashMap::new(),
             is_bypass_permissions_mode_available: false,
             auto_allow_channels: std::collections::HashMap::new(),
+            ask_timeout_secs: 300,
+            // Must stay false: a true value would let unit tests write mock
+            // rules into the developer's real ~/.baoclaw/config.json.
+            persist_grants: false,
         }
     }
 
     fn make_channels(
         manager: PermissionManager,
         gate: PermissionGate,
-        ask_timeout: Duration,
     ) -> (PermissionChannels, tokio::sync::mpsc::Receiver<EngineEvent>) {
         let (event_tx, event_rx) = tokio::sync::mpsc::channel::<EngineEvent>(16);
         let bridge = crate::permissions::PermissionBridge {
             manager: Arc::new(tokio::sync::RwLock::new(manager)),
             gate,
-            ask_timeout,
-            persist_grants: false,
         };
         (PermissionChannels::new(bridge, event_tx), event_rx)
+    }
+
+    /// Context whose prompt timeout is `secs` (the executor reads the timeout
+    /// from the manager's context, not from the bridge).
+    fn manager_ctx_with_timeout(secs: u64) -> PermissionManager {
+        let mut ctx = make_manager_ctx();
+        ctx.ask_timeout_secs = secs;
+        PermissionManager::new(ctx)
     }
 
     #[tokio::test]
@@ -963,11 +981,8 @@ mod tests {
         let ctx = make_context();
         let progress = MockProgressSender;
         let request = make_request("req-gate-1", "BashTool");
-        let (channels, mut event_rx) = make_channels(
-            PermissionManager::new(make_manager_ctx()),
-            PermissionGate::new(),
-            Duration::from_secs(5),
-        );
+        let (channels, mut event_rx) =
+            make_channels(manager_ctx_with_timeout(5), PermissionGate::new());
 
         let gate = channels.bridge.gate.clone();
         let responder = tokio::spawn(async move {
@@ -997,11 +1012,8 @@ mod tests {
         let ctx = make_context();
         let progress = MockProgressSender;
         let request = make_request("req-gate-2", "BashTool");
-        let (channels, mut event_rx) = make_channels(
-            PermissionManager::new(make_manager_ctx()),
-            PermissionGate::new(),
-            Duration::from_secs(5),
-        );
+        let (channels, mut event_rx) =
+            make_channels(manager_ctx_with_timeout(5), PermissionGate::new());
 
         let gate = channels.bridge.gate.clone();
         let responder = tokio::spawn(async move {
@@ -1029,11 +1041,8 @@ mod tests {
         let ctx = make_context();
         let progress = MockProgressSender;
         let request = make_request("req-gate-3", "BashTool");
-        let (channels, _event_rx) = make_channels(
-            PermissionManager::new(make_manager_ctx()),
-            PermissionGate::new(),
-            Duration::from_millis(50),
-        );
+        let (channels, _event_rx) =
+            make_channels(manager_ctx_with_timeout(1), PermissionGate::new());
 
         let result =
             execute_tool_with_permission(&tool, &request, &ctx, &channels, &progress).await;
@@ -1049,11 +1058,8 @@ mod tests {
         let ctx = make_context();
         let progress = MockProgressSender;
         let request = make_request("req-gate-4", "Bash");
-        let (channels, mut event_rx) = make_channels(
-            PermissionManager::new(make_manager_ctx()),
-            PermissionGate::new(),
-            Duration::from_secs(5),
-        );
+        let (channels, mut event_rx) =
+            make_channels(manager_ctx_with_timeout(5), PermissionGate::new());
 
         let gate = channels.bridge.gate.clone();
         let responder = tokio::spawn(async move {
@@ -1096,6 +1102,7 @@ mod tests {
         );
         let ctx = ToolPermissionContext {
             always_deny_rules: deny_rules,
+            ask_timeout_secs: 5,
             ..make_manager_ctx()
         };
 
@@ -1103,11 +1110,8 @@ mod tests {
         let tool_ctx = make_context();
         let progress = MockProgressSender;
         let request = make_request("req-gate-5", "BashTool");
-        let (channels, mut event_rx) = make_channels(
-            PermissionManager::new(ctx),
-            PermissionGate::new(),
-            Duration::from_secs(5),
-        );
+        let (channels, mut event_rx) =
+            make_channels(PermissionManager::new(ctx), PermissionGate::new());
 
         let result =
             execute_tool_with_permission(&tool, &request, &tool_ctx, &channels, &progress).await;
@@ -1137,7 +1141,6 @@ mod tests {
         let (channels, mut event_rx) = make_channels(
             PermissionManager::new(make_manager_ctx()),
             PermissionGate::new(),
-            Duration::from_millis(50),
         );
 
         let result =

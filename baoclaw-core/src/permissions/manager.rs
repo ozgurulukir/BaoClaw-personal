@@ -37,6 +37,27 @@ pub struct ToolPermissionContext {
     /// Enforcement is client-side; the daemon only stores and serves the map.
     #[serde(default)]
     pub auto_allow_channels: HashMap<String, bool>,
+    /// How long a tool's interactive permission prompt waits for a user
+    /// decision before the daemon auto-denies. Seconds (not a Duration) so
+    /// hand-edited configs stay readable. The executor reads this live per
+    /// prompt, so changes apply to every future prompt without a restart.
+    #[serde(default = "default_ask_timeout_secs")]
+    pub ask_timeout_secs: u64,
+    /// When true, allow-always grants are written back to config.json. The
+    /// executor reads this live per allow-always decision.
+    #[serde(default = "default_persist_grants")]
+    pub persist_grants: bool,
+}
+
+/// Default ask timeout (300s) — matches the pre-knob hardcoded value.
+pub const DEFAULT_ASK_TIMEOUT_SECS: u64 = 300;
+
+fn default_ask_timeout_secs() -> u64 {
+    DEFAULT_ASK_TIMEOUT_SECS
+}
+
+fn default_persist_grants() -> bool {
+    true
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -347,6 +368,8 @@ impl Default for ToolPermissionContext {
             always_ask_rules: HashMap::new(),
             is_bypass_permissions_mode_available: false,
             auto_allow_channels: HashMap::new(),
+            ask_timeout_secs: DEFAULT_ASK_TIMEOUT_SECS,
+            persist_grants: true,
         }
     }
 }
@@ -367,6 +390,12 @@ impl ToolPermissionContext {
             .copied()
             .unwrap_or(true)
     }
+
+    /// The prompt timeout as a Duration, guarding against a hand-edited
+    /// zero value (which would deny every prompt instantly).
+    pub fn ask_timeout_duration(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(self.ask_timeout_secs.max(1))
+    }
 }
 
 #[cfg(test)]
@@ -382,6 +411,8 @@ mod tests {
             always_ask_rules: HashMap::new(),
             is_bypass_permissions_mode_available: false,
             auto_allow_channels: HashMap::new(),
+            ask_timeout_secs: DEFAULT_ASK_TIMEOUT_SECS,
+            persist_grants: true,
         }
     }
 
@@ -835,5 +866,27 @@ mod tests {
 
         let serialized = serde_json::to_value(&ctx).expect("serialize");
         assert_eq!(serialized["auto_allow_channels"]["tui"], false);
+    }
+
+    #[test]
+    fn timeout_and_persist_knobs_default_and_round_trip() {
+        // Partial config: knobs fall back to the historical hardcoded values.
+        let ctx: ToolPermissionContext =
+            serde_json::from_value(serde_json::json!({})).expect("empty json must deserialize");
+        assert_eq!(ctx.ask_timeout_secs, 300);
+        assert!(ctx.persist_grants);
+        assert_eq!(ctx.ask_timeout_duration().as_secs(), 300);
+
+        let ctx: ToolPermissionContext = serde_json::from_value(serde_json::json!({
+            "ask_timeout_secs": 60,
+            "persist_grants": false
+        }))
+        .expect("knob json must deserialize");
+        assert_eq!(ctx.ask_timeout_secs, 60);
+        assert!(!ctx.persist_grants);
+
+        let serialized = serde_json::to_value(&ctx).expect("serialize");
+        assert_eq!(serialized["ask_timeout_secs"], 60);
+        assert_eq!(serialized["persist_grants"], false);
     }
 }
