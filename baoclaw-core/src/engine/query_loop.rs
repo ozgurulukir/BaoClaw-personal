@@ -304,6 +304,17 @@ pub async fn run_query_loop(
                         .saturating_sub(turn_output_tokens_at_start),
                 })
                 .await;
+            record_telemetry_turn(
+                &config,
+                turn_start_time.elapsed().as_millis() as u64,
+                total_usage
+                    .input_tokens
+                    .saturating_sub(turn_input_tokens_at_start),
+                total_usage
+                    .output_tokens
+                    .saturating_sub(turn_output_tokens_at_start),
+                Vec::new(),
+            );
             let _ = tx
                 .send(EngineEvent::Result(QueryResult {
                     status: QueryStatus::Complete,
@@ -540,6 +551,7 @@ async fn call_api_with_fallback(
         tool_health: crate::engine::tool_health::ToolHealthTracker::new(),
         hook_manager: config.hook_manager.clone(),
         permission: config.permission.clone(),
+        telemetry: None,
         context_window: config.context_window,
         auto_compact_threshold_ratio: config.auto_compact_threshold_ratio,
     };
@@ -1463,6 +1475,18 @@ async fn execute_tool_turn(
                 .saturating_sub(turn_output_tokens_at_start),
         })
         .await;
+
+    record_telemetry_turn(
+        config,
+        turn_start_time.elapsed().as_millis() as u64,
+        total_usage
+            .input_tokens
+            .saturating_sub(turn_input_tokens_at_start),
+        total_usage
+            .output_tokens
+            .saturating_sub(turn_output_tokens_at_start),
+        tool_uses.iter().map(|tu| tu.name.clone()).collect(),
+    );
 }
 
 /// Fire-and-forget: spawn a background task to update the session summary
@@ -1682,6 +1706,35 @@ pub async fn compact_messages(
 
 /// Maximum consecutive compact failures before the circuit breaker trips.
 const MAX_COMPACT_FAILURES: usize = 3;
+
+/// Record one turn into the local telemetry database (best-effort; no-op
+/// when telemetry is disabled or the DB cannot be opened).
+fn record_telemetry_turn(
+    config: &QueryLoopConfig,
+    duration_ms: u64,
+    input_tokens: u64,
+    output_tokens: u64,
+    tool_names: Vec<String>,
+) {
+    let Some(telemetry) = config.telemetry.as_ref() else {
+        return;
+    };
+    let mut usage = EMPTY_USAGE;
+    usage.input_tokens = input_tokens;
+    usage.output_tokens = output_tokens;
+    let cost = CostTracker::new().calculate_cost(&usage, &config.model);
+    let session = config.session_id.clone().unwrap_or_default();
+    if let Err(e) = telemetry.record_turn(
+        &session,
+        input_tokens,
+        output_tokens,
+        cost,
+        duration_ms,
+        tool_names,
+    ) {
+        eprintln!("Telemetry record_turn failed: {}", e);
+    }
+}
 
 /// Adaptive compact policy: clamp the tracker's recommendation to a safe
 /// band. The tracker starts at 10, matching the historical hardcoded default,

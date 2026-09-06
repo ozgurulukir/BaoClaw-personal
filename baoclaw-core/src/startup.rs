@@ -681,6 +681,15 @@ pub(super) async fn assemble_shared_state(
         skill_prompt: combined_append_prompt,
         memory_store,
         user_profile,
+        telemetry: {
+            match engine::telemetry::collector::TelemetryCollector::new() {
+                Ok(c) => Some(Arc::new(c)),
+                Err(e) => {
+                    eprintln!("Telemetry disabled (DB open failed): {}", e);
+                    None
+                }
+            }
+        },
         memory_archive,
         memory_cleanup,
         evolution_engine,
@@ -762,6 +771,7 @@ pub(super) async fn start_cron_scheduler(shared: &SharedState) {
                     // Headless cron jobs must never hang on an interactive
                     // permission prompt — mutating tools fail closed instead.
                     permission: None,
+                    telemetry: None,
                 });
 
                 let mut rx = engine.submit_message(prompt).await;

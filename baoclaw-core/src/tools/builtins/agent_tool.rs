@@ -144,6 +144,7 @@ impl Tool for AgentTool {
             tool_result_store: None, // Sub-agents don't persist tool results
             hook_manager: None,      // Sub-agents don't trigger hooks
             permission: None,
+            telemetry: None,
         };
 
         let mut sub_engine = QueryEngine::new(sub_engine_config);

@@ -61,6 +61,9 @@ pub struct QueryEngineConfig {
     /// prompt the user instead of failing closed; None keeps the direct
     /// fail-closed behavior (cron, sub-agents, tests).
     pub permission: Option<crate::permissions::PermissionBridge>,
+    /// Local telemetry recorder. When present, each turn and each session
+    /// close is written to the telemetry database; None disables recording.
+    pub telemetry: Option<Arc<crate::engine::telemetry::collector::TelemetryCollector>>,
 }
 
 /// Thinking mode configuration for the LLM.
@@ -1080,6 +1083,7 @@ impl QueryEngine {
             permission: self.config.permission.clone(),
             context_window: self.config.context_window,
             auto_compact_threshold_ratio: self.config.auto_compact_threshold_ratio,
+            telemetry: self.config.telemetry.clone(),
         };
 
         let messages_shared = Arc::new(tokio::sync::Mutex::new(self.messages.clone()));
@@ -1158,6 +1162,8 @@ pub struct QueryLoopConfig {
     pub context_window: u64,
     /// Auto-compact threshold ratio — propagated to ToolContext for sub-agents.
     pub auto_compact_threshold_ratio: f64,
+    /// Local telemetry recorder (cloned from the engine config).
+    pub telemetry: Option<Arc<crate::engine::telemetry::collector::TelemetryCollector>>,
 }
 
 impl QueryLoopConfig {
@@ -1278,6 +1284,7 @@ mod tests {
             tool_result_store: None,
             hook_manager: None,
             permission: None,
+            telemetry: None,
         }
     }
 
@@ -1761,6 +1768,7 @@ mod tests {
             tool_health: crate::engine::tool_health::ToolHealthTracker::new(),
             hook_manager: None,
             permission: None,
+            telemetry: None,
             context_window: 200_000,
             auto_compact_threshold_ratio: 0.7,
         };
@@ -1816,6 +1824,7 @@ mod tests {
             tool_health: crate::engine::tool_health::ToolHealthTracker::new(),
             hook_manager: None,
             permission: None,
+            telemetry: None,
             context_window: 200_000,
             auto_compact_threshold_ratio: 0.7,
         };
@@ -1868,6 +1877,7 @@ mod tests {
             tool_health: crate::engine::tool_health::ToolHealthTracker::new(),
             hook_manager: None,
             permission: None,
+            telemetry: None,
             context_window: 200_000,
             auto_compact_threshold_ratio: 0.7,
         };
@@ -2011,6 +2021,7 @@ mod tests {
             tool_health: crate::engine::tool_health::ToolHealthTracker::new(),
             hook_manager: None,
             permission: None,
+            telemetry: None,
             context_window: 200_000,
             auto_compact_threshold_ratio: 0.7,
         };
@@ -2063,6 +2074,7 @@ mod tests {
             tool_health: crate::engine::tool_health::ToolHealthTracker::new(),
             hook_manager: None,
             permission: None,
+            telemetry: None,
             context_window: 200_000,
             auto_compact_threshold_ratio: 0.7,
         };
@@ -2268,6 +2280,7 @@ mod tests {
             tool_health: crate::engine::tool_health::ToolHealthTracker::new(),
             hook_manager: None,
             permission: None,
+            telemetry: None,
             context_window: 200_000,
             auto_compact_threshold_ratio: 0.7,
         }

@@ -351,6 +351,7 @@ impl SubAgentExecutor {
             tool_result_store: None,
             hook_manager: None,
             permission: None,
+            telemetry: None,
         };
 
         // Create engine and submit prompt

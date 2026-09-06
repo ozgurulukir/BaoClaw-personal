@@ -241,7 +241,11 @@ loop — each carries an inline status note and a tracking issue.
 
 #### 📊 Telemetry & Monitoring (#20)
 
-> **Status: events never recorded — RPCs return empty data.** See #41.
+> **Status: wired (see #41, closed).** Each turn (tool turns and the
+> final text turn) is recorded with per-turn token/cost/duration/tool
+> data, and session close writes the session summary — the
+> `/telemetry` command and stats/trends/export RPCs now return real
+> data. `files_changed` is recorded as 0 (not wired).
 
 - **Event collection**: record tool calls, model invocations, errors, session events
 - **Trend analysis**: detect increasing/decreasing/stable patterns over time windows

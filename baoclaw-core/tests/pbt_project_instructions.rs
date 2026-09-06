@@ -58,6 +58,7 @@ proptest! {
             fallback_models: vec![],
             max_retries_per_model: 2,
             context_window: 200_000,
+            telemetry: None,
             auto_compact_threshold_ratio: 0.7,
             token_counter: Arc::new(tokio::sync::Mutex::new(baoclaw_core::engine::token_counter::TokenCounter::new(200_000, 0.7))),
             parent_turn_id: None,

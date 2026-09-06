@@ -395,6 +395,7 @@ mod propagation_tests {
             tool_result_store: None,
             hook_manager: None,
             permission: None,
+            telemetry: None,
         };
 
         let ctx = tests::test_context_from_engine_config(&engine_config);

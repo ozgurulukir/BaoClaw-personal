@@ -51,6 +51,8 @@ struct SharedState {
     skill_prompt: Option<String>,
     memory_store: Arc<engine::memory::MemoryStore>,
     user_profile: Arc<engine::user_profile::UserProfileManager>,
+    /// Local telemetry recorder (None if the telemetry DB cannot be opened).
+    telemetry: Option<Arc<engine::telemetry::collector::TelemetryCollector>>,
     memory_archive: Arc<engine::memory::MemoryArchive>,
     memory_cleanup: Arc<engine::memory::MemoryCleanupScheduler>,
     evolution_engine: Arc<engine::evolution::EvolutionEngine>,
@@ -259,6 +261,7 @@ fn build_shared_engine(
         max_retries_per_model: shared.baoclaw_config.max_retries_per_model,
         context_window: shared.baoclaw_config.context_window,
         auto_compact_threshold_ratio: shared.baoclaw_config.auto_compact_threshold_ratio,
+        telemetry: shared.telemetry.clone(),
         parent_turn_id: None,
         agent_label: None,
         session_memory: Some(Arc::new(
@@ -890,6 +893,7 @@ async fn lc_session_close(
                         _ => {}
                     }
                 }
+                let tools_total: u32 = tool_counts.values().sum();
                 shared
                     .user_profile
                     .merge_session_stats(&engine::user_profile::SessionStats {
@@ -902,6 +906,25 @@ async fn lc_session_close(
                         task_types: Vec::new(),
                     });
                 shared.user_profile.save();
+
+                // Session-level telemetry (same values as the profile merge).
+                if let Some(ref telemetry) = shared.telemetry {
+                    let now = chrono::Utc::now().timestamp();
+                    let total_tokens = usage.input_tokens + usage.output_tokens;
+                    if let Err(e) = telemetry.record_session(
+                        session_id,
+                        now - duration_secs as i64,
+                        now,
+                        turns,
+                        total_tokens,
+                        estimated_cost,
+                        tools_total as u64,
+                        // File-change counting is not wired; honest zero.
+                        0,
+                    ) {
+                        eprintln!("Telemetry record_session failed: {}", e);
+                    }
+                }
             }
         }
 

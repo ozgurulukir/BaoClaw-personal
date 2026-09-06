@@ -954,6 +954,7 @@ impl TeamExecutor {
             tool_result_store: None,
             hook_manager: None,
             permission: None,
+            telemetry: None,
         };
 
         let mut engine = QueryEngine::new(config);

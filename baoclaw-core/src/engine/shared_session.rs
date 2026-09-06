@@ -617,6 +617,7 @@ mod tests {
             tool_result_store: None,
             hook_manager: None,
             permission: None,
+            telemetry: None,
         })
     }
 
