@@ -117,7 +117,12 @@ loop — each carries an inline status note and a tracking issue.
 
 #### 👤 User Profile (#7)
 
-> **Status: dead code — not wired.** See #31.
+> **Status: wired (see #31, closed).** `~/.baoclaw/USER.md` is loaded
+> at daemon startup and injected into the system prompt alongside skills
+> and long-term memory; session stats (turns, cost, tool usage, duration)
+> merge into the profile on session close. Profile _editing_ commands
+> (name/language/styles) are not exposed yet — the file is hand-edited
+> for now.
 
 - `~/.baoclaw/USER.md` — persistent user profile (name, language, coding style, tool preferences)
 - Auto-loaded into system prompt for personalized responses

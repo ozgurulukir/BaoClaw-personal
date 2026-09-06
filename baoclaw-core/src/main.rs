@@ -50,6 +50,7 @@ struct SharedState {
     session_registry: Arc<SessionRegistry>,
     skill_prompt: Option<String>,
     memory_store: Arc<engine::memory::MemoryStore>,
+    user_profile: Arc<engine::user_profile::UserProfileManager>,
     memory_archive: Arc<engine::memory::MemoryArchive>,
     memory_cleanup: Arc<engine::memory::MemoryCleanupScheduler>,
     evolution_engine: Arc<engine::evolution::EvolutionEngine>,
@@ -864,6 +865,44 @@ async fn lc_session_close(
                     duration_secs,
                 )
                 .await;
+
+            // Merge this session's stats into the persistent user profile
+            // (~/.baoclaw/USER.md). Turns = user messages; tools_used counts
+            // ToolUse blocks across assistant messages.
+            {
+                use crate::models::message::MessageContent;
+                use std::collections::BTreeMap;
+                let mut turns = 0u64;
+                let mut tool_counts: BTreeMap<String, u32> = BTreeMap::new();
+                for msg in &messages_clone {
+                    match &msg.content {
+                        MessageContent::User { .. } => turns += 1,
+                        MessageContent::Assistant { message, .. } => {
+                            for block in &message.content {
+                                if let crate::models::message::ContentBlock::ToolUse {
+                                    name, ..
+                                } = block
+                                {
+                                    *tool_counts.entry(name.clone()).or_insert(0) += 1;
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                shared
+                    .user_profile
+                    .merge_session_stats(&engine::user_profile::SessionStats {
+                        turns,
+                        cost_usd: estimated_cost,
+                        tools_used: tool_counts.into_iter().collect(),
+                        duration_secs: duration_secs as f64,
+                        // Task-type classification is not implemented; left
+                        // empty rather than guessed.
+                        task_types: Vec::new(),
+                    });
+                shared.user_profile.save();
+            }
         }
 
         match shared.session_registry.persist_session(session_id).await {
@@ -1017,7 +1056,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         startup::build_engine_tools(&opts.cwd_str, &opts.sandbox_config, &api_client);
 
     // Load skill prompt + long-term memory, combine into append_system_prompt
-    let (combined_append_prompt, memory_store) =
+    let (combined_append_prompt, memory_store, user_profile) =
         startup::load_prompts_and_memory(&opts.cwd_str).await;
 
     // Reuse existing project session or create a new one
@@ -1035,6 +1074,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         engine_tools,
         evolution_engine,
         memory_store,
+        user_profile,
         combined_append_prompt,
         opts.cli_thinking_config,
         opts.cli_resume_session_id,

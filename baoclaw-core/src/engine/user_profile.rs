@@ -619,3 +619,65 @@ impl UserProfileManager {
         Some(parts.join("\n"))
     }
 }
+
+#[cfg(test)]
+mod wiring_tests {
+    use super::*;
+
+    /// Single serial test: UserProfileManager reads/writes $HOME/.baoclaw/USER.md,
+    /// so point HOME at a temp dir to keep the developer's real profile intact.
+    #[test]
+    fn merge_session_stats_accumulates_and_persists() {
+        let tmp = std::env::temp_dir().join(format!("baoclaw-profile-test-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let prev_home = std::env::var("HOME").ok();
+        std::env::set_var("HOME", &tmp);
+
+        let mgr = UserProfileManager::new();
+        // Fresh profile -> empty -> no prompt fragment.
+        assert!(mgr.build_prompt_fragment().is_none());
+
+        mgr.update_name("Test User".into());
+        mgr.update_language("Turkish".into());
+        mgr.merge_session_stats(&SessionStats {
+            turns: 5,
+            cost_usd: 0.25,
+            tools_used: vec![("Bash".into(), 3), ("FileEdit".into(), 1)],
+            duration_secs: 120.0,
+            task_types: vec![],
+        });
+        mgr.merge_session_stats(&SessionStats {
+            turns: 2,
+            cost_usd: 0.10,
+            tools_used: vec![("Bash".into(), 2)],
+            duration_secs: 60.0,
+            task_types: vec![],
+        });
+        mgr.save();
+
+        let p = mgr.get();
+        assert_eq!(p.stats.total_sessions, 2);
+        assert_eq!(p.stats.total_turns, 7);
+        assert!((p.stats.total_cost_usd - 0.35).abs() < 1e-9);
+        assert_eq!(
+            p.stats.top_tools.first().map(|(t, c)| (t.as_str(), *c)),
+            Some(("Bash", 5))
+        );
+
+        // Round-trip: a fresh manager over the same HOME parses the saved file.
+        let reloaded = UserProfileManager::new();
+        let rp = reloaded.get();
+        assert_eq!(rp.name.as_deref(), Some("Test User"));
+        assert_eq!(rp.stats.total_sessions, 2);
+        let frag = reloaded.build_prompt_fragment().expect("non-empty profile");
+        assert!(frag.contains("Test User"));
+        assert!(frag.contains("Turkish"));
+
+        // Restore HOME and clean up.
+        match prev_home {
+            Some(h) => std::env::set_var("HOME", h),
+            None => std::env::remove_var("HOME"),
+        }
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+}

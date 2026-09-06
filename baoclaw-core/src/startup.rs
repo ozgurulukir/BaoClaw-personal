@@ -482,11 +482,16 @@ pub(super) fn build_engine_tools(
     (evolution_engine, engine_tools)
 }
 
-/// Load skill prompt and long-term memory; combine them into the
-/// append_system_prompt fragment. Returns (combined prompt, memory store).
+/// Load skill prompt, long-term memory, and the user profile; combine them
+/// into the append_system_prompt fragment. Returns (combined prompt, memory
+/// store, profile manager).
 pub(super) async fn load_prompts_and_memory(
     cwd_str: &str,
-) -> (Option<String>, Arc<engine::memory::MemoryStore>) {
+) -> (
+    Option<String>,
+    Arc<engine::memory::MemoryStore>,
+    Arc<engine::user_profile::UserProfileManager>,
+) {
     // Load skill content for system prompt injection
     let skill_prompt =
         baoclaw_core::discovery::skills::load_skills_for_prompt(std::path::Path::new(cwd_str))
@@ -505,7 +510,17 @@ pub(super) async fn load_prompts_and_memory(
         );
     }
 
-    // Combine skill + memory into append_system_prompt
+    // Load the persistent user profile (~/.baoclaw/USER.md)
+    let profile_manager = Arc::new(engine::user_profile::UserProfileManager::new());
+    let profile_prompt = profile_manager.build_prompt_fragment();
+    if let Some(ref pp) = profile_prompt {
+        eprintln!(
+            "Loaded user profile into system prompt ({} chars)",
+            pp.len()
+        );
+    }
+
+    // Combine skill + memory + profile into append_system_prompt
     let combined_append_prompt = {
         let mut parts = Vec::new();
         if let Some(sp) = skill_prompt {
@@ -514,6 +529,9 @@ pub(super) async fn load_prompts_and_memory(
         if let Some(mp) = memory_prompt {
             parts.push(mp);
         }
+        if let Some(pp) = profile_prompt {
+            parts.push(pp);
+        }
         if parts.is_empty() {
             None
         } else {
@@ -521,7 +539,7 @@ pub(super) async fn load_prompts_and_memory(
         }
     };
 
-    (combined_append_prompt, memory_store)
+    (combined_append_prompt, memory_store, profile_manager)
 }
 
 /// Reuse existing project session or create new one.
@@ -573,6 +591,7 @@ pub(super) async fn assemble_shared_state(
     engine_tools: Vec<Arc<dyn tools::Tool>>,
     evolution_engine: Arc<engine::evolution::EvolutionEngine>,
     memory_store: Arc<engine::memory::MemoryStore>,
+    user_profile: Arc<engine::user_profile::UserProfileManager>,
     combined_append_prompt: Option<String>,
     cli_thinking_config: ThinkingConfig,
     cli_resume_session_id: Option<String>,
@@ -661,6 +680,7 @@ pub(super) async fn assemble_shared_state(
         session_registry: Arc::new(engine::shared_session::SessionRegistry::new()),
         skill_prompt: combined_append_prompt,
         memory_store,
+        user_profile,
         memory_archive,
         memory_cleanup,
         evolution_engine,
