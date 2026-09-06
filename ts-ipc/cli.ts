@@ -2359,14 +2359,26 @@ async function main() {
   });
 
   async function handleLine(input: string) {
-    if (input === "/quit" || input === "/exit" || input === "/q") {
+    // ── Slash command registry ──────────────────────────────────────────
+    // Single-pass dispatch: the trimmed input is split into a command word
+    // and an args string, then the word is looked up in the ordered
+    // registry below. This replaces the old sequential
+    // if (input.startsWith(...)) chain, which let prefix commands (e.g.
+    // /permission) shadow longer commands (e.g. /permissions).
+
+    const trimmed = input.trim();
+    const spaceIdx = trimmed.indexOf(" ");
+    const cmd = spaceIdx === -1 ? trimmed : trimmed.slice(0, spaceIdx);
+    const cmdArgs = spaceIdx === -1 ? "" : trimmed.slice(spaceIdx + 1);
+
+    const cmd_quit = async (): Promise<void> => {
       console.log(`\n${DIM}Disconnecting (daemon stays running)...${RESET}`);
       await control.close().catch(() => {});
       await client.disconnect();
       process.exit(0);
-    }
+    };
 
-    if (input === "/shutdown") {
+    const cmd_shutdown = async (): Promise<void> => {
       console.log(`\n${DIM}Shutting down daemon...${RESET}`);
       // Get daemon PID from the .json metadata next to the socket
       let daemonPid: number | null = null;
@@ -2407,9 +2419,9 @@ async function main() {
         } catch {}
       }
       process.exit(0);
-    }
+    };
 
-    if (input === "/abort") {
+    const cmd_abort = async (): Promise<void> => {
       stopSpinner();
       try {
         await control.request("abort");
@@ -2421,10 +2433,10 @@ async function main() {
       console.log(`${FG_YELLOW}⚠ Aborted.${RESET}`);
       rl.prompt();
       return;
-    }
+    };
 
-    if (input.startsWith("/verbose")) {
-      const arg = input.slice("/verbose".length).trim();
+    const cmd_verbose = async (args: string): Promise<void> => {
+      const arg = args.trim();
       type LogLevel = "quiet" | "normal" | "verbose";
       const levels: LogLevel[] = ["quiet", "normal", "verbose"];
       if (arg === "" || arg === "help") {
@@ -2438,15 +2450,15 @@ async function main() {
       }
       rl.prompt();
       return;
-    }
+    };
 
-    if (input === "/clear") {
+    const cmd_clear = async (): Promise<void> => {
       process.stdout.write(`${ESC}2J${ESC}H`);
       rl.prompt();
       return;
-    }
+    };
 
-    if (input === "/tools") {
+    const cmd_tools = async (): Promise<void> => {
       try {
         const result = await client.request<{
           tools: Array<{ name: string; description: string; type: string }>;
@@ -2489,9 +2501,9 @@ async function main() {
       }
       rl.prompt();
       return;
-    }
+    };
 
-    if (input === "/mcp") {
+    const cmd_mcp = async (): Promise<void> => {
       try {
         const result = await client.request<{
           servers: Array<{
@@ -2539,9 +2551,9 @@ async function main() {
       }
       rl.prompt();
       return;
-    }
+    };
 
-    if (input === "/skills") {
+    const cmd_skills = async (): Promise<void> => {
       try {
         const result = await client.request<{
           skills: Array<{
@@ -2576,9 +2588,9 @@ async function main() {
       }
       rl.prompt();
       return;
-    }
+    };
 
-    if (input === "/plugins") {
+    const cmd_plugins = async (): Promise<void> => {
       try {
         const result = await client.request<{
           plugins: Array<{
@@ -2629,10 +2641,10 @@ async function main() {
       }
       rl.prompt();
       return;
-    }
+    };
 
-    if (input === "/model" || input.startsWith("/model ")) {
-      const modelArg = input.slice("/model".length).trim();
+    const cmd_model = async (args: string): Promise<void> => {
+      const modelArg = args.trim();
       if (!modelArg) {
         // Show current model, fallback chain, and config
         const configPath = path.join(os.homedir(), ".baoclaw", "config.json");
@@ -2738,9 +2750,9 @@ async function main() {
       }
       rl.prompt();
       return;
-    }
+    };
 
-    if (input === "/think") {
+    const cmd_think = async (): Promise<void> => {
       thinkingEnabled = !thinkingEnabled;
       const settings = thinkingEnabled
         ? { thinking: { mode: "enabled", budget_tokens: thinkingBudget } }
@@ -2761,10 +2773,10 @@ async function main() {
       }
       rl.prompt();
       return;
-    }
+    };
 
-    if (input.startsWith("/projects")) {
-      const projArgs = input.slice("/projects".length).trim();
+    const cmd_projects = async (args: string): Promise<void> => {
+      const projArgs = args.trim();
 
       if (!projArgs || projArgs === "list") {
         try {
@@ -2919,10 +2931,10 @@ async function main() {
       }
       rl.prompt();
       return;
-    }
+    };
 
-    if (input.startsWith("/cron")) {
-      const cronArgs = input.slice("/cron".length).trim();
+    const cmd_cron = async (args: string): Promise<void> => {
+      const cronArgs = args.trim();
       const parts = cronArgs.split(/\s+/);
       const subCmd = parts[0] || "";
 
@@ -3039,19 +3051,18 @@ async function main() {
       }
       rl.prompt();
       return;
-    }
+    };
 
-    if (input.startsWith("/history")) {
-      const arg = input.slice("/history".length).trim();
+    const cmd_history = async (args: string): Promise<void> => {
+      const arg = args.trim();
       const count = parseInt(arg, 10) || 10;
       await showHistory(client, count);
       rl.prompt();
       return;
-    }
+    };
 
-    // ── /doc <filepath> — attach document for next message ──
-    if (input.startsWith("/doc")) {
-      const filePath = input.slice("/doc".length).trim();
+    const cmd_doc = async (args: string): Promise<void> => {
+      const filePath = args.trim();
       if (!filePath) {
         console.log(`\n${FG_ORANGE}${BOLD}Usage:${RESET} /doc <filepath>`);
         console.log(
@@ -3078,9 +3089,9 @@ async function main() {
       }
       rl.prompt();
       return;
-    }
+    };
 
-    if (input === "/debug") {
+    const cmd_debug = async (): Promise<void> => {
       debugMode = !debugMode;
       if (debugMode) {
         firstQueryDone = false;
@@ -3091,9 +3102,9 @@ async function main() {
       );
       rl.prompt();
       return;
-    }
+    };
 
-    if (input === "/compact") {
+    const cmd_compact = async (): Promise<void> => {
       startSpinner("Compacting conversation...");
       try {
         const result = await client.request<{
@@ -3131,10 +3142,10 @@ async function main() {
       }
       rl.prompt();
       return;
-    }
+    };
 
-    if (input.startsWith("/memory")) {
-      const memArgs = input.slice("/memory".length).trim();
+    const cmd_memory = async (args: string): Promise<void> => {
+      const memArgs = args.trim();
       const subCmd = memArgs.split(/\s+/)[0] || "";
       const rest = memArgs.slice(subCmd.length).trim();
 
@@ -3392,9 +3403,9 @@ async function main() {
       }
       rl.prompt();
       return;
-    }
+    };
 
-    if (input === "/diff") {
+    const cmd_diff = async (): Promise<void> => {
       startSpinner("Running git diff...");
       try {
         const result = await client.request<{ diff: string }>("gitDiff");
@@ -3408,10 +3419,10 @@ async function main() {
       }
       rl.prompt();
       return;
-    }
+    };
 
-    if (input.startsWith("/commit")) {
-      const message = input.slice("/commit".length).trim();
+    const cmd_commit = async (args: string): Promise<void> => {
+      const message = args.trim();
       if (!message) {
         console.log(`\n${FG_YELLOW}Usage: /commit <message>${RESET}\n`);
         rl.prompt();
@@ -3433,57 +3444,225 @@ async function main() {
       }
       rl.prompt();
       return;
-    }
+    };
 
-    if (input === "/git") {
-      startSpinner("Getting git status...");
-      try {
-        const result = await client.request<{
-          branch: string | null;
-          has_changes: boolean;
-          staged_files: string[];
-          modified_files: string[];
-          untracked_files: string[];
-        }>("gitStatus");
-        stopSpinner();
-        console.log(`\n${FG_ORANGE}${BOLD}Git Status${RESET}\n`);
-        if (result.branch) {
-          console.log(`  ${FG_WHITE}Branch:${RESET} ${result.branch}`);
+    // Combined /git handler: bare "/git" shows git status; "/git <sub>"
+    // runs the extended subcommands (mirrors the old exact-match-then-
+    // startsWith("/git ") chain).
+    const cmd_git = async (args: string): Promise<void> => {
+      if (!args) {
+        startSpinner("Getting git status...");
+        try {
+          const result = await client.request<{
+            branch: string | null;
+            has_changes: boolean;
+            staged_files: string[];
+            modified_files: string[];
+            untracked_files: string[];
+          }>("gitStatus");
+          stopSpinner();
+          console.log(`\n${FG_ORANGE}${BOLD}Git Status${RESET}\n`);
+          if (result.branch) {
+            console.log(`  ${FG_WHITE}Branch:${RESET} ${result.branch}`);
+          }
+          if (!result.has_changes) {
+            console.log(`  ${DIM}No changes${RESET}`);
+          } else {
+            if (result.staged_files.length > 0) {
+              console.log(`  ${FG_GREEN}Staged:${RESET}`);
+              for (const f of result.staged_files) {
+                console.log(`    ${FG_GREEN}+${RESET} ${f}`);
+              }
+            }
+            if (result.modified_files.length > 0) {
+              console.log(`  ${FG_YELLOW}Modified:${RESET}`);
+              for (const f of result.modified_files) {
+                console.log(`    ${FG_YELLOW}~${RESET} ${f}`);
+              }
+            }
+            if (result.untracked_files.length > 0) {
+              console.log(`  ${DIM}Untracked:${RESET}`);
+              for (const f of result.untracked_files) {
+                console.log(`    ${DIM}?${RESET} ${f}`);
+              }
+            }
+          }
+          console.log();
+        } catch (err) {
+          stopSpinner();
+          console.error(`${FG_RED}${err}${RESET}`);
         }
-        if (!result.has_changes) {
-          console.log(`  ${DIM}No changes${RESET}`);
-        } else {
-          if (result.staged_files.length > 0) {
-            console.log(`  ${FG_GREEN}Staged:${RESET}`);
-            for (const f of result.staged_files) {
-              console.log(`    ${FG_GREEN}+${RESET} ${f}`);
-            }
-          }
-          if (result.modified_files.length > 0) {
-            console.log(`  ${FG_YELLOW}Modified:${RESET}`);
-            for (const f of result.modified_files) {
-              console.log(`    ${FG_YELLOW}~${RESET} ${f}`);
-            }
-          }
-          if (result.untracked_files.length > 0) {
-            console.log(`  ${DIM}Untracked:${RESET}`);
-            for (const f of result.untracked_files) {
-              console.log(`    ${DIM}?${RESET} ${f}`);
-            }
-          }
-        }
-        console.log();
-      } catch (err) {
-        stopSpinner();
-        console.error(`${FG_RED}${err}${RESET}`);
+        rl.prompt();
+        return;
       }
+      const gitArgs = args.trim();
+      const parts = gitArgs.split(/\s+/);
+      const subCmd = parts[0] || "";
+
+      if (subCmd === "pr" && parts[1] === "list") {
+        startSpinner("Fetching pull requests...");
+        try {
+          const result = await client.request<{
+            pull_requests?: any[];
+            error?: string;
+          }>("gitPrList");
+          stopSpinner();
+          if (result.error) {
+            console.log(`\n${FG_YELLOW}${result.error}${RESET}\n`);
+          } else if (
+            !result.pull_requests ||
+            result.pull_requests.length === 0
+          ) {
+            console.log(`\n${DIM}No open pull requests.${RESET}\n`);
+          } else {
+            console.log(
+              `\n${FG_ORANGE}${BOLD}Pull Requests${RESET} ${DIM}(${result.pull_requests.length})${RESET}\n`,
+            );
+            for (const pr of result.pull_requests) {
+              console.log(
+                `  ${FG_CYAN}#${pr.number}${RESET} ${FG_WHITE}${pr.title}${RESET}`,
+              );
+              console.log(
+                `    ${DIM}${pr.state}${RESET}  ${pr.head_branch} → ${pr.base_branch}  ${DIM}by ${pr.author}${RESET}  ${pr.url}`,
+              );
+            }
+            console.log();
+          }
+        } catch (err) {
+          stopSpinner();
+          console.error(`${FG_RED}${err}${RESET}`);
+        }
+        rl.prompt();
+        return;
+      }
+
+      if (subCmd === "pr" && parts[1] === "create") {
+        const title = parts.slice(2).join(" ");
+        if (!title) {
+          console.log(`\n${FG_YELLOW}Usage: /git pr create <title>${RESET}\n`);
+          rl.prompt();
+          return;
+        }
+        startSpinner("Creating PR...");
+        try {
+          const result = await client.request<{
+            success: boolean;
+            number?: number;
+            url?: string;
+            error?: string;
+          }>("gitPrCreate", { title, body: "", base: "", head: "" });
+          stopSpinner();
+          if (result.success) {
+            console.log(
+              `\n${FG_GREEN}✓ PR #${result.number} created${RESET} ${DIM}${result.url}${RESET}\n`,
+            );
+          } else {
+            console.log(`\n${FG_RED}${result.error}${RESET}\n`);
+          }
+        } catch (err) {
+          stopSpinner();
+          console.error(`${FG_RED}${err}${RESET}`);
+        }
+        rl.prompt();
+        return;
+      }
+
+      if (subCmd === "branch") {
+        startSpinner("Listing branches...");
+        try {
+          const result = await client.request<{
+            branches?: any[];
+            error?: string;
+          }>("gitBranchList");
+          stopSpinner();
+          if (result.error) {
+            console.log(`\n${FG_YELLOW}${result.error}${RESET}\n`);
+          } else if (!result.branches || result.branches.length === 0) {
+            console.log(`\n${DIM}No branches.${RESET}\n`);
+          } else {
+            console.log(
+              `\n${FG_ORANGE}${BOLD}Branches${RESET} ${DIM}(${result.branches.length})${RESET}\n`,
+            );
+            for (const b of result.branches) {
+              const marker = b.is_current ? `${FG_GREEN}*${RESET}` : " ";
+              const ahead =
+                b.ahead > 0 ? ` ${FG_GREEN}↑${b.ahead}${RESET}` : "";
+              const behind =
+                b.behind > 0 ? ` ${FG_RED}↓${b.behind}${RESET}` : "";
+              console.log(
+                `  ${marker} ${FG_WHITE}${b.name}${RESET}${ahead}${behind}  ${DIM}${b.last_commit} ${b.last_commit_msg}${RESET}`,
+              );
+            }
+            console.log();
+          }
+        } catch (err) {
+          stopSpinner();
+          console.error(`${FG_RED}${err}${RESET}`);
+        }
+        rl.prompt();
+        return;
+      }
+
+      if (subCmd === "conflict") {
+        startSpinner("Checking conflicts...");
+        try {
+          const result = await client.request<{
+            conflicts?: any[];
+            has_conflicts?: boolean;
+            error?: string;
+          }>("gitConflictCheck");
+          stopSpinner();
+          if (result.error) {
+            console.log(`\n${FG_YELLOW}${result.error}${RESET}\n`);
+          } else if (!result.has_conflicts) {
+            console.log(`\n${FG_GREEN}✓ No conflicts detected${RESET}\n`);
+          } else {
+            console.log(
+              `\n${FG_RED}${BOLD}Conflicts detected${RESET} ${DIM}(${(result.conflicts || []).length})${RESET}\n`,
+            );
+            for (const c of result.conflicts || []) {
+              console.log(
+                `  ${FG_YELLOW}⚠${RESET} ${FG_WHITE}${c.file}${RESET} ${c.resolved ? FG_GREEN + "resolved" : FG_RED + "unresolved"}${RESET}`,
+              );
+            }
+            console.log();
+          }
+        } catch (err) {
+          stopSpinner();
+          console.error(`${FG_RED}${err}${RESET}`);
+        }
+        rl.prompt();
+        return;
+      }
+
+      console.log(`\n${FG_ORANGE}${BOLD}Git Commands${RESET}\n`);
+      console.log(
+        `  ${FG_WHITE}/git${RESET}               ${DIM}Git status (branch, changes)${RESET}`,
+      );
+      console.log(
+        `  ${FG_WHITE}/git pr list${RESET}       ${DIM}List pull requests${RESET}`,
+      );
+      console.log(
+        `  ${FG_WHITE}/git pr create <title>${RESET} ${DIM}Create a pull request${RESET}`,
+      );
+      console.log(
+        `  ${FG_WHITE}/git branch${RESET}         ${DIM}List branches${RESET}`,
+      );
+      console.log(
+        `  ${FG_WHITE}/git conflict${RESET}       ${DIM}Check for merge conflicts${RESET}`,
+      );
+      console.log(
+        `  ${FG_WHITE}/diff${RESET}              ${DIM}Git diff summary${RESET}`,
+      );
+      console.log(
+        `  ${FG_WHITE}/commit <msg>${RESET}      ${DIM}Stage all and commit${RESET}\n`,
+      );
       rl.prompt();
       return;
-    }
+    };
 
-    // ── /task commands ──
-    if (input.startsWith("/task")) {
-      const taskArgs = input.slice("/task".length).trim();
+    const cmd_task = async (args: string): Promise<void> => {
+      const taskArgs = args.trim();
       const parts = taskArgs.split(/\s+/);
       const subCmd = parts[0] || "";
 
@@ -3662,9 +3841,9 @@ async function main() {
       );
       rl.prompt();
       return;
-    }
+    };
 
-    if (input === "/voice") {
+    const cmd_voice = async (): Promise<void> => {
       // Voice input: record audio via arecord, transcribe via whisper-cli
       const whisperBin = process.env.WHISPER_CLI || "whisper-cli";
       const whisperModel =
@@ -3835,10 +4014,10 @@ async function main() {
 
       rl.prompt();
       return;
-    }
+    };
 
-    if (input.startsWith("/telegram")) {
-      const telegramArgs = input.slice("/telegram".length).trim();
+    const cmd_telegram = async (args: string): Promise<void> => {
+      const telegramArgs = args.trim();
       const subCmd = telegramArgs.split(/\s+/)[0] || "";
       const baoclawHome =
         process.env.BAOCLAW_HOME || path.join(os.homedir(), ".baoclaw");
@@ -4016,11 +4195,10 @@ async function main() {
       }
       rl.prompt();
       return;
-    }
+    };
 
-    // ── /team commands ──
-    if (input.startsWith("/team")) {
-      const teamArgs = input.slice("/team".length).trim();
+    const cmd_team = async (args: string): Promise<void> => {
+      const teamArgs = args.trim();
       const parts = teamArgs.split(/\s+/);
       const subCmd = parts[0] || "";
 
@@ -4362,10 +4540,10 @@ async function main() {
       console.log();
       rl.prompt();
       return;
-    }
+    };
 
-    if (input.startsWith("/telemetry")) {
-      const arg = input.slice("/telemetry".length).trim().toLowerCase();
+    const cmd_telemetry = async (args: string): Promise<void> => {
+      const arg = args.trim().toLowerCase();
       if (arg === "on") {
         console.log(
           `\n${FG_GREEN}${BOLD}Telemetry enabled${RESET} ${DIM}(events stored locally in ~/.baoclaw/telemetry/)${RESET}\n`,
@@ -4377,11 +4555,10 @@ async function main() {
       }
       rl.prompt();
       return;
-    }
+    };
 
-    // ── /template commands ──
-    if (input.startsWith("/template")) {
-      const tplArgs = input.slice("/template".length).trim();
+    const cmd_template = async (args: string): Promise<void> => {
+      const tplArgs = args.trim();
       const parts = tplArgs.split(/\s+/);
       const subCmd = parts[0] || "";
 
@@ -4538,179 +4715,10 @@ async function main() {
       );
       rl.prompt();
       return;
-    }
+    };
 
-    // ── Extended /git commands ──
-    if (input.startsWith("/git ")) {
-      const gitArgs = input.slice("/git".length).trim();
-      const parts = gitArgs.split(/\s+/);
-      const subCmd = parts[0] || "";
-
-      if (subCmd === "pr" && parts[1] === "list") {
-        startSpinner("Fetching pull requests...");
-        try {
-          const result = await client.request<{
-            pull_requests?: any[];
-            error?: string;
-          }>("gitPrList");
-          stopSpinner();
-          if (result.error) {
-            console.log(`\n${FG_YELLOW}${result.error}${RESET}\n`);
-          } else if (
-            !result.pull_requests ||
-            result.pull_requests.length === 0
-          ) {
-            console.log(`\n${DIM}No open pull requests.${RESET}\n`);
-          } else {
-            console.log(
-              `\n${FG_ORANGE}${BOLD}Pull Requests${RESET} ${DIM}(${result.pull_requests.length})${RESET}\n`,
-            );
-            for (const pr of result.pull_requests) {
-              console.log(
-                `  ${FG_CYAN}#${pr.number}${RESET} ${FG_WHITE}${pr.title}${RESET}`,
-              );
-              console.log(
-                `    ${DIM}${pr.state}${RESET}  ${pr.head_branch} → ${pr.base_branch}  ${DIM}by ${pr.author}${RESET}  ${pr.url}`,
-              );
-            }
-            console.log();
-          }
-        } catch (err) {
-          stopSpinner();
-          console.error(`${FG_RED}${err}${RESET}`);
-        }
-        rl.prompt();
-        return;
-      }
-
-      if (subCmd === "pr" && parts[1] === "create") {
-        const title = parts.slice(2).join(" ");
-        if (!title) {
-          console.log(`\n${FG_YELLOW}Usage: /git pr create <title>${RESET}\n`);
-          rl.prompt();
-          return;
-        }
-        startSpinner("Creating PR...");
-        try {
-          const result = await client.request<{
-            success: boolean;
-            number?: number;
-            url?: string;
-            error?: string;
-          }>("gitPrCreate", { title, body: "", base: "", head: "" });
-          stopSpinner();
-          if (result.success) {
-            console.log(
-              `\n${FG_GREEN}✓ PR #${result.number} created${RESET} ${DIM}${result.url}${RESET}\n`,
-            );
-          } else {
-            console.log(`\n${FG_RED}${result.error}${RESET}\n`);
-          }
-        } catch (err) {
-          stopSpinner();
-          console.error(`${FG_RED}${err}${RESET}`);
-        }
-        rl.prompt();
-        return;
-      }
-
-      if (subCmd === "branch") {
-        startSpinner("Listing branches...");
-        try {
-          const result = await client.request<{
-            branches?: any[];
-            error?: string;
-          }>("gitBranchList");
-          stopSpinner();
-          if (result.error) {
-            console.log(`\n${FG_YELLOW}${result.error}${RESET}\n`);
-          } else if (!result.branches || result.branches.length === 0) {
-            console.log(`\n${DIM}No branches.${RESET}\n`);
-          } else {
-            console.log(
-              `\n${FG_ORANGE}${BOLD}Branches${RESET} ${DIM}(${result.branches.length})${RESET}\n`,
-            );
-            for (const b of result.branches) {
-              const marker = b.is_current ? `${FG_GREEN}*${RESET}` : " ";
-              const ahead =
-                b.ahead > 0 ? ` ${FG_GREEN}↑${b.ahead}${RESET}` : "";
-              const behind =
-                b.behind > 0 ? ` ${FG_RED}↓${b.behind}${RESET}` : "";
-              console.log(
-                `  ${marker} ${FG_WHITE}${b.name}${RESET}${ahead}${behind}  ${DIM}${b.last_commit} ${b.last_commit_msg}${RESET}`,
-              );
-            }
-            console.log();
-          }
-        } catch (err) {
-          stopSpinner();
-          console.error(`${FG_RED}${err}${RESET}`);
-        }
-        rl.prompt();
-        return;
-      }
-
-      if (subCmd === "conflict") {
-        startSpinner("Checking conflicts...");
-        try {
-          const result = await client.request<{
-            conflicts?: any[];
-            has_conflicts?: boolean;
-            error?: string;
-          }>("gitConflictCheck");
-          stopSpinner();
-          if (result.error) {
-            console.log(`\n${FG_YELLOW}${result.error}${RESET}\n`);
-          } else if (!result.has_conflicts) {
-            console.log(`\n${FG_GREEN}✓ No conflicts detected${RESET}\n`);
-          } else {
-            console.log(
-              `\n${FG_RED}${BOLD}Conflicts detected${RESET} ${DIM}(${(result.conflicts || []).length})${RESET}\n`,
-            );
-            for (const c of result.conflicts || []) {
-              console.log(
-                `  ${FG_YELLOW}⚠${RESET} ${FG_WHITE}${c.file}${RESET} ${c.resolved ? FG_GREEN + "resolved" : FG_RED + "unresolved"}${RESET}`,
-              );
-            }
-            console.log();
-          }
-        } catch (err) {
-          stopSpinner();
-          console.error(`${FG_RED}${err}${RESET}`);
-        }
-        rl.prompt();
-        return;
-      }
-
-      console.log(`\n${FG_ORANGE}${BOLD}Git Commands${RESET}\n`);
-      console.log(
-        `  ${FG_WHITE}/git${RESET}               ${DIM}Git status (branch, changes)${RESET}`,
-      );
-      console.log(
-        `  ${FG_WHITE}/git pr list${RESET}       ${DIM}List pull requests${RESET}`,
-      );
-      console.log(
-        `  ${FG_WHITE}/git pr create <title>${RESET} ${DIM}Create a pull request${RESET}`,
-      );
-      console.log(
-        `  ${FG_WHITE}/git branch${RESET}         ${DIM}List branches${RESET}`,
-      );
-      console.log(
-        `  ${FG_WHITE}/git conflict${RESET}       ${DIM}Check for merge conflicts${RESET}`,
-      );
-      console.log(
-        `  ${FG_WHITE}/diff${RESET}              ${DIM}Git diff summary${RESET}`,
-      );
-      console.log(
-        `  ${FG_WHITE}/commit <msg>${RESET}      ${DIM}Stage all and commit${RESET}\n`,
-      );
-      rl.prompt();
-      return;
-    }
-
-    // ── Extended /model commands ──
-    if (input.startsWith("/model ")) {
-      const modelArgs = input.slice("/model".length).trim();
+    const cmd_model_extended = async (args: string): Promise<void> => {
+      const modelArgs = args.trim();
       const parts = modelArgs.split(/\s+/);
       const subCmd = parts[0] || "";
 
@@ -4808,11 +4816,10 @@ async function main() {
 
       // /model alone (existing behavior) — show current model and allow switch
       // falls through to the existing handler below
-    }
+    };
 
-    // ── Extended /telemetry commands ──
-    if (input.startsWith("/telemetry ")) {
-      const telArgs = input.slice("/telemetry".length).trim();
+    const cmd_telemetry_extended = async (args: string): Promise<void> => {
+      const telArgs = args.trim();
       const parts = telArgs.split(/\s+/);
       const subCmd = parts[0] || "";
 
@@ -4930,13 +4937,10 @@ async function main() {
       }
 
       // Falls through to /telemetry on|off handler
-    }
+    };
 
-    // ── /permission commands ──
-    // Word-boundary match: a plain startsWith("/permission") would shadow the
-    // /permissions (plural) handler below and swallow its subcommands.
-    if (input === "/permission" || input.startsWith("/permission ")) {
-      const permArgs = input.slice("/permission".length).trim();
+    const cmd_permission = async (args: string): Promise<void> => {
+      const permArgs = args.trim();
       const parts = permArgs.split(/\s+/);
       const subCmd = parts[0] || "";
 
@@ -5041,11 +5045,10 @@ async function main() {
       );
       rl.prompt();
       return;
-    }
+    };
 
-    // ── /permissions (plural) — 基于规则的安全权限管理（model_profiles 格式）──
-    if (input.startsWith("/permissions")) {
-      const args = input.slice("/permissions".length).trim();
+    const cmd_permissions = async (rawArgs: string): Promise<void> => {
+      const args = rawArgs.trim();
 
       // /permissions（无参数）— 显示当前权限配置概览
       if (!args) {
@@ -5273,14 +5276,9 @@ async function main() {
       );
       rl.prompt();
       return;
-    }
+    };
 
-    // ═══════════════════════════════════════════════════════════════
-    // P2-2: Session & Config Info Commands
-    // ═══════════════════════════════════════════════════════════════
-
-    // ── /tokens — token 用量统计 ──
-    if (input === "/tokens" || input === "/token") {
+    const cmd_tokens = async (): Promise<void> => {
       try {
         const result = await client.request<any>("session.tokens", {});
         if (result && result.current_tokens !== undefined) {
@@ -5320,10 +5318,9 @@ async function main() {
       }
       rl.prompt();
       return;
-    }
+    };
 
-    // ── /cost — 花费估算 ──
-    if (input === "/cost") {
+    const cmd_cost = async (): Promise<void> => {
       try {
         const result = await client.request<any>("session.cost", {});
         const fmtCost = (v: any) =>
@@ -5350,10 +5347,9 @@ async function main() {
       }
       rl.prompt();
       return;
-    }
+    };
 
-    // ── /session — Session Metadata ──
-    if (input === "/session") {
+    const cmd_session = async (): Promise<void> => {
       try {
         const result = await client.request<any>("session.info", {});
         const formatDate = (iso?: string) => {
@@ -5398,10 +5394,9 @@ async function main() {
       }
       rl.prompt();
       return;
-    }
+    };
 
-    // ── /config — 完整配置 JSON（key 打码）──
-    if (input === "/config") {
+    const cmd_config = async (): Promise<void> => {
       try {
         const result = await client.request<any>("config.show", {});
         // Deep-clone and mask api keys
@@ -5434,9 +5429,9 @@ async function main() {
       }
       rl.prompt();
       return;
-    }
+    };
 
-    if (input === "/help") {
+    const cmd_help = async (): Promise<void> => {
       console.log(`\n${FG_ORANGE}${BOLD}Commands${RESET}\n`);
 
       console.log(`  ${FG_GRAY}── Conversation ──${RESET}`);
@@ -5576,6 +5571,72 @@ async function main() {
       console.log();
       rl.prompt();
       return;
+    };
+
+    type CommandEntry = {
+      names: string[];
+      prefix?: boolean;
+      handler: (args: string) => Promise<void> | void;
+    };
+
+    // Ordered registry — first match wins, mirroring the original
+    // sequential if-chain order.
+    const commands: CommandEntry[] = [
+      { names: ["/quit", "/exit", "/q"], handler: cmd_quit },
+      { names: ["/shutdown"], handler: cmd_shutdown },
+      { names: ["/abort"], handler: cmd_abort },
+      { names: ["/verbose"], prefix: true, handler: cmd_verbose },
+      { names: ["/clear"], handler: cmd_clear },
+      { names: ["/tools"], handler: cmd_tools },
+      { names: ["/mcp"], handler: cmd_mcp },
+      { names: ["/skills"], handler: cmd_skills },
+      { names: ["/plugins"], handler: cmd_plugins },
+      { names: ["/model"], handler: cmd_model },
+      { names: ["/think"], handler: cmd_think },
+      { names: ["/projects"], prefix: true, handler: cmd_projects },
+      { names: ["/cron"], prefix: true, handler: cmd_cron },
+      { names: ["/history"], prefix: true, handler: cmd_history },
+      { names: ["/doc"], prefix: true, handler: cmd_doc },
+      { names: ["/debug"], handler: cmd_debug },
+      { names: ["/compact"], handler: cmd_compact },
+      { names: ["/memory"], prefix: true, handler: cmd_memory },
+      { names: ["/diff"], handler: cmd_diff },
+      { names: ["/commit"], prefix: true, handler: cmd_commit },
+      { names: ["/git"], handler: cmd_git },
+      { names: ["/task"], prefix: true, handler: cmd_task },
+      { names: ["/voice"], handler: cmd_voice },
+      { names: ["/telegram"], prefix: true, handler: cmd_telegram },
+      { names: ["/team"], prefix: true, handler: cmd_team },
+      { names: ["/telemetry"], prefix: true, handler: cmd_telemetry },
+      { names: ["/template"], prefix: true, handler: cmd_template },
+      // Unreachable today: the /model handler above already matches
+      // "/model <args>" and returns; kept verbatim from the old chain.
+      { names: ["/model"], handler: cmd_model_extended },
+      // Unreachable today: the /telemetry handler above already matches
+      // "/telemetry <args>" and returns; kept verbatim from the old chain.
+      { names: ["/telemetry"], handler: cmd_telemetry_extended },
+      { names: ["/permission"], handler: cmd_permission },
+      { names: ["/permissions"], prefix: true, handler: cmd_permissions },
+      { names: ["/tokens", "/token"], handler: cmd_tokens },
+      { names: ["/cost"], handler: cmd_cost },
+      { names: ["/session"], handler: cmd_session },
+      { names: ["/config"], handler: cmd_config },
+      { names: ["/help"], handler: cmd_help },
+    ];
+
+    for (const entry of commands) {
+      const matchedName = entry.names.find(
+        (name) =>
+          name === cmd || (entry.prefix === true && cmd.startsWith(name)),
+      );
+      if (matchedName !== undefined) {
+        const handlerArgs = entry.prefix
+          ? cmd.slice(matchedName.length) +
+            (spaceIdx === -1 ? "" : " " + cmdArgs)
+          : cmdArgs;
+        await entry.handler(handlerArgs);
+        return;
+      }
     }
 
     // Auto-detect drag-drop image files (terminal pastes quoted path like '/path/to/img.png')
