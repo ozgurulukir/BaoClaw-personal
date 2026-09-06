@@ -123,19 +123,19 @@ interface SpecInfo {
 
 function truncate(text: string, limit: number = MAX_OUTPUT): string {
   if (text.length <= limit) return text;
-  return text.slice(0, limit) + "\n…(输出已截断)";
+  return text.slice(0, limit) + "\n…(output truncated)";
 }
 
 function formatTools(tools: ToolInfo[]): string {
   const count = tools.length;
-  if (count === 0) return "📋 已注册工具 (0)\n暂无已注册的工具。";
+  if (count === 0) return "📋 Registered Tools (0)\nNo registered tools.";
   const groups: Record<string, ToolInfo[]> = {};
   for (const t of tools) {
     const type = t.type || "other";
     if (!groups[type]) groups[type] = [];
     groups[type].push(t);
   }
-  let out = `📋 已注册工具 (${count})\n`;
+  let out = `📋 Registered Tools (${count})\n`;
   for (const [type, items] of Object.entries(groups)) {
     out += `\n── ${type} (${items.length}) ──\n`;
     for (const t of items) {
@@ -151,8 +151,8 @@ function formatTools(tools: ToolInfo[]): string {
 }
 
 function formatSkills(skills: SkillInfo[]): string {
-  if (skills.length === 0) return "📋 已加载技能 (0)";
-  let out = `📋 已加载技能 (${skills.length})\n`;
+  if (skills.length === 0) return "📋 Loaded Skills (0)";
+  let out = `📋 Loaded Skills (${skills.length})\n`;
   for (const s of skills) {
     out += `• ${s.name} [${s.source}]\n`;
     if (s.description) out += `  ${s.description}\n`;
@@ -161,8 +161,8 @@ function formatSkills(skills: SkillInfo[]): string {
 }
 
 function formatMcpServers(servers: McpServerInfo[]): string {
-  if (servers.length === 0) return "📋 MCP 服务器 (0)";
-  let out = `📋 MCP 服务器 (${servers.length})\n`;
+  if (servers.length === 0) return "📋 MCP Servers (0)";
+  let out = `📋 MCP Servers (${servers.length})\n`;
   for (const srv of servers) {
     const status = srv.disabled ? "🔴" : "🟢";
     out += `${status} ${srv.name} [${srv.server_type}] [${srv.source}]\n`;
@@ -171,8 +171,8 @@ function formatMcpServers(servers: McpServerInfo[]): string {
 }
 
 function formatPlugins(plugins: PluginInfo[]): string {
-  if (plugins.length === 0) return "📋 已安装插件 (0)";
-  let out = `📋 已安装插件 (${plugins.length})\n`;
+  if (plugins.length === 0) return "📋 Installed Plugins (0)";
+  let out = `📋 Installed Plugins (${plugins.length})\n`;
   for (const p of plugins) {
     const ver = p.version ? ` v${p.version}` : "";
     out += `• ${p.name}${ver} [${p.source}]\n`;
@@ -185,38 +185,40 @@ function formatCompact(result: CompactResult): string {
     result.tokens_before > 0
       ? ((result.tokens_saved / result.tokens_before) * 100).toFixed(0)
       : "0";
-  return `✅ 上下文已压缩\n\n压缩前 ${result.tokens_before.toLocaleString()} tokens\n压缩后 ${result.tokens_after.toLocaleString()} tokens\n节省 ${result.tokens_saved.toLocaleString()} tokens (${pct}%)\n摘要 ${result.summary_tokens.toLocaleString()} tokens`;
+  return `✅ Context compacted\n\nBefore: ${result.tokens_before.toLocaleString()} tokens\nAfter: ${result.tokens_after.toLocaleString()} tokens\nSaved: ${result.tokens_saved.toLocaleString()} tokens (${pct}%)\nSummary: ${result.summary_tokens.toLocaleString()} tokens`;
 }
 
 function formatGitStatus(result: GitStatusResult): string {
-  let out = `📂 Git 状态\n\n分支: ${result.branch ?? "(detached)"}\n`;
+  let out = `📂 Git Status\n\nBranch: ${result.branch ?? "(detached)"}\n`;
   if (result.staged_files.length) {
-    out += `\n暂存 (${result.staged_files.length}):\n`;
+    out += `\nStaged (${result.staged_files.length}):\n`;
     for (const f of result.staged_files) out += `  ✅ ${f}\n`;
   }
   if (result.modified_files.length) {
-    out += `\n已修改 (${result.modified_files.length}):\n`;
+    out += `\nModified (${result.modified_files.length}):\n`;
     for (const f of result.modified_files) out += `  ✏️ ${f}\n`;
   }
   if (result.untracked_files.length) {
-    out += `\n未跟踪 (${result.untracked_files.length}):\n`;
+    out += `\nUntracked (${result.untracked_files.length}):\n`;
     for (const f of result.untracked_files) out += `  ❓ ${f}\n`;
   }
-  if (!result.has_changes) out += "\n工作区干净，无变更。";
+  if (!result.has_changes) out += "\nWorking tree clean, no changes.";
   return out;
 }
 
 function formatGitDiff(result: GitDiffResult): string {
-  return result.diff ? truncate(`📝 Git Diff\n\n${result.diff}`) : "无变更。";
+  return result.diff
+    ? truncate(`📝 Git Diff\n\n${result.diff}`)
+    : "No changes.";
 }
 
 function formatGitCommit(result: GitCommitResult): string {
-  return `✅ 提交成功\n\nHash: ${result.hash}\n消息: ${result.message}`;
+  return `✅ Committed\n\nHash: ${result.hash}\nMessage: ${result.message}`;
 }
 
 function formatHistory(entries: HistoryEntry[]): string {
-  if (!entries?.length) return "暂无对话历史。";
-  let out = `📜 最近对话 (${entries.length})\n\n`;
+  if (!entries?.length) return "No conversation history.";
+  let out = `📜 Recent Conversation (${entries.length})\n\n`;
   for (const e of entries) {
     const role = e.role === "user" ? "👤" : "🤖";
     const content =
@@ -231,8 +233,8 @@ function formatHistory(entries: HistoryEntry[]): string {
 }
 
 function formatSearchResults(results: SearchResult[], query: string): string {
-  if (!results?.length) return `未找到匹配 "${query}" 的内容`;
-  let out = `🔍 搜索结果: "${query}" (${results.length})\n\n`;
+  if (!results?.length) return `No matches found for "${query}"`;
+  let out = `🔍 Search Results: "${query}" (${results.length})\n\n`;
   for (const r of results) {
     out += `${r.snippet || r.context || ""}\n\n`;
     if (out.length > MAX_OUTPUT) {
@@ -244,12 +246,12 @@ function formatSearchResults(results: SearchResult[], query: string): string {
 }
 
 function formatExport(result: ExportResult): string {
-  return `📤 导出成功\n\n路径: ${result.path}${result.size ? `\n大小: ${(result.size / 1024).toFixed(1)} KB` : ""}`;
+  return `📤 Exported\n\nPath: ${result.path}${result.size ? `\nSize: ${(result.size / 1024).toFixed(1)} KB` : ""}`;
 }
 
 function formatProjects(projects: ProjectInfo[]): string {
-  if (!projects?.length) return "📋 项目列表 (0)";
-  let out = `📋 项目列表 (${projects.length})\n\n`;
+  if (!projects?.length) return "📋 Projects (0)";
+  let out = `📋 Projects (${projects.length})\n\n`;
   for (const p of projects) {
     out += `• ${p.name} [${p.id}]\n  ${p.path}\n\n`;
   }
@@ -257,8 +259,8 @@ function formatProjects(projects: ProjectInfo[]): string {
 }
 
 function formatTasks(tasks: TaskInfo[]): string {
-  if (!tasks?.length) return "📋 后台任务 (0)";
-  let out = `📋 后台任务 (${tasks.length})\n\n`;
+  if (!tasks?.length) return "📋 Background Tasks (0)";
+  let out = `📋 Background Tasks (${tasks.length})\n\n`;
   for (const t of tasks) {
     const emoji =
       t.status === "running"
@@ -268,14 +270,14 @@ function formatTasks(tasks: TaskInfo[]): string {
           : t.status === "failed"
             ? "🔴"
             : "⚪";
-    out += `${emoji} [${t.id}] ${t.description}\n  状态: ${t.status}\n\n`;
+    out += `${emoji} [${t.id}] ${t.description}\n  Status: ${t.status}\n\n`;
   }
   return truncate(out);
 }
 
 function formatCronList(crons: CronEntry[]): string {
-  if (!crons?.length) return "📋 定时任务 (0)";
-  let out = `📋 定时任务 (${crons.length})\n\n`;
+  if (!crons?.length) return "📋 Cron Jobs (0)";
+  let out = `📋 Cron Jobs (${crons.length})\n\n`;
   for (const c of crons) {
     const s = c.enabled ? "🟢" : "🔴";
     out += `${s} [${c.id}] ${c.schedule} ${c.command}\n`;
@@ -298,7 +300,7 @@ function formatSpecShow(spec: {
   phase: string;
 }): string {
   return truncate(
-    `📋 Spec: ${spec.name}\n阶段: ${spec.phase}\n\n${spec.content}`,
+    `📋 Spec: ${spec.name}\nPhase: ${spec.phase}\n\n${spec.content}`,
   );
 }
 
@@ -307,7 +309,7 @@ function formatSpecStatus(spec: {
   phase: string;
   tasks: { name: string; status: string }[];
 }): string {
-  let out = `📊 Spec 状态: ${spec.name}\n阶段: ${spec.phase}\n\n`;
+  let out = `📊 Spec Status: ${spec.name}\nPhase: ${spec.phase}\n\n`;
   for (const t of spec.tasks) {
     const e =
       t.status === "completed"
@@ -361,11 +363,11 @@ async function handleCompact(ctx: CommandContext): Promise<string> {
 
 async function handleModel(ctx: CommandContext): Promise<string> {
   if (!ctx.args.trim())
-    return "当前模型信息请直接问 AI。\n用法: /model <模型名称>";
+    return "Ask the AI directly for current model info.\nUsage: /model <model-name>";
   const result = await ctx.ipcClient.request<{ model: string }>("switchModel", {
     model: ctx.args.trim(),
   });
-  return `✅ 已切换到模型: ${result.model ?? ctx.args.trim()}`;
+  return `✅ Switched to model: ${result.model ?? ctx.args.trim()}`;
 }
 
 async function handleHistory(ctx: CommandContext): Promise<string> {
@@ -379,7 +381,7 @@ async function handleHistory(ctx: CommandContext): Promise<string> {
 
 async function handleSearch(ctx: CommandContext): Promise<string> {
   if (!ctx.args.trim())
-    return formatError("参数缺失", "用法: /search <关键词>");
+    return formatError("Missing argument", "Usage: /search <query>");
   const result = await ctx.ipcClient.request<SearchResult[]>("searchHistory", {
     query: ctx.args.trim(),
   });
@@ -393,7 +395,7 @@ async function handleExport(ctx: CommandContext): Promise<string> {
 
 async function handleAbort(ctx: CommandContext): Promise<string> {
   await ctx.control.request("abort");
-  return "⛔ 当前任务已中止。";
+  return "⛔ Current task aborted.";
 }
 
 async function handleGit(ctx: CommandContext): Promise<string> {
@@ -408,7 +410,7 @@ async function handleDiff(ctx: CommandContext): Promise<string> {
 
 async function handleCommit(ctx: CommandContext): Promise<string> {
   if (!ctx.args.trim())
-    return formatError("参数缺失", "用法: /commit <提交消息>");
+    return formatError("Missing argument", "Usage: /commit <message>");
   const result = await ctx.ipcClient.request<GitCommitResult>("gitCommit", {
     message: ctx.args.trim(),
   });
@@ -465,12 +467,12 @@ async function handleProjects(ctx: CommandContext): Promise<string> {
 
 async function handleTask(ctx: CommandContext): Promise<string> {
   if (!ctx.args.trim())
-    return formatError("参数缺失", "用法: /task <任务描述>");
+    return formatError("Missing argument", "Usage: /task <description>");
   const result = await ctx.ipcClient.request<{ id: string; status: string }>(
     "taskCreate",
     { description: ctx.args.trim() },
   );
-  return `🚀 任务已创建\n\nID: ${result.id}\n状态: ${result.status}`;
+  return `🚀 Task created\n\nID: ${result.id}\nStatus: ${result.status}`;
 }
 
 async function handleTasks(ctx: CommandContext): Promise<string> {
@@ -483,9 +485,9 @@ async function handleTasks(ctx: CommandContext): Promise<string> {
 
 async function handleTaskStop(ctx: CommandContext): Promise<string> {
   if (!ctx.args.trim())
-    return formatError("参数缺失", "用法: /task_stop <任务ID>");
+    return formatError("Missing argument", "Usage: /task_stop <task-id>");
   await ctx.ipcClient.request("taskStop", { id: ctx.args.trim() });
-  return `⏹️ 任务已停止\n\nID: ${ctx.args.trim()}`;
+  return `⏹️ Task stopped\n\nID: ${ctx.args.trim()}`;
 }
 
 async function handleCron(ctx: CommandContext): Promise<string> {
@@ -501,8 +503,10 @@ async function handleHelp(_ctx: CommandContext): Promise<string> {
 }
 
 async function handleStatus(ctx: CommandContext): Promise<string> {
-  const connected = ctx.ipcClient.connected ? "🟢 已连接" : "🔴 已断开";
-  let out = `🐾 BaoClaw Feishu Gateway\n\nDaemon 连接: ${connected}\n`;
+  const connected = ctx.ipcClient.connected
+    ? "🟢 Connected"
+    : "🔴 Disconnected";
+  let out = `🐾 BaoClaw Feishu Gateway\n\nDaemon: ${connected}\n`;
   if (_daemonInfo) {
     out += `Daemon PID: ${_daemonInfo.pid}\nSession: ${_daemonInfo.session_id}\nCWD: ${_daemonInfo.cwd}\n`;
   }
@@ -512,7 +516,7 @@ async function handleStatus(ctx: CommandContext): Promise<string> {
 }
 
 async function handleStart(_ctx: CommandContext): Promise<string> {
-  return "🐾 BaoClaw Feishu Gateway\n\n欢迎使用 BaoClaw！\n\n直接发送消息与 AI 对话，或使用 / 命令操作。\n输入 /help 查看所有可用命令。";
+  return "🐾 BaoClaw Feishu Gateway\n\nWelcome to BaoClaw!\n\nSend a message to chat with the AI, or use / commands.\nType /help to see all available commands.";
 }
 
 async function handleGateway(_ctx: CommandContext): Promise<string> {
@@ -522,44 +526,45 @@ async function handleGateway(_ctx: CommandContext): Promise<string> {
 
   switch (sub) {
     case "status": {
-      if (!_gatewayInfo) return "⚠️ 网关信息未初始化";
+      if (!_gatewayInfo) return "⚠️ Gateway info not initialized";
       const uptime = Math.floor((Date.now() - _gatewayInfo.startTime) / 1000);
       const mem = process.memoryUsage();
       let out = `🐾 ${_gatewayInfo.name} Gateway\n\n`;
       out += `PID: ${_gatewayInfo.pid}\n`;
-      out += `运行时间: ${Math.floor(uptime / 3600)}h ${Math.floor((uptime % 3600) / 60)}m ${uptime % 60}s\n`;
-      out += `内存 RSS: ${(mem.rss / 1024 / 1024).toFixed(1)} MB\n`;
-      out += `内存 Heap: ${(mem.heapUsed / 1024 / 1024).toFixed(1)} / ${(mem.heapTotal / 1024 / 1024).toFixed(1)} MB\n`;
+      out += `Uptime: ${Math.floor(uptime / 3600)}h ${Math.floor((uptime % 3600) / 60)}m ${uptime % 60}s\n`;
+      out += `Memory RSS: ${(mem.rss / 1024 / 1024).toFixed(1)} MB\n`;
+      out += `Memory Heap: ${(mem.heapUsed / 1024 / 1024).toFixed(1)} / ${(mem.heapTotal / 1024 / 1024).toFixed(1)} MB\n`;
       out += `Node.js: ${process.version}\n`;
       out += `Platform: ${os.platform()} ${os.arch()}\n`;
-      out += `系统运行: ${Math.floor(os.uptime() / 3600)}h\n`;
-      out += `日志: ${_gatewayInfo.logFile}\n`;
-      out += `Daemon: ${_daemonInfo ? `🟢 pid=${_daemonInfo.pid}` : "🔴 未连接"}\n`;
+      out += `System uptime: ${Math.floor(os.uptime() / 3600)}h\n`;
+      out += `Log: ${_gatewayInfo.logFile}\n`;
+      out += `Daemon: ${_daemonInfo ? `🟢 pid=${_daemonInfo.pid}` : "🔴 Not connected"}\n`;
       return out;
     }
     case "ping":
       return "🏓 pong! Gateway is alive.";
     case "logs": {
-      if (!_gatewayInfo) return "⚠️ 网关信息未初始化";
+      if (!_gatewayInfo) return "⚠️ Gateway info not initialized";
       const n = parseInt(parts[1], 10) || 10;
       try {
-        if (!fs.existsSync(_gatewayInfo.logFile)) return "⚠️ 日志文件不存在";
+        if (!fs.existsSync(_gatewayInfo.logFile))
+          return "⚠️ Log file not found";
         const content = fs.readFileSync(_gatewayInfo.logFile, "utf-8");
         const lines = content.trim().split("\n");
         const recent = lines.slice(-Math.min(n, 50));
-        if (recent.length === 0) return "📄 日志为空";
-        return `📄 最近 ${recent.length} 条日志\n\n${recent.join("\n").slice(0, 3000)}`;
+        if (recent.length === 0) return "📄 Log is empty";
+        return `📄 Last ${recent.length} log lines\n\n${recent.join("\n").slice(0, 3000)}`;
       } catch (e: any) {
-        return `⚠️ 无法读取日志: ${e.message}`;
+        return `⚠️ Cannot read log: ${e.message}`;
       }
     }
     default:
-      return "📋 Gateway 命令\n\n• /gateway status — 运行状态\n• /gateway ping — 连通测试\n• /gateway logs [n] — 最近 n 条日志";
+      return "📋 Gateway Commands\n\n• /gateway status — run status\n• /gateway ping — connectivity check\n• /gateway logs [n] — last n log lines";
   }
 }
 
 async function handleThink(_ctx: CommandContext): Promise<string> {
-  return "🧠 扩展思考\n\n直接发送消息描述需要深入思考的内容即可。";
+  return "🧠 Extended Thinking\n\nJust send a message describing what needs deep thought.";
 }
 
 async function handleSpec(ctx: CommandContext): Promise<string> {
@@ -578,15 +583,17 @@ async function handleSpec(ctx: CommandContext): Promise<string> {
       return formatSpecList(specs);
     }
     case "new": {
-      if (!rest) return formatError("参数缺失", "用法: /spec new <name>");
+      if (!rest)
+        return formatError("Missing argument", "Usage: /spec new <name>");
       const result = await ctx.ipcClient.request<{
         name: string;
         phase: string;
       }>("specNew", { name: rest });
-      return `✅ Spec 已创建\n\n名称: ${result.name}\n阶段: ${result.phase}`;
+      return `✅ Spec created\n\nName: ${result.name}\nPhase: ${result.phase}`;
     }
     case "show": {
-      if (!rest) return formatError("参数缺失", "用法: /spec show <name>");
+      if (!rest)
+        return formatError("Missing argument", "Usage: /spec show <name>");
       const result = await ctx.ipcClient.request<{
         name: string;
         content: string;
@@ -595,7 +602,8 @@ async function handleSpec(ctx: CommandContext): Promise<string> {
       return formatSpecShow(result);
     }
     case "status": {
-      if (!rest) return formatError("参数缺失", "用法: /spec status <name>");
+      if (!rest)
+        return formatError("Missing argument", "Usage: /spec status <name>");
       const result = await ctx.ipcClient.request<{
         name: string;
         phase: string;
@@ -607,7 +615,10 @@ async function handleSpec(ctx: CommandContext): Promise<string> {
       const name = parts[1];
       const taskId = parts[2];
       if (!name)
-        return formatError("参数缺失", "用法: /spec run <name> [task_id]");
+        return formatError(
+          "Missing argument",
+          "Usage: /spec run <name> [task_id]",
+        );
       const params: Record<string, string> = { name };
       if (taskId) params.task_id = taskId;
       const result = await ctx.ipcClient.request<{
@@ -616,11 +627,11 @@ async function handleSpec(ctx: CommandContext): Promise<string> {
         message?: string;
       }>("specRun", params);
       return result.message
-        ? `🚀 Spec 执行\n\n${result.message}`
-        : `🚀 Spec 已开始执行\n\n任务 ID: ${result.task_id || "N/A"}\n状态: ${result.status}`;
+        ? `🚀 Spec execution\n\n${result.message}`
+        : `🚀 Spec started\n\nTask ID: ${result.task_id || "N/A"}\nStatus: ${result.status}`;
     }
     default:
-      return "📋 Spec 命令\n\n• /spec list — 列出所有\n• /spec new <name> — 创建\n• /spec show <name> — 详情\n• /spec status <name> — 状态\n• /spec run <name> — 执行";
+      return "📋 Spec Commands\n\n• /spec list — list all\n• /spec new <name> — create\n• /spec show <name> — details\n• /spec status <name> — status\n• /spec run <name> — run";
   }
 }
 
@@ -636,109 +647,113 @@ interface CommandDef {
 export const COMMAND_REGISTRY: Record<string, CommandDef> = {
   "/compact": {
     name: "/compact",
-    description: "压缩对话上下文",
+    description: "Compact conversation context",
     handler: handleCompact,
   },
   "/think": {
     name: "/think",
-    description: "扩展思考模式提示",
+    description: "Extended thinking mode prompt",
     handler: handleThink,
   },
   "/model": {
     name: "/model",
-    description: "查看或切换模型",
+    description: "View or switch model",
     usage: "/model [name]",
     handler: handleModel,
   },
   "/history": {
     name: "/history",
-    description: "查看最近对话",
+    description: "View recent conversation",
     usage: "/history [n]",
     handler: handleHistory,
   },
   "/search": {
     name: "/search",
-    description: "搜索对话历史",
+    description: "Search conversation history",
     usage: "/search <query>",
     handler: handleSearch,
   },
   "/export": {
     name: "/export",
-    description: "导出对话历史",
+    description: "Export conversation history",
     handler: handleExport,
   },
   "/abort": {
     name: "/abort",
-    description: "中止当前任务",
+    description: "Abort current task",
     handler: handleAbort,
   },
-  "/git": { name: "/git", description: "查看 git 状态", handler: handleGit },
-  "/diff": { name: "/diff", description: "查看 git diff", handler: handleDiff },
+  "/git": { name: "/git", description: "Show git status", handler: handleGit },
+  "/diff": { name: "/diff", description: "Show git diff", handler: handleDiff },
   "/commit": {
     name: "/commit",
-    description: "提交 git 变更",
+    description: "Commit git changes",
     usage: "/commit <message>",
     handler: handleCommit,
   },
   "/tools": {
     name: "/tools",
-    description: "列出已注册的工具",
+    description: "List registered tools",
     handler: handleTools,
   },
-  "/mcp": { name: "/mcp", description: "列出 MCP 服务器", handler: handleMcp },
+  "/mcp": { name: "/mcp", description: "List MCP servers", handler: handleMcp },
   "/skills": {
     name: "/skills",
-    description: "列出已加载的技能",
+    description: "List loaded skills",
     handler: handleSkills,
   },
   "/plugins": {
     name: "/plugins",
-    description: "列出已安装的插件",
+    description: "List installed plugins",
     handler: handlePlugins,
   },
   "/projects": {
     name: "/projects",
-    description: "列出项目",
+    description: "List projects",
     handler: handleProjects,
   },
   "/task": {
     name: "/task",
-    description: "创建后台任务",
+    description: "Create background task",
     usage: "/task <description>",
     handler: handleTask,
   },
   "/tasks": {
     name: "/tasks",
-    description: "列出后台任务",
+    description: "List background tasks",
     handler: handleTasks,
   },
   "/task_stop": {
     name: "/task_stop",
-    description: "停止后台任务",
+    description: "Stop background task",
     usage: "/task_stop <id>",
     handler: handleTaskStop,
   },
-  "/cron": { name: "/cron", description: "列出定时任务", handler: handleCron },
-  "/help": { name: "/help", description: "显示帮助信息", handler: handleHelp },
+  "/cron": {
+    name: "/cron",
+    description: "List cron jobs",
+    handler: handleCron,
+  },
+  "/help": { name: "/help", description: "Show help", handler: handleHelp },
   "/status": {
     name: "/status",
-    description: "查看网关状态",
+    description: "Show gateway status",
     handler: handleStatus,
   },
   "/start": {
     name: "/start",
-    description: "显示欢迎信息",
+    description: "Show welcome message",
     handler: handleStart,
   },
   "/gateway": {
     name: "/gateway",
-    description: "网关管理（信息型）",
+    description: "Gateway management (informational)",
     usage: "/gateway status|ping|logs",
     handler: handleGateway,
   },
   "/spec": {
     name: "/spec",
-    description: "Spec 管理",
+    description: "Spec management",
     usage: "/spec list|new|show|status|run",
     handler: handleSpec,
   },
@@ -776,7 +791,7 @@ export async function dispatchCommand(
   } catch (err: any) {
     const message = err instanceof Error ? err.message : String(err);
     logger.error(`Command ${cmd.name} failed: ${message}`);
-    return formatError("命令失败", message);
+    return formatError("Command failed", message);
   }
 }
 
@@ -785,7 +800,7 @@ export async function dispatchCommand(
 export function formatHelp(): string {
   const groups: [string, string[]][] = [
     [
-      "💬 对话",
+      "💬 Chat",
       [
         "/compact",
         "/think",
@@ -796,15 +811,15 @@ export function formatHelp(): string {
         "/abort",
       ],
     ],
-    ["📂 项目 & Git", ["/projects", "/git", "/diff", "/commit"]],
-    ["🔧 工具 & 扩展", ["/tools", "/mcp", "/skills", "/plugins"]],
-    ["⚙️ 自动化", ["/task", "/tasks", "/task_stop", "/cron"]],
+    ["📂 Projects & Git", ["/projects", "/git", "/diff", "/commit"]],
+    ["🔧 Tools & Extensions", ["/tools", "/mcp", "/skills", "/plugins"]],
+    ["⚙️ Automation", ["/task", "/tasks", "/task_stop", "/cron"]],
     ["📋 Spec", ["/spec"]],
-    ["🚪 网关", ["/gateway"]],
-    ["🔌 会话", ["/help", "/status", "/start"]],
+    ["🚪 Gateway", ["/gateway"]],
+    ["🔌 Session", ["/help", "/status", "/start"]],
   ];
 
-  let out = "📖 BaoClaw 命令列表\n\n";
+  let out = "📖 BaoClaw Commands\n\n";
   for (const [group, cmds] of groups) {
     out += `${group}\n`;
     for (const c of cmds) {
@@ -814,6 +829,6 @@ export function formatHelp(): string {
     }
     out += "\n";
   }
-  out += "发送任意非命令消息即可与 AI 对话";
+  out += "Send any non-command message to chat with the AI";
   return out;
 }

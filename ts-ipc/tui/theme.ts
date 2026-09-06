@@ -1,4 +1,4 @@
-// TUI Theme - 极客禅宗风格
+// TUI Theme — geek-zen style
 // High contrast colors for dark terminal backgrounds
 
 export const colors = {

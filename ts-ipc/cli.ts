@@ -75,7 +75,7 @@ function extractAndSaveImages(output: unknown): number {
           ? ` (${(o.prompt as string).slice(0, 50)})`
           : "";
       console.log(
-        `${turnPrefix()}  📷 图片已保存: ${FG_CYAN}${filePath}${RESET}${prompt}`,
+        `${turnPrefix()}  📷 Image saved: ${FG_CYAN}${filePath}${RESET}${prompt}`,
       );
       displayIterm2Image(filePath);
       return count;
@@ -92,7 +92,7 @@ function extractAndSaveImages(output: unknown): number {
     const filePath = saveBase64Image(o.data as string, mediaType);
     count++;
     console.log(
-      `${turnPrefix()}  📷 图片已保存: ${FG_CYAN}${filePath}${RESET}`,
+      `${turnPrefix()}  📷 Image saved: ${FG_CYAN}${filePath}${RESET}`,
     );
     displayIterm2Image(filePath);
     return count;
@@ -118,7 +118,7 @@ function extractAndSaveImages(output: unknown): number {
         const filePath = saveBase64Image(src.data as string, mediaType);
         count++;
         console.log(
-          `${turnPrefix()}  📷 图片已保存: ${FG_CYAN}${filePath}${RESET}`,
+          `${turnPrefix()}  📷 Image saved: ${FG_CYAN}${filePath}${RESET}`,
         );
         displayIterm2Image(filePath);
         continue;
@@ -135,7 +135,7 @@ function extractAndSaveImages(output: unknown): number {
         const filePath = saveBase64Image(b.data as string, mediaType);
         count++;
         console.log(
-          `${turnPrefix()}  📷 图片已保存: ${FG_CYAN}${filePath}${RESET}`,
+          `${turnPrefix()}  📷 Image saved: ${FG_CYAN}${filePath}${RESET}`,
         );
         displayIterm2Image(filePath);
       }
@@ -2705,19 +2705,19 @@ async function main() {
         try {
           const mc = await client.request<any>("config.model", {});
           const maskKey = (k: any) => {
-            if (!k || typeof k !== "string") return "(未配置)";
+            if (!k || typeof k !== "string") return "(not set)";
             return k.length > 8 ? `${k.slice(0, 4)}****${k.slice(-4)}` : "****";
           };
           const p = mc.primary ?? {};
-          console.log(`  ${FG_GRAY}── 模型详情 (config.model) ──${RESET}`);
+          console.log(`  ${FG_GRAY}── Model Details (config.model) ──${RESET}`);
           console.log(
-            `  ${FG_WHITE}主模型:${RESET}       ${FG_GREEN}${p.model ?? "?"}${RESET} ${DIM}(${p.api_type ?? "?"})${RESET}`,
+            `  ${FG_WHITE}Primary:${RESET}       ${FG_GREEN}${p.model ?? "?"}${RESET} ${DIM}(${p.api_type ?? "?"})${RESET}`,
           );
           console.log(
-            `  ${FG_WHITE}  窗口:${RESET}       ${((p.context_window ?? 0) as number).toLocaleString()} tokens`,
+            `  ${FG_WHITE}  Window:${RESET}       ${((p.context_window ?? 0) as number).toLocaleString()} tokens`,
           );
           console.log(
-            `  ${FG_WHITE}  压缩阈值:${RESET}   ${(((p.auto_compact_threshold_ratio ?? 0) as number) * 100).toFixed(0)}%`,
+            `  ${FG_WHITE}  Compact at:${RESET}   ${(((p.auto_compact_threshold_ratio ?? 0) as number) * 100).toFixed(0)}%`,
           );
           console.log(
             `  ${FG_WHITE}  Base URL:${RESET}   ${p.base_url ?? "(default)"}`,
@@ -2730,10 +2730,10 @@ async function main() {
             Array.isArray(mc.fallbacks) &&
             mc.fallbacks.length > 0
           ) {
-            console.log(`  ${FG_GRAY}── 退坡链 ──${RESET}`);
+            console.log(`  ${FG_GRAY}── Fallback Chain ──${RESET}`);
             mc.fallbacks.forEach((f: any, i: number) => {
               console.log(
-                `  ${FG_CYAN}${i + 1}.${RESET} ${f.model ?? "?"} ${DIM}(${f.api_type ?? "?"})${RESET} — 窗口 ${((f.context_window ?? 0) as number).toLocaleString()}`,
+                `  ${FG_CYAN}${i + 1}.${RESET} ${f.model ?? "?"} ${DIM}(${f.api_type ?? "?"})${RESET} — window ${((f.context_window ?? 0) as number).toLocaleString()}`,
               );
             });
           }
@@ -3329,31 +3329,43 @@ async function main() {
         }
       } else {
         // P2-2: Static memory system description
-        console.log(`\n${FG_ORANGE}${BOLD}📖 BaoClaw 记忆系统${RESET}`);
+        console.log(`\n${FG_ORANGE}${BOLD}📖 BaoClaw Memory System${RESET}`);
         console.log(`  ${FG_GRAY}─────────────────────────────────${RESET}`);
         console.log(
-          `  ${FG_WHITE}【工作记忆】${RESET}${DIM}(Context Window)${RESET}`,
+          `  ${FG_WHITE}[Working Memory]${RESET}${DIM}(Context Window)${RESET}`,
         );
-        console.log(`  ${DIM}  存储位置: 内存（daemon 进程）${RESET}`);
-        console.log(`  ${DIM}  压缩策略: 超过 85% 阈值时自动摘要${RESET}`);
-        console.log(`  ${DIM}  压缩保留: 最近 4 条消息原文，其余摘要${RESET}`);
+        console.log(`  ${DIM}  Location: in-memory (daemon process)${RESET}`);
+        console.log(
+          `  ${DIM}  Compaction: auto-summarize past 85% threshold${RESET}`,
+        );
+        console.log(
+          `  ${DIM}  Kept verbatim: last 4 messages, rest summarized${RESET}`,
+        );
         console.log(`  ${FG_GRAY}─────────────────────────────────${RESET}`);
         console.log(
-          `  ${FG_WHITE}【长期记忆】${RESET}${DIM}(Long-term Memory)${RESET}`,
+          `  ${FG_WHITE}[Long-term Memory]${RESET}${DIM}(Long-term Memory)${RESET}`,
         );
-        console.log(`  ${DIM}  存储位置: ~/.baoclaw/memories/${RESET}`);
-        console.log(`  ${DIM}  格式: JSONL（每行一条记忆）${RESET}`);
-        console.log(`  ${DIM}  分类: fact / preference / decision${RESET}`);
-        console.log(`  ${DIM}  衰减: 90 天未访问自动归档${RESET}`);
+        console.log(`  ${DIM}  Location: ~/.baoclaw/memory.jsonl${RESET}`);
+        console.log(`  ${DIM}  Format: JSONL (one memory per line)${RESET}`);
+        console.log(
+          `  ${DIM}  Categories: fact / preference / decision${RESET}`,
+        );
+        console.log(
+          `  ${DIM}  Decay: auto-archived after 90 days unused${RESET}`,
+        );
         console.log(`  ${FG_GRAY}─────────────────────────────────${RESET}`);
         console.log(
-          `  ${FG_WHITE}【会话记忆】${RESET}${DIM}(Session Memory)${RESET}`,
+          `  ${FG_WHITE}[Session Memory]${RESET}${DIM}(Session Memory)${RESET}`,
         );
         console.log(
-          `  ${DIM}  存储位置: ~/.baoclaw/sessions/<id>.json${RESET}`,
+          `  ${DIM}  Location: ~/.baoclaw/sessions/<id>.json${RESET}`,
         );
-        console.log(`  ${DIM}  触发时机: 每轮对话结束自动持久化${RESET}`);
-        console.log(`  ${DIM}  崩溃恢复: daemon 重启后自动加载${RESET}`);
+        console.log(
+          `  ${DIM}  Persisted: automatically after each turn${RESET}`,
+        );
+        console.log(
+          `  ${DIM}  Crash recovery: auto-loaded on daemon restart${RESET}`,
+        );
         console.log(`  ${FG_GRAY}─────────────────────────────────${RESET}`);
         // Also try to call memory.list for current entries
         try {
@@ -3363,7 +3375,7 @@ async function main() {
           }>("memoryList");
           if (memResult.count > 0) {
             console.log(
-              `\n${FG_CYAN}记忆条目${RESET} ${DIM}(${memResult.count} 条)${RESET}`,
+              `\n${FG_CYAN}memories${RESET} ${DIM}(${memResult.count})${RESET}`,
             );
             for (const m of memResult.memories) {
               const content =
@@ -3373,7 +3385,7 @@ async function main() {
               console.log(`  ${FG_WHITE}[${m.category}]${RESET} ${content}`);
             }
           } else {
-            console.log(`\n${DIM}（暂无长期记忆条目）${RESET}`);
+            console.log(`\n${DIM}(no long-term memories yet)${RESET}`);
           }
         } catch {
           /* daemon may not support memoryList yet */
@@ -5058,7 +5070,7 @@ async function main() {
     const cmd_permissions = async (rawArgs: string): Promise<void> => {
       const args = rawArgs.trim();
 
-      // /permissions（无参数）— 显示当前权限配置概览
+      // /permissions (no args) — show the current permission overview
       if (!args) {
         try {
           const info = await client.request<any>("permissions.info", {});
@@ -5302,24 +5314,24 @@ async function main() {
           );
           console.log(`  ${FG_GRAY}─────────────────────────────────${RESET}`);
           console.log(
-            `  ${FG_WHITE}当前使用:${RESET}     ${FG_CYAN}${(result.current_tokens ?? 0).toLocaleString()}${RESET} / ${ctxWin.toLocaleString()} tokens ${DIM}(${pct}%)${RESET}`,
+            `  ${FG_WHITE}In use:${RESET}     ${FG_CYAN}${(result.current_tokens ?? 0).toLocaleString()}${RESET} / ${ctxWin.toLocaleString()} tokens ${DIM}(${pct}%)${RESET}`,
           );
           console.log(
-            `  ${FG_WHITE}距离压缩:${RESET}     ${FG_YELLOW}${remaining.toLocaleString()}${RESET} tokens ${DIM}(${(thrRatio * 100).toFixed(0)}% 阈值)${RESET}`,
-          );
-          console.log(`  ${FG_GRAY}─────────────────────────────────${RESET}`);
-          console.log(
-            `  ${FG_WHITE}累计输入:${RESET}     ${result.total_input_tokens != null ? (result.total_input_tokens as number).toLocaleString() : "N/A"}`,
-          );
-          console.log(
-            `  ${FG_WHITE}累计输出:${RESET}     ${result.total_output_tokens != null ? (result.total_output_tokens as number).toLocaleString() : "N/A"}`,
+            `  ${FG_WHITE}Until compact:${RESET}     ${FG_YELLOW}${remaining.toLocaleString()}${RESET} tokens ${DIM}(${(thrRatio * 100).toFixed(0)}% threshold)${RESET}`,
           );
           console.log(`  ${FG_GRAY}─────────────────────────────────${RESET}`);
           console.log(
-            `  ${DIM}模型: ${result.model ?? "unknown"} | 窗口: ${ctxWin > 0 ? (ctxWin / 1_000_000).toFixed(1) + "M" : "?"}${RESET}\n`,
+            `  ${FG_WHITE}Total input:${RESET}     ${result.total_input_tokens != null ? (result.total_input_tokens as number).toLocaleString() : "N/A"}`,
+          );
+          console.log(
+            `  ${FG_WHITE}Total output:${RESET}     ${result.total_output_tokens != null ? (result.total_output_tokens as number).toLocaleString() : "N/A"}`,
+          );
+          console.log(`  ${FG_GRAY}─────────────────────────────────${RESET}`);
+          console.log(
+            `  ${DIM}model: ${result.model ?? "unknown"} | window: ${ctxWin > 0 ? (ctxWin / 1_000_000).toFixed(1) + "M" : "?"}${RESET}\n`,
           );
         } else {
-          console.log(`\n${FG_YELLOW}⚠ Token 数据不可用${RESET}\n`);
+          console.log(`\n${FG_YELLOW}⚠ Token data unavailable${RESET}\n`);
         }
       } catch (err) {
         console.error(`${FG_RED}Failed to get token usage: ${err}${RESET}\n`);
@@ -5361,17 +5373,17 @@ async function main() {
         console.log(`\n${FG_ORANGE}${BOLD}💰 Cost Estimate${RESET}`);
         console.log(`  ${FG_GRAY}─────────────────────────────────${RESET}`);
         console.log(
-          `  ${FG_WHITE}本 session:${RESET}   ${FG_GREEN}$${fmtCost(result.session_cost)}${RESET}`,
+          `  ${FG_WHITE}This session:${RESET}   ${FG_GREEN}$${fmtCost(result.session_cost)}${RESET}`,
         );
         console.log(
-          `  ${FG_WHITE}  输入:${RESET}     $${fmtCost(result.input_cost)} ${DIM}(${fmtTokens(result.input_tokens)} tokens)${RESET}`,
+          `  ${FG_WHITE}  Input:${RESET}     $${fmtCost(result.input_cost)} ${DIM}(${fmtTokens(result.input_tokens)} tokens)${RESET}`,
         );
         console.log(
-          `  ${FG_WHITE}  输出:${RESET}     $${fmtCost(result.output_cost)} ${DIM}(${fmtTokens(result.output_tokens)} tokens)${RESET}`,
+          `  ${FG_WHITE}  Output:${RESET}     $${fmtCost(result.output_cost)} ${DIM}(${fmtTokens(result.output_tokens)} tokens)${RESET}`,
         );
         console.log(`  ${FG_GRAY}─────────────────────────────────${RESET}`);
         console.log(
-          `  ${DIM}模型: ${result.model ?? "unknown"} | 输入 $${result.input_price_per_million ?? "?"}/M | 输出 $${result.output_price_per_million ?? "?"}/M${RESET}\n`,
+          `  ${DIM}model: ${result.model ?? "unknown"} | in $${result.input_price_per_million ?? "?"}/M | out $${result.output_price_per_million ?? "?"}/M${RESET}\n`,
         );
       } catch (err) {
         console.error(`${FG_RED}Failed to get cost estimate: ${err}${RESET}\n`);
@@ -5572,21 +5584,23 @@ async function main() {
 
       console.log(`  ${FG_GRAY}── Session & Info ──${RESET}`);
       console.log(
-        `  ${FG_WHITE}/tokens${RESET}    ${DIM}显示 token 用量统计${RESET}`,
-        `  ${FG_WHITE}/rate${RESET}     ${DIM}评价上次交互 (good|bad|neutral)${RESET}`,
-      );
-      console.log(`  ${FG_WHITE}/cost${RESET}      ${DIM}显示花费估算${RESET}`);
-      console.log(
-        `  ${FG_WHITE}/session${RESET}   ${DIM}显示当前 session 信息${RESET}`,
+        `  ${FG_WHITE}/tokens${RESET}    ${DIM}Show token usage stats${RESET}`,
+        `  ${FG_WHITE}/rate${RESET}     ${DIM}Rate the last interaction (good|bad|neutral)${RESET}`,
       );
       console.log(
-        `  ${FG_WHITE}/model${RESET}     ${DIM}显示模型配置 (key 已打码)${RESET}`,
+        `  ${FG_WHITE}/cost${RESET}      ${DIM}Show cost estimate${RESET}`,
       );
       console.log(
-        `  ${FG_WHITE}/config${RESET}    ${DIM}显示完整配置 JSON (key 已打码)${RESET}`,
+        `  ${FG_WHITE}/session${RESET}   ${DIM}Show current session info${RESET}`,
       );
       console.log(
-        `  ${FG_WHITE}/memory${RESET}    ${DIM}显示记忆系统说明 (/memory list 查看条目)${RESET}`,
+        `  ${FG_WHITE}/model${RESET}     ${DIM}Show model config (keys masked)${RESET}`,
+      );
+      console.log(
+        `  ${FG_WHITE}/config${RESET}    ${DIM}Show full config JSON (keys masked)${RESET}`,
+      );
+      console.log(
+        `  ${FG_WHITE}/memory${RESET}    ${DIM}Show memory system info (/memory list to view entries)${RESET}`,
       );
       console.log(
         `  ${FG_WHITE}/clear${RESET}      ${DIM}Clear screen${RESET}`,
@@ -5734,10 +5748,10 @@ async function main() {
                 const truncated =
                   pdfText.length > maxChars
                     ? pdfText.slice(0, maxChars) +
-                      `\n\n[... 文档已截断，共 ${pdfText.length} 字符]`
+                      `\n\n[... document truncated, ${pdfText.length} chars total]`
                     : pdfText;
                 // Prepend extracted text to the prompt
-                textPart = `[文件: ${filePath} (${pdfData.numpages}页)]\n\n${truncated}\n\n---\n${textPart}`;
+                textPart = `[File: ${filePath} (${pdfData.numpages} pages)]\n\n${truncated}\n\n---\n${textPart}`;
               } else {
                 // Text extraction failed, fall back to document block
                 attachments.push({
@@ -5773,9 +5787,9 @@ async function main() {
                 const truncated =
                   docText.length > maxChars
                     ? docText.slice(0, maxChars) +
-                      `\n\n[... 文档已截断，共 ${docText.length} 字符]`
+                      `\n\n[... document truncated, ${docText.length} chars total]`
                     : docText;
-                textPart = `[文件: ${filePath}]\n\n${truncated}\n\n---\n${textPart}`;
+                textPart = `[File: ${filePath}]\n\n${truncated}\n\n---\n${textPart}`;
               } else {
                 console.log(
                   `${FG_YELLOW}Warning: DOCX file is empty or text extraction failed${RESET}`,
@@ -5799,7 +5813,10 @@ async function main() {
         }
       }
       if (attachments.length > 0) {
-        submitPayload = { prompt: textPart || "请分析这个文件", attachments };
+        submitPayload = {
+          prompt: textPart || "Please analyze this file",
+          attachments,
+        };
         console.log(`${DIM}  📎 ${attachments.length} attachment(s)${RESET}`);
       } else if (textPart !== input) {
         // Text was extracted from documents and prepended to prompt

@@ -55,11 +55,11 @@ export function formatPermissionRequest(
 ): string {
   const preview = inputPreview || "—";
   return [
-    "🔐 权限请求",
-    `工具: ${toolName}`,
-    `输入: ${preview}`,
+    "🔐 Permission Request",
+    `Tool: ${toolName}`,
+    `Input: ${preview}`,
     "",
-    `回复 yes 允许 / always 总是允许此工具 / no 拒绝（${PERMISSION_TIMEOUT_MS / 1000}秒后自动拒绝）`,
+    `Reply yes to allow / always to always allow this tool / no to deny (auto-denied after ${PERMISSION_TIMEOUT_MS / 1000}s)`,
   ].join("\n");
 }
 
@@ -78,14 +78,14 @@ export function buildPermissionCard(
     config: { wide_screen_mode: false },
     header: {
       template: "orange",
-      title: { tag: "plain_text", content: "🔐 权限请求" },
+      title: { tag: "plain_text", content: "🔐 Permission Request" },
     },
     elements: [
       {
         tag: "div",
         text: {
           tag: "lark_md",
-          content: `**工具:** ${toolName}\n**输入:** ${preview}`,
+          content: `**Tool:** ${toolName}\n**Input:** ${preview}`,
         },
       },
       { tag: "hr" },
@@ -94,18 +94,18 @@ export function buildPermissionCard(
         actions: [
           {
             tag: "button",
-            text: { tag: "plain_text", content: "✅ 允许" },
+            text: { tag: "plain_text", content: "✅ Allow" },
             type: "primary",
             value: { perm_action: "allow" },
           },
           {
             tag: "button",
-            text: { tag: "plain_text", content: "🔁 总是允许" },
+            text: { tag: "plain_text", content: "🔁 Always allow" },
             value: { perm_action: "always" },
           },
           {
             tag: "button",
-            text: { tag: "plain_text", content: "❌ 拒绝" },
+            text: { tag: "plain_text", content: "❌ Deny" },
             type: "danger",
             value: { perm_action: "deny" },
           },
@@ -116,7 +116,7 @@ export function buildPermissionCard(
         elements: [
           {
             tag: "plain_text",
-            content: `${PERMISSION_TIMEOUT_MS / 1000}秒后未决定将自动拒绝`,
+            content: `Auto-denied if no decision within ${PERMISSION_TIMEOUT_MS / 1000}s`,
           },
         ],
       },

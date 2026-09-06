@@ -338,7 +338,7 @@ class DaemonBridge {
       case "tool_use": {
         const tn = event.tool_name || "?";
         logger.info(`Tool use: ${tn}`);
-        sendFeishuMessage(chatId, `🔧 正在使用工具: ${tn}`).catch(() => {});
+        sendFeishuMessage(chatId, `🔧 Using tool: ${tn}`).catch(() => {});
         break;
       }
       case "permission_request": {
@@ -377,9 +377,10 @@ class DaemonBridge {
               })
               .then((res) => {
                 if (res?.delivered === true && reason === "timeout") {
-                  sendFeishuMessage(cid, "⏰ 权限请求已超时，自动拒绝。").catch(
-                    () => {},
-                  );
+                  sendFeishuMessage(
+                    cid,
+                    "⏰ Permission request timed out, auto-denied.",
+                  ).catch(() => {});
                 }
               })
               .catch(() => {});
@@ -393,9 +394,10 @@ class DaemonBridge {
             typeof event.output === "string"
               ? event.output
               : JSON.stringify(event.output);
-          sendFeishuMessage(chatId, `⚠️ 工具错误: ${out.slice(0, 500)}`).catch(
-            () => {},
-          );
+          sendFeishuMessage(
+            chatId,
+            `⚠️ Tool error: ${out.slice(0, 500)}`,
+          ).catch(() => {});
         }
         break;
       }
@@ -499,10 +501,10 @@ let cardActionSupport = false;
 /** Acknowledgement text for a resolved permission request. */
 function ackFor(decision: PermissionDecision): string {
   return decision === "allow"
-    ? "✅ 已允许。"
+    ? "✅ Allowed."
     : decision === "allow_always"
-      ? "🔁 已允许并记住此工具。"
-      : "❌ 已拒绝。";
+      ? "🔁 Allowed and remembered for this tool."
+      : "❌ Denied.";
 }
 
 async function handleCardAction(
@@ -516,11 +518,15 @@ async function handleCardAction(
   );
   if (!reply) {
     // Clicked a card whose prompt is no longer pending (e.g. superseded).
-    await sendFeishuMessage(chatId, "⚠️ 该请求已不存在。").catch(() => {});
+    await sendFeishuMessage(chatId, "⚠️ This request no longer exists.").catch(
+      () => {},
+    );
     return;
   }
   if (!reply.delivered) {
-    await sendFeishuMessage(chatId, "⚠️ 该请求已过期。").catch(() => {});
+    await sendFeishuMessage(chatId, "⚠️ This request has expired.").catch(
+      () => {},
+    );
     return;
   }
   await sendFeishuMessage(chatId, ackFor(reply.decision)).catch(() => {});
@@ -552,7 +558,7 @@ async function handleMessage(event: FeishuEvent): Promise<void> {
     );
     if (reply) {
       if (!reply.delivered) {
-        await sendFeishuMessage(chatId, "⚠️ 该请求已过期。");
+        await sendFeishuMessage(chatId, "⚠️ This request has expired.");
         return;
       }
       await sendFeishuMessage(chatId, ackFor(reply.decision));
@@ -580,13 +586,16 @@ async function handleMessage(event: FeishuEvent): Promise<void> {
         }
       } catch (err: any) {
         logger.error(`Command dispatch error: ${err.message}`);
-        await sendFeishuMessage(chatId, `❌ 命令执行失败: ${err.message}`);
+        await sendFeishuMessage(chatId, `❌ Command failed: ${err.message}`);
       }
       return;
     } else {
       // Unknown command — show help
       logger.warn(`Unknown command: ${parsed.name}`);
-      await sendReply(chatId, `❓ 未知命令 ${parsed.name}\n${formatHelp()}`);
+      await sendReply(
+        chatId,
+        `❓ Unknown command ${parsed.name}\n${formatHelp()}`,
+      );
       return;
     }
   }
@@ -594,7 +603,10 @@ async function handleMessage(event: FeishuEvent): Promise<void> {
   // ── Regular message → AI daemon ──
   if (bridge.isProcessing) {
     logger.warn(`Rejected message from ${sender}: daemon busy`);
-    await sendFeishuMessage(chatId, "⏳ 正在处理上一条消息，请稍候…");
+    await sendFeishuMessage(
+      chatId,
+      "⏳ Still processing the previous message, please wait…",
+    );
     return;
   }
 

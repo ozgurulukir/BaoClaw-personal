@@ -69,12 +69,12 @@ export class PermissionManager {
    * @example
    * ```ts
    * const text = pm.formatPermissionRequest('tu_123', 'bash', 'rm -rf /tmp/old');
-   * // 🔐 *权限请求*
-   * // 工具: bash
-   * // 描述: rm -rf /tmp/old
+   * // 🔐 *Permission Request*
+   * // Tool: bash
+   * // Description: rm -rf /tmp/old
    * //
-   * // 请回复 *yes* 允许 或 *no* 拒绝
-   * // （60秒后自动拒绝）
+   * // Reply *yes* to allow or *no* to deny
+   * // (auto-denied after 60 seconds)
    * ```
    */
   formatPermissionRequest(
@@ -82,14 +82,14 @@ export class PermissionManager {
     toolName: string,
     description?: string,
   ): string {
-    const desc = description?.trim() || "无";
+    const desc = description?.trim() || "None";
     return [
-      "🔐 *权限请求*",
-      `工具: ${toolName}`,
-      `描述: ${desc}`,
+      "🔐 *Permission Request*",
+      `Tool: ${toolName}`,
+      `Description: ${desc}`,
       "",
-      "请回复 *yes* 允许 或 *no* 拒绝",
-      "（60秒后自动拒绝）",
+      "Reply *yes* to allow or *no* to deny",
+      "(auto-denied after 60 seconds)",
     ].join("\n");
   }
 

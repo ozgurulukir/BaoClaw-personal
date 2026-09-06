@@ -25,7 +25,9 @@ function createMockSock() {
     },
     async sendMessage(jid: string, content: any) {
       sentMessages.push({ jid, content });
-      return { key: { id: "msg_reply_" + Math.random().toString(36).substring(7) } };
+      return {
+        key: { id: "msg_reply_" + Math.random().toString(36).substring(7) },
+      };
     },
     sentMessages,
     listeners,
@@ -75,7 +77,7 @@ test("WhatsAppGateway start throws error when allowFrom is empty or invalid", as
       enabled: true,
       allowFrom: [],
       sharedSessionId: "test-session",
-    })
+    }),
   );
 
   const gateway = new WhatsAppGateway({ configPath });
@@ -87,10 +89,10 @@ test("WhatsAppGateway start throws error when allowFrom is empty or invalid", as
     (err: Error) => {
       assert.match(
         err.message,
-        /Cannot start WhatsApp gateway because allowFrom is empty or invalid/
+        /Cannot start WhatsApp gateway because allowFrom is empty or invalid/,
       );
       return true;
-    }
+    },
   );
 
   fs.rmSync(tmpDir, { recursive: true, force: true });
@@ -235,7 +237,7 @@ test("setupInboundHandler deduplicates messages and handles unknown commands", a
   assert.equal(mockSock.sentMessages.length, 1);
   assert.match(
     mockSock.sentMessages[0].content.text,
-    /未知命令 \/unknowncommand/
+    /Unknown command \/unknowncommand/,
   );
 });
 
@@ -282,7 +284,7 @@ test("setupStreamHandler processes chunks, tool use, permission, error and resul
   (gateway as any).activeSender = "+1234567890";
   (gateway as any).senderTracker.registerSender(
     "+1234567890",
-    "1234567890@s.whatsapp.net"
+    "1234567890@s.whatsapp.net",
   );
   (gateway as any).processingFlags.add("+1234567890");
 
@@ -300,7 +302,7 @@ test("setupStreamHandler processes chunks, tool use, permission, error and resul
 
   assert.equal(
     (gateway as any).senderTracker.getAccumulated("+1234567890"),
-    "Hello, WhatsApp world!"
+    "Hello, WhatsApp world!",
   );
 
   // 2. tool_use event
@@ -310,7 +312,7 @@ test("setupStreamHandler processes chunks, tool use, permission, error and resul
   });
 
   assert.equal(mockSock.sentMessages.length, 1);
-  assert.match(mockSock.sentMessages[0].content.text, /🔨 使用工具: bash/);
+  assert.match(mockSock.sentMessages[0].content.text, /⚡ bash/);
 
   // 3. permission_request event
   mockIpc.emitNotification("stream/event", {
@@ -321,7 +323,7 @@ test("setupStreamHandler processes chunks, tool use, permission, error and resul
   });
 
   assert.equal(mockSock.sentMessages.length, 2);
-  assert.match(mockSock.sentMessages[1].content.text, /⚠️ 权限请求/);
+  assert.match(mockSock.sentMessages[1].content.text, /⚠️ Permission Request/);
 
   // 4. result event
   mockIpc.emitNotification("stream/event", {
@@ -329,13 +331,10 @@ test("setupStreamHandler processes chunks, tool use, permission, error and resul
   });
 
   assert.equal(mockSock.sentMessages.length, 3);
-  assert.equal(
-    mockSock.sentMessages[2].content.text,
-    "Hello, WhatsApp world!"
-  );
+  assert.equal(mockSock.sentMessages[2].content.text, "Hello, WhatsApp world!");
   assert.equal(
     (gateway as any).senderTracker.getAccumulated("+1234567890"),
-    ""
+    "",
   );
   assert.equal((gateway as any).processingFlags.has("+1234567890"), false);
 });
@@ -349,7 +348,7 @@ test("setupStreamHandler handles error events and clears state", async () => {
   (gateway as any).activeSender = "+1234567890";
   (gateway as any).senderTracker.registerSender(
     "+1234567890",
-    "1234567890@s.whatsapp.net"
+    "1234567890@s.whatsapp.net",
   );
   (gateway as any).processingFlags.add("+1234567890");
 
@@ -371,7 +370,7 @@ test("setupStreamHandler handles error events and clears state", async () => {
   assert.match(mockSock.sentMessages[0].content.text, /Operation timed out/);
   assert.equal(
     (gateway as any).senderTracker.getAccumulated("+1234567890"),
-    ""
+    "",
   );
   assert.equal((gateway as any).processingFlags.has("+1234567890"), false);
 });
@@ -386,7 +385,7 @@ test("processQueue handles submitMessage RPC failure", async () => {
   (gateway as any).config = { maxQueueSize: 10 };
   (gateway as any).senderTracker.registerSender(
     "+1234567890",
-    "1234567890@s.whatsapp.net"
+    "1234567890@s.whatsapp.net",
   );
 
   (gateway as any).messageQueue.enqueue("+1234567890", "Hello test", 10);
@@ -394,9 +393,6 @@ test("processQueue handles submitMessage RPC failure", async () => {
   await (gateway as any).processQueue("+1234567890", mockSock);
 
   assert.equal(mockSock.sentMessages.length, 1);
-  assert.match(
-    mockSock.sentMessages[0].content.text,
-    /RPC Connection Failed/
-  );
+  assert.match(mockSock.sentMessages[0].content.text, /RPC Connection Failed/);
   assert.equal((gateway as any).processingFlags.has("+1234567890"), false);
 });

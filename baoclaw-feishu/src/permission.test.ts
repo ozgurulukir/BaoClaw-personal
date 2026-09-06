@@ -46,12 +46,12 @@ test("parsePermissionReply keyword matrix", () => {
 
 test("formatPermissionRequest lists all three reply keywords", () => {
   const text = formatPermissionRequest("Bash", '{"command":"ls"}');
-  assert.match(text, /权限请求/);
+  assert.match(text, /Permission Request/);
   assert.match(text, /Bash/);
   assert.match(text, /yes/);
   assert.match(text, /always/);
   assert.match(text, /no/);
-  assert.match(text, /60秒/);
+  assert.match(text, /60s/);
 });
 
 test("handleResponse forwards allow with control channel and clears pending", async () => {
@@ -155,7 +155,7 @@ test("buildPermissionCard carries three decision-only buttons", () => {
     header: { title: { content: string } };
     elements: Array<any>;
   };
-  assert.match(card.header.title.content, /权限请求/);
+  assert.match(card.header.title.content, /Permission Request/);
   const action = card.elements.find((e) => e.tag === "action");
   const buttons = action.actions as Array<{ value: { perm_action: string } }>;
   assert.deepEqual(buttons.map((b) => b.value.perm_action).sort(), [

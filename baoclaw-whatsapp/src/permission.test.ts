@@ -29,7 +29,7 @@ function makeManager() {
 test("registerRequest stores pending permission and formats prompt", () => {
   const { pm, tracker } = makeManager();
   const text = pm.formatPermissionRequest("tu_1", "bash", "ls -la");
-  assert.match(text, /权限请求/);
+  assert.match(text, /Permission Request/);
   assert.match(text, /bash/);
 
   pm.registerRequest("+15550000001", "tu_1", "bash", "ls -la", () => {});

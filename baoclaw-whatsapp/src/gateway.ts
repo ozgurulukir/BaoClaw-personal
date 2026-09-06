@@ -301,7 +301,7 @@ export class WhatsAppGateway {
                 // Document uploaded successfully, send docId as message text to daemon
                 this.messageQueue.enqueue(
                   senderPhone,
-                  `[文档已上传, id: ${docId}]`,
+                  `[Document uploaded, id: ${docId}]`,
                   this.config.maxQueueSize,
                 );
                 if (!this.messageQueue.isProcessing(senderPhone)) {
@@ -323,10 +323,11 @@ export class WhatsAppGateway {
               if (imagePath) {
                 // Image downloaded, send path as message content
                 const caption =
-                  msg.message.imageMessage.caption || "请描述这张图片";
+                  msg.message.imageMessage.caption ||
+                  "Please describe this image";
                 this.messageQueue.enqueue(
                   senderPhone,
-                  `${caption}\n[图片路径: ${imagePath}]`,
+                  `${caption}\n[Image path: ${imagePath}]`,
                   this.config.maxQueueSize,
                 );
                 if (!this.messageQueue.isProcessing(senderPhone)) {
@@ -359,8 +360,8 @@ export class WhatsAppGateway {
             try {
               await sock.sendMessage(replyJid, {
                 text: permissionReply.delivered
-                  ? "✅ 已处理。"
-                  : "⚠️ 该请求已过期。",
+                  ? "✅ Done."
+                  : "⚠️ This request has expired.",
               });
             } catch {}
             continue;
@@ -399,7 +400,7 @@ export class WhatsAppGateway {
           } else if (parsed) {
             try {
               await sock.sendMessage(replyJid, {
-                text: `❓ 未知命令 /${parsed.name}\n发送 /help 查看所有命令`,
+                text: `❓ Unknown command /${parsed.name}\nSend /help to see all commands`,
               });
             } catch {}
             continue;
@@ -415,7 +416,7 @@ export class WhatsAppGateway {
         if (!enqueued) {
           try {
             await sock.sendMessage(replyJid, {
-              text: "⚠️ 消息队列已满，请稍后重试。",
+              text: "⚠️ Message queue is full, please try again later.",
             });
           } catch {}
           continue;
@@ -446,7 +447,7 @@ export class WhatsAppGateway {
         if (busyJid) {
           try {
             await sock.sendMessage(busyJid, {
-              text: "⏳ 另一个会话正在处理中，请稍后再试。",
+              text: "⏳ Another session is being processed, please try again later.",
             });
           } catch {}
         }
@@ -607,7 +608,7 @@ export class WhatsAppGateway {
                   if (j) {
                     try {
                       await sock.sendMessage(j, {
-                        text: "⏰ 权限请求已超时，自动拒绝。",
+                        text: "⏰ Permission request timed out, auto-denied.",
                       });
                     } catch {}
                   }
