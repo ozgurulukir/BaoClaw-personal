@@ -56,7 +56,7 @@ impl Tool for EvolveTool {
             properties: Some(json!({
                 "operation": {
                     "type": "string",
-                    "enum": ["create_skill", "improve_skill", "list_candidates", "promote", "export_training"],
+                    "enum": ["create_skill", "improve_skill", "list_candidates", "promote", "export_training", "run_improvement_cycle"],
                     "description": "The evolution operation to perform"
                 },
                 "skill_name": {
@@ -296,6 +296,19 @@ Guidelines for skill creation:
                         "path": export_path.display().to_string(),
                         "format": "jsonl",
                         "fields": ["prompt", "response", "rating", "tool_count", "duration_ms"],
+                    }),
+                    is_error: false,
+                })
+            }
+
+            "run_improvement_cycle" => {
+                let report = self.evolution.run_improvement_cycle().await;
+                Ok(ToolResult {
+                    data: json!({
+                        "skills_evaluated": report.skills_evaluated,
+                        "skills_improved": report.skills_improved,
+                        "skills_retired": report.skills_retired,
+                        "actions": report.actions,
                     }),
                     is_error: false,
                 })

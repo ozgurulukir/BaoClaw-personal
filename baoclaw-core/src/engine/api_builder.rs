@@ -495,6 +495,16 @@ pub fn build_system_prompt(config: &QueryLoopConfig) -> Option<Vec<Value>> {
         parts.push(append.clone());
     }
 
+    // 6. Tool health warnings (informational — tools are never auto-disabled)
+    let health_warnings = config.tool_health.get_warnings();
+    if !health_warnings.is_empty() {
+        parts.push(format!(
+            "# Tool Health Warnings\n\n{}\n\nThese tools have been failing; prefer alternatives \
+             or use extra care with their inputs.",
+            health_warnings.join("\n")
+        ));
+    }
+
     if parts.is_empty() {
         None
     } else {

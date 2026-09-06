@@ -122,7 +122,9 @@ loop — each carries an inline status note and a tracking issue.
 
 #### 🔄 Skill Self-Improvement Loop (#8)
 
-> **Status: partially wired.** See #36.
+> **Status: wired (see #36, closed).** The 15-task self-evaluation nudge
+> fires automatically, and the full 5-stage cycle runs on demand via the
+> Evolve tool's `run_improvement_cycle` operation.
 
 - **5-stage cycle**: Collect → Evaluate → Improve → Validate → Retire
 - Scores skills on relevance rate, success rate, user rating, and staleness
@@ -144,7 +146,10 @@ loop — each carries an inline status note and a tracking issue.
 
 #### 🏥 Tool Health Monitoring (#10)
 
-> **Status: dead code — not wired.** See #38.
+> **Status: wired, informational only (see #38, closed).** Every tool
+> result feeds the tracker; degraded/failing tools produce a Tool Health
+> Warnings block in the system prompt. Tools are never auto-disabled —
+> that policy decision is deliberately out of scope.
 
 - Tracks success/failure/timeout rates per tool in real time
 - **3 statuses**: Healthy → Degraded (3 consecutive failures) → Disabled (6 failures)
@@ -168,7 +173,11 @@ loop — each carries an inline status note and a tracking issue.
 
 #### 🛡️ Prompt Injection Detection (#14)
 
-> **Status: dead code — not wired.** See #33.
+> **Status: wired (see #33, closed).** WebFetch runs every fetched page
+> through the detector; pages scoring ≥ 0.6 carry an explicit untrusted-
+> content banner into the model context and the result reports the score
+> and matched patterns. Flagging, not blocking. Local file uploads are
+> treated as trusted user input.
 
 - **20 patterns** across 6 categories: instruction override, role hijack, data exfiltration, encoding tricks, hidden payloads, jailbreak
 - Heuristic scoring with diminishing returns + multi-category boost
@@ -196,7 +205,10 @@ loop — each carries an inline status note and a tracking issue.
 
 #### 🧭 Model Router (#19)
 
-> **Status: advisory only — not applied to queries.** See #40.
+> **Status: advisory by design.** The `modelRoute` / `modelBudget` /
+> `modelStats` RPCs and `/model route` commands work as manual
+> consultation endpoints; query-time routing is intentionally not
+> applied (see #40, closed as designed).
 
 - **Intelligent routing**: select model by task type (code/completion/creative/analysis)
 - **Cost-aware**: prefer cheaper models for simple tasks, route to premium models for complex work

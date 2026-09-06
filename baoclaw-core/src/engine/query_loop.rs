@@ -1501,6 +1501,19 @@ async fn execute_tool_turn(
         }
     }
 
+    // Feed the tool-health tracker (informational warnings only).
+    for res in &tool_results {
+        if res.is_error {
+            config.tool_health.record_failure(
+                &res.tool_name,
+                &serde_json::to_string(&res.output).unwrap_or_default()
+                    [..200.min(serde_json::to_string(&res.output).unwrap_or_default().len())],
+            );
+        } else {
+            config.tool_health.record_success(&res.tool_name);
+        }
+    }
+
     // Collect per-tool actions for the query trajectory.
     for res in &tool_results {
         traj_actions.push(crate::engine::evolution::TrajectoryAction {

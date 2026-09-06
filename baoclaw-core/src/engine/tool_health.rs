@@ -32,9 +32,11 @@ pub enum ToolStatus {
 }
 
 /// Manages tool health across sessions.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct ToolHealthTracker {
-    pub records: HashMap<String, ToolHealthRecord>,
+    /// Interior mutability: the tracker is reached through a shared
+    /// &QueryLoopConfig on the record path.
+    pub records: std::sync::Mutex<HashMap<String, ToolHealthRecord>>,
     /// Threshold: consecutive failures before degrading.
     pub degrade_threshold: u32,
     /// Threshold: consecutive failures before disabling.
@@ -49,10 +51,26 @@ impl Default for ToolHealthTracker {
     }
 }
 
+impl Clone for ToolHealthTracker {
+    fn clone(&self) -> Self {
+        Self {
+            records: std::sync::Mutex::new(
+                self.records
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .clone(),
+            ),
+            degrade_threshold: self.degrade_threshold,
+            disable_threshold: self.disable_threshold,
+            recovery_minutes: self.recovery_minutes,
+        }
+    }
+}
+
 impl ToolHealthTracker {
     pub fn new() -> Self {
         Self {
-            records: HashMap::new(),
+            records: std::sync::Mutex::new(HashMap::new()),
             degrade_threshold: 3,
             disable_threshold: 6,
             recovery_minutes: 30,
@@ -60,9 +78,9 @@ impl ToolHealthTracker {
     }
 
     /// Record a successful tool call.
-    pub fn record_success(&mut self, tool_name: &str) {
-        let record = self
-            .records
+    pub fn record_success(&self, tool_name: &str) {
+        let mut records = self.records.lock().unwrap_or_else(|p| p.into_inner());
+        let record = records
             .entry(tool_name.to_string())
             .or_insert_with(|| ToolHealthRecord::new(tool_name));
         record.total_calls += 1;
@@ -76,9 +94,9 @@ impl ToolHealthTracker {
     }
 
     /// Record a failed tool call.
-    pub fn record_failure(&mut self, tool_name: &str, reason: &str) {
-        let record = self
-            .records
+    pub fn record_failure(&self, tool_name: &str, reason: &str) {
+        let mut records = self.records.lock().unwrap_or_else(|p| p.into_inner());
+        let record = records
             .entry(tool_name.to_string())
             .or_insert_with(|| ToolHealthRecord::new(tool_name));
         record.total_calls += 1;
@@ -99,9 +117,9 @@ impl ToolHealthTracker {
     }
 
     /// Record a timeout.
-    pub fn record_timeout(&mut self, tool_name: &str) {
-        let record = self
-            .records
+    pub fn record_timeout(&self, tool_name: &str) {
+        let mut records = self.records.lock().unwrap_or_else(|p| p.into_inner());
+        let record = records
             .entry(tool_name.to_string())
             .or_insert_with(|| ToolHealthRecord::new(tool_name));
         record.total_calls += 1;
@@ -119,6 +137,8 @@ impl ToolHealthTracker {
     /// Check if a tool is available (not disabled).
     pub fn is_available(&self, tool_name: &str) -> bool {
         self.records
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
             .get(tool_name)
             .map(|r| r.status != ToolStatus::Disabled)
             .unwrap_or(true) // unknown tools are available by default
@@ -127,7 +147,12 @@ impl ToolHealthTracker {
     /// Get warning message for degraded tools (to inject into system prompt).
     pub fn get_warnings(&self) -> Vec<String> {
         let mut warnings = Vec::new();
-        for record in self.records.values() {
+        for record in self
+            .records
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .values()
+        {
             match record.status {
                 ToolStatus::Degraded => {
                     let rate = if record.total_calls > 0 {
@@ -156,6 +181,8 @@ impl ToolHealthTracker {
     /// Get list of currently disabled tool names.
     pub fn disabled_tools(&self) -> Vec<String> {
         self.records
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
             .iter()
             .filter(|(_, r)| r.status == ToolStatus::Disabled)
             .map(|(name, _)| name.clone())
@@ -165,6 +192,8 @@ impl ToolHealthTracker {
     /// Get list of degraded tool names.
     pub fn degraded_tools(&self) -> Vec<String> {
         self.records
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
             .iter()
             .filter(|(_, r)| r.status == ToolStatus::Degraded)
             .map(|(name, _)| name.clone())
@@ -185,8 +214,9 @@ impl ToolHealthTracker {
     }
 
     /// Force-enable a disabled tool (manual override).
-    pub fn force_enable(&mut self, tool_name: &str) {
-        if let Some(record) = self.records.get_mut(tool_name) {
+    pub fn force_enable(&self, tool_name: &str) {
+        let mut records = self.records.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some(record) = records.get_mut(tool_name) {
             record.status = ToolStatus::Healthy;
             record.consecutive_failures = 0;
             record.last_status_change = chrono::Utc::now().to_rfc3339();
