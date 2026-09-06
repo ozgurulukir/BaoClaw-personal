@@ -47,6 +47,7 @@ session_history_turns34-99.txt
 docs/plans/
 
 # Local agent-tool artifacts and session plans (not part of the repo)
+.rumdl_cache/
 .code-tandem/
 .nova/
 .rubik/
