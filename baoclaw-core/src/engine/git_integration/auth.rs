@@ -235,7 +235,7 @@ mod tests {
         let has = GitAuth::has_token("github");
         // Either true (if token is set in CI) or false (typical local dev)
         // This just ensures the function doesn't panic.
-        assert!(has == true || has == false);
+        assert!(has || !has);
     }
 
     #[test]
@@ -251,9 +251,9 @@ mod tests {
         // Without a real token, this should fail with TokenNotFound
         let result = GitAuth::auth_header("github");
         // Either we get an error (no token) or the token happens to be set
-        match result {
-            Ok(header) => assert!(header.starts_with("Bearer ")),
-            Err(_) => {} // expected in test env
+        if let Ok(header) = result {
+            assert!(header.starts_with("Bearer "));
         }
+        // Err(_) is expected in test env (no token configured)
     }
 }

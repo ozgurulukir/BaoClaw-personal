@@ -10,6 +10,7 @@ use proptest::prelude::*;
 use baoclaw_core::tools::builtins::glob_tool::glob_search;
 
 /// Strategy for generating simple, valid glob patterns.
+#[allow(dead_code)] // reserved for future property tests
 fn valid_glob_pattern_strategy() -> impl Strategy<Value = String> {
     prop_oneof![
         // Extension patterns

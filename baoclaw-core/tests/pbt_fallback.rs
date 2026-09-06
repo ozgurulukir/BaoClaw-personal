@@ -83,9 +83,8 @@ proptest! {
         );
 
         for _ in 0..num_calls {
-            match fc.on_rate_limit() {
-                FallbackAction::Exhausted { .. } => break,
-                _ => {}
+            if let FallbackAction::Exhausted { .. } = fc.on_rate_limit() {
+                break;
             }
             prop_assert!(
                 chain.contains(&fc.current_model().to_string()),

@@ -277,7 +277,7 @@ mod tests {
     fn test_count_text_tokens_chinese() {
         // chars/4 would say "你好世界" ≈ 1. Tiktoken says 4-10.
         let n = TokenCounter::count_text_tokens("你好世界");
-        assert!(n >= 4 && n <= 10, "got {}", n);
+        assert!((4..=10).contains(&n), "got {}", n);
     }
 
     #[test]
@@ -294,7 +294,7 @@ mod tests {
         let est = c.estimate(&msgs);
         // No baseline → full count from scratch.
         // "Hello world" JSON-serialized ≈ 4 tokens; small upper bound.
-        assert!(est >= 2 && est < 100, "got {}", est);
+        assert!((2..100).contains(&est), "got {}", est);
     }
 
     #[test]

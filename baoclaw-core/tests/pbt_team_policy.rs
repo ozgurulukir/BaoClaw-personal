@@ -13,8 +13,7 @@ use proptest::prelude::*;
 use std::collections::HashSet;
 
 // Import from the crate
-use baoclaw_core::engine::team::agent::BudgetEnforcer;
-use baoclaw_core::engine::team::policy::{AgentPolicy, BudgetExceededAction, DepthTools};
+use baoclaw_core::engine::team::policy::{AgentPolicy, DepthTools};
 use baoclaw_core::engine::team::TeamPolicy;
 
 /// Strategy for generating valid tool names
@@ -172,8 +171,10 @@ proptest! {
         max_tokens in tokens_strategy(),
         current_tokens in tokens_strategy()
     ) {
-        let mut policy = TeamPolicy::default();
-        policy.total_budget_tokens = Some(max_tokens);
+        let policy = TeamPolicy {
+            total_budget_tokens: Some(max_tokens),
+            ..TeamPolicy::default()
+        };
 
         let is_exceeded = policy.is_budget_exceeded(0.0, current_tokens);
 

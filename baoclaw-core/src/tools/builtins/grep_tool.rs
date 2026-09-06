@@ -374,7 +374,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         // Write a binary file
         let binary_path = dir.path().join("binary.bin");
-        std::fs::write(&binary_path, &[0u8, 1, 2, 255, 0, 128]).unwrap();
+        std::fs::write(&binary_path, [0u8, 1, 2, 255, 0, 128]).unwrap();
         // Write a text file
         let text_path = dir.path().join("text.txt");
         std::fs::write(&text_path, "searchable text\n").unwrap();

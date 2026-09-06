@@ -708,7 +708,7 @@ mod tests {
                 json_str
             );
             let hook: Hook = serde_json::from_str(&json)
-                .expect(&format!("Failed to parse trigger: {}", json_str));
+                .unwrap_or_else(|_| panic!("Failed to parse trigger: {}", json_str));
             assert_eq!(
                 hook.trigger, expected,
                 "Trigger type mismatch for: {}",

@@ -729,7 +729,6 @@ mod tests {
     }
 
     #[test]
-    #[test]
     fn content_chunk_without_role_translates_to_text_delta() {
         let mut stream = OpenAiSseStream::new(futures::stream::empty());
         let data = r#"{"choices":[{"delta":{"content":"chunk 0 "},"finish_reason":null,"index":0}],"created":0,"id":"mock","model":"mock","object":"chat.completion.chunk"}"#;

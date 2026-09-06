@@ -259,6 +259,9 @@ line5
         assert!(result.is_err());
     }
 
+    // The CWD_LOCK guard must stay held across the await so the process-wide cwd
+    // stays pinned to the temp dir for the duration of the git call.
+    #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn test_detect_conflicts_no_repo() {
         let tmp = tempfile::tempdir().unwrap();

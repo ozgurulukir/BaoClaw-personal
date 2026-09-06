@@ -1,7 +1,7 @@
 #[cfg(test)]
 mod tests {
     use crate::engine::template::engine::TemplateEngine;
-    use crate::engine::template::engine::{VariableCollectResult, VariablePrompt};
+    use crate::engine::template::engine::VariableCollectResult;
     use crate::engine::template::types::{Template, Variable, WorkflowAction, WorkflowStep};
     use std::collections::HashMap;
     use tempfile::TempDir;
@@ -207,11 +207,8 @@ mod tests {
         let mut user_vars = HashMap::new();
         user_vars.insert("language".to_string(), "Python".to_string());
         let result = engine.collect_variables(template, user_vars);
-        match result {
-            VariableCollectResult::Resolved(vars) => {
-                assert_eq!(vars.get("language").map(|s| s.as_str()), Some("Python"));
-            }
-            _ => {}
+        if let VariableCollectResult::Resolved(vars) = result {
+            assert_eq!(vars.get("language").map(|s| s.as_str()), Some("Python"));
         }
     }
 
@@ -230,7 +227,7 @@ mod tests {
         let steps = engine.expand_steps(template, &vars);
         // Both steps included: condition "${step0.output} != ''" with unresolved
         // variable does NOT evaluate to "false"/"0"/"no", so condition passes.
-        assert!(steps.len() >= 1, "At least step 1 should be included");
+        assert!(!steps.is_empty(), "At least step 1 should be included");
 
         // Verify step 1 has substituted language
         let step0 = steps.first().unwrap();

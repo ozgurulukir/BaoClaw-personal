@@ -6,7 +6,6 @@
 //! built by build_system_prompt should contain that content.
 
 use proptest::prelude::*;
-use serde_json::Value;
 use std::path::PathBuf;
 use std::sync::Arc;
 

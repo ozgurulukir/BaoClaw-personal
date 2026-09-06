@@ -1374,30 +1374,6 @@ pub fn is_safe_skill_name(name: &str) -> bool {
         })
 }
 
-#[cfg(test)]
-mod training_export_tests {
-    use super::{is_safe_skill_name, redact_training_text};
-
-    #[test]
-    fn training_export_redacts_credentials_and_paths() {
-        let result = redact_training_text(
-            "Bearer abc123 token=secret /home/alice/project/file.rs sk-test-secret-value",
-        );
-        assert!(!result.contains("abc123"));
-        assert!(!result.contains("secret"));
-        assert!(!result.contains("/home/alice"));
-        assert!(!result.contains("sk-test-secret-value"));
-    }
-
-    #[test]
-    fn skill_names_cannot_escape_the_skills_directory() {
-        assert!(is_safe_skill_name("safe-skill_1"));
-        assert!(!is_safe_skill_name("../outside"));
-        assert!(!is_safe_skill_name("skill.md"));
-        assert!(!is_safe_skill_name(""));
-    }
-}
-
 /// Extract plain text from a serde_json::Value that could be a string or
 /// an array of content blocks (Claude API format).
 fn extract_text_from_value(value: &Value) -> String {
@@ -1450,5 +1426,29 @@ fn slugify(s: &str) -> String {
         "auto-skill".to_string()
     } else {
         result
+    }
+}
+
+#[cfg(test)]
+mod training_export_tests {
+    use super::{is_safe_skill_name, redact_training_text};
+
+    #[test]
+    fn training_export_redacts_credentials_and_paths() {
+        let result = redact_training_text(
+            "Bearer abc123 token=secret /home/alice/project/file.rs sk-test-secret-value",
+        );
+        assert!(!result.contains("abc123"));
+        assert!(!result.contains("secret"));
+        assert!(!result.contains("/home/alice"));
+        assert!(!result.contains("sk-test-secret-value"));
+    }
+
+    #[test]
+    fn skill_names_cannot_escape_the_skills_directory() {
+        assert!(is_safe_skill_name("safe-skill_1"));
+        assert!(!is_safe_skill_name("../outside"));
+        assert!(!is_safe_skill_name("skill.md"));
+        assert!(!is_safe_skill_name(""));
     }
 }

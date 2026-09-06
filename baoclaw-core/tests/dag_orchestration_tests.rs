@@ -96,7 +96,7 @@ fn test_dag_scheduler_from_json() {
 #[test]
 fn test_dag_scheduler_from_json_is_valid() {
     let team = load_audit_dag();
-    let mut scheduler = DagScheduler::from_team(&team).unwrap();
+    let scheduler = DagScheduler::from_team(&team).unwrap();
     assert!(scheduler.validate().is_ok());
 }
 

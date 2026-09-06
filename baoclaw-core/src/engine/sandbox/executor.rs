@@ -573,7 +573,7 @@ mod tests {
 
         let args = executor.build_command_args("npm install", Path::new("/workspace"));
         assert!(args[0] == "bwrap");
-        assert!(args.contains(&"--unshare-net".to_string()) == false); // web_dev allows network
+        assert!(!args.contains(&"--unshare-net".to_string())); // web_dev allows network
         assert!(args.iter().any(|a| a.contains("npm install")));
     }
 

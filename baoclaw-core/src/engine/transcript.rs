@@ -401,7 +401,7 @@ mod tests {
             .open(&path)
             .unwrap();
         writeln!(file, "{{this is not valid json}}").unwrap();
-        writeln!(file, "").unwrap(); // empty line
+        writeln!(file).unwrap(); // empty line
 
         // Write another valid entry
         {

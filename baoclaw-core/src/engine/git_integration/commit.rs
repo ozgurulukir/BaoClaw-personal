@@ -167,6 +167,9 @@ impl CommitManager {
 mod tests {
     use super::*;
 
+    // The CWD_LOCK guard must stay held across the await so the process-wide cwd
+    // stays pinned to the temp dir for the duration of the git call.
+    #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn test_ensure_git_repo_in_non_repo() {
         let tmp = tempfile::tempdir().unwrap();
@@ -194,6 +197,9 @@ mod tests {
         assert!(result.is_err());
     }
 
+    // The CWD_LOCK guard must stay held across the await so the process-wide cwd
+    // stays pinned to the temp dir for the duration of the git call.
+    #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn test_history_in_non_repo() {
         let tmp = tempfile::tempdir().unwrap();
@@ -210,6 +216,9 @@ mod tests {
         assert!(result.is_err());
     }
 
+    // The CWD_LOCK guard must stay held across the await so the process-wide cwd
+    // stays pinned to the temp dir for the duration of the git call.
+    #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn test_blame_in_non_repo() {
         let tmp = tempfile::tempdir().unwrap();
@@ -226,6 +235,9 @@ mod tests {
         assert!(result.is_err());
     }
 
+    // The CWD_LOCK guard must stay held across the await so the process-wide cwd
+    // stays pinned to the temp dir for the duration of the git call.
+    #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn test_squash_commits_in_real_repo() {
         // Test setup uses sync commands (in test context, not on async runtime)

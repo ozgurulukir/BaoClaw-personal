@@ -397,10 +397,9 @@ mod tests {
     fn test_forecast_with_insufficient_data() {
         let (_collector, _dir) = setup_test_db();
         let analyzer = TrendAnalyzer::new();
-        match analyzer.forecast("turns") {
-            Ok(result) => assert!(result.contains("Not enough data") || result.contains("no data")),
-            Err(_) => {} // no default DB in test env
-        }
+        if let Ok(result) = analyzer.forecast("turns") {
+            assert!(result.contains("Not enough data") || result.contains("no data"));
+        } // Err(_) expected: no default DB in test env
     }
 
     #[test]
@@ -415,9 +414,8 @@ mod tests {
     fn test_forecast_unknown_metric() {
         let (_collector, _dir) = setup_test_db();
         let analyzer = TrendAnalyzer::new();
-        match analyzer.forecast("nonexistent") {
-            Ok(msg) => assert!(msg.contains("Not enough data") || msg.contains("no data")),
-            Err(_) => {}
+        if let Ok(msg) = analyzer.forecast("nonexistent") {
+            assert!(msg.contains("Not enough data") || msg.contains("no data"));
         }
     }
 }

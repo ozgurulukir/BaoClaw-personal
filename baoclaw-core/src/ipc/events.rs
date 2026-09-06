@@ -25,7 +25,6 @@ pub async fn send_engine_event(
 mod tests {
     use super::*;
     use crate::engine::query_engine::{EngineError, QueryResult, QueryStatus, EMPTY_USAGE};
-    use crate::state::manager::PatchOp;
     use serde_json::json;
 
     // --- engine_event_to_notification tests ---

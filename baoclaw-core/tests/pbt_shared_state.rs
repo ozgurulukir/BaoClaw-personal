@@ -61,7 +61,7 @@ fn json_value_strategy() -> impl Strategy<Value = serde_json::Value> {
             prop_oneof![Just(serde_json::json!(1)), Just(serde_json::json!("v")),],
             0..3
         )
-        .prop_map(|m| { serde_json::Value::Object(m.into_iter().map(|(k, v)| (k, v)).collect()) }),
+        .prop_map(|m| serde_json::Value::Object(m.into_iter().collect())),
     ]
 }
 

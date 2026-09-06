@@ -17,7 +17,6 @@
 //! usable ~/.baoclaw/config.json exists. On failure, the daemon's stderr is
 //! kept in the test's /tmp/baoclaw-e2e-perm-*/xdg/daemon.log.
 
-use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -71,6 +70,8 @@ fn write_fixture_config(home: &Path) -> Result<(), String> {
 struct DaemonGuard {
     child: Child,
     socket_path: PathBuf,
+    // Kept for post-mortem inspection of daemon stderr on failure.
+    #[allow(dead_code)]
     log_path: PathBuf,
     #[allow(dead_code)]
     home: PathBuf,
@@ -146,8 +147,10 @@ async fn start_daemon(tag: &str) -> Result<DaemonGuard, String> {
 
 // ── minimal JSON-RPC client over the UDS socket ─────────────────────────────
 
+type PendingReply = oneshot::Sender<Result<Value, Value>>;
+
 struct Client {
-    requests: mpsc::Sender<(u64, String, Value, oneshot::Sender<Result<Value, Value>>)>,
+    requests: mpsc::Sender<(u64, String, Value, PendingReply)>,
     next_id: AtomicU64,
     events: Arc<Mutex<Vec<Value>>>,
 }
@@ -156,11 +159,9 @@ impl Client {
     async fn connect(socket_path: &Path) -> Self {
         let stream = UnixStream::connect(socket_path).await.expect("connect");
         let (read_half, write_half) = stream.into_split();
-        let (req_tx, mut req_rx) =
-            mpsc::channel::<(u64, String, Value, oneshot::Sender<Result<Value, Value>>)>(64);
-        let pending: Arc<
-            Mutex<std::collections::HashMap<u64, oneshot::Sender<Result<Value, Value>>>>,
-        > = Arc::new(Mutex::new(std::collections::HashMap::new()));
+        let (req_tx, mut req_rx) = mpsc::channel::<(u64, String, Value, PendingReply)>(64);
+        let pending: Arc<Mutex<std::collections::HashMap<u64, PendingReply>>> =
+            Arc::new(Mutex::new(std::collections::HashMap::new()));
         let events: Arc<Mutex<Vec<Value>>> = Arc::new(Mutex::new(Vec::new()));
 
         // Writer task: frames requests and registers each reply slot.

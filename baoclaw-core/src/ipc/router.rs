@@ -348,9 +348,9 @@ pub fn parse_client_method(request: &JsonRpcRequest) -> Result<ClientMethod, Rou
             // retry with `params: null` if params was empty.
             if request.params.is_null()
                 || (request.params.is_object()
-                    && request.params.as_object().map_or(false, |o| o.is_empty()))
+                    && request.params.as_object().is_some_and(|o| o.is_empty()))
                 || (request.params.is_array()
-                    && request.params.as_array().map_or(false, |a| a.is_empty()))
+                    && request.params.as_array().is_some_and(|a| a.is_empty()))
             {
                 let tagged_null = serde_json::json!({
                     "method": request.method,

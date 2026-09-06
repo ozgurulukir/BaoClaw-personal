@@ -26,5 +26,5 @@ fn english_token_count_matches_known_values() {
     assert_eq!(TokenCounter::count_text_tokens("Hello world"), 2);
     // "tiktoken" is 1 token, " is" is 1 token, " a" is 1 token, " tokenizer" is 1
     let n = TokenCounter::count_text_tokens("tiktoken is a tokenizer");
-    assert!(n >= 4 && n <= 8, "got {}", n);
+    assert!((4..=8).contains(&n), "got {}", n);
 }
