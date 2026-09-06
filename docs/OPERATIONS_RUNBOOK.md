@@ -141,3 +141,9 @@ fi
 
 Do not attach prompts, tool output, session files, provider responses, or
 credentials. Local logs rotate at 5 MiB with three retained files.
+
+## See also
+
+- [Release process](RELEASE.md)
+- [Daemon migration](DAEMON_MIGRATION.md)
+- [Usage guide](USAGE.md)

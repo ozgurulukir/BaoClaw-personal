@@ -54,3 +54,7 @@ git diff -- package.json */package.json package-lock.json
 git switch -
 git branch -D release-dry-run
 ```
+
+## See also
+
+- [Operations runbook](OPERATIONS_RUNBOOK.md)

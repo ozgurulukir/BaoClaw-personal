@@ -423,3 +423,9 @@ QueryEngine.submit_message_with_attachments()
                 ├── Write pending_review.json  (→ next session)
                 └── Skill extraction if applicable
 ```
+
+## See also
+
+- [Permission system](PERMISSIONS.md)
+- [Important files tour](IMPORTANT_FILES.md)
+- [Configuration reference](CONFIGURATION.md)

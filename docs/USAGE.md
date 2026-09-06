@@ -1,10 +1,10 @@
-# BaoClaw 使用说明
+# BaoClaw Usage Guide
 
-BaoClaw 是一个 daemon 架构的 AI 编程助手。一个常驻 daemon 进程服务所有终端（CLI / TUI / Web / Telegram / 飞书 / WhatsApp），共享配置、session 池和记忆。
+BaoClaw is an AI coding assistant built on a daemon architecture. A single resident daemon process serves all frontends (CLI / TUI / Web / Telegram / Feishu / WhatsApp), sharing configuration, the session pool, and memory.
 
 ---
 
-## 一、安装
+## 1. Installation
 
 ### Linux / macOS
 
@@ -14,10 +14,10 @@ cd BaoClaw
 ./install.sh
 ```
 
-- 安装目录：`~/.baoclaw/`
-- 启动器目录：`~/.local/bin/`（请确保在 `$PATH` 中）
-- 自动构建 Rust core + 安装所有 TS gateway 依赖
-- 自动生成 6 个启动器：`baoclaw`、`baoclaw-tui`、`baoclaw-web`、`baoclaw-telegram`、`baoclaw-feishu`、`baoclaw-whatsapp`
+- Install directory: `~/.baoclaw/`
+- Launcher directory: `~/.local/bin/` (make sure it is in your `$PATH`)
+- Automatically builds the Rust core + installs all TS gateway dependencies
+- Automatically generates 6 launchers: `baoclaw`, `baoclaw-tui`, `baoclaw-web`, `baoclaw-telegram`, `baoclaw-feishu`, `baoclaw-whatsapp`
 
 ### Windows
 
@@ -32,9 +32,9 @@ PowerShell -ExecutionPolicy Bypass -File install.ps1
 
 ---
 
-## 二、配置模型（~/.baoclaw/config.json）
+## 2. Configuring Models (~/.baoclaw/config.json)
 
-编辑 `~/.baoclaw/config.json`，使用 `model_profiles` 表（支持主/退坡模型混搭 `api_type`）：
+Edit `~/.baoclaw/config.json` using the `model_profiles` table (primary/fallback models can mix `api_type`):
 
 ```json
 {
@@ -60,42 +60,42 @@ PowerShell -ExecutionPolicy Bypass -File install.ps1
 }
 ```
 
-**旧格式**（`model` + `fallback_models` 字符串数组）仍然兼容，启动时自动迁移。
+**The old format** (`model` + `fallback_models` string array) is still supported and migrated automatically at startup.
 
-API key 优先级：`model_profiles.*.api_key` > 环境变量（`ANTHROPIC_API_KEY` / `OPENAI_API_KEY`）。
+API key precedence: `model_profiles.*.api_key` > environment variables (`ANTHROPIC_API_KEY` / `OPENAI_API_KEY`).
 
 ---
 
-## 三、常驻进程（daemon）
+## 3. Running the Daemon
 
-### 方式 A：自动启动（默认，开箱即用）
+### Option A: Automatic startup (default, works out of the box)
 
-**无需手动启动 daemon**。打开任何客户端时，如果 daemon 没在跑，会自动 fork 一个。
+**No need to start the daemon manually.** When you open any client, if the daemon is not running, one is forked automatically.
 
-socket 路径：
+Socket paths:
 
-- Linux: `$XDG_RUNTIME_DIR/baoclaw.sock`（通常是 `/run/user/<UID>/baoclaw.sock`）
+- Linux: `$XDG_RUNTIME_DIR/baoclaw.sock` (usually `/run/user/<UID>/baoclaw.sock`)
 - macOS: `/tmp/baoclaw-sockets/baoclaw.sock`
 - Windows: `%TEMP%\baoclaw-sockets\baoclaw.sock`
 
-### 方式 B：注册为系统服务（推荐生产环境）
+### Option B: Register as a system service (recommended for production)
 
-更稳定、开机自启、崩溃自动重启。
+More robust: starts at boot and restarts automatically on crash.
 
 #### Linux (systemd user service)
 
 ```bash
 mkdir -p ~/.config/systemd/user/
 cp deploy/systemd/baoclaw.service ~/.config/systemd/user/
-# 如需修改 ExecStart 路径，编辑 service 文件
+# Edit the service file if you need to change the ExecStart path
 systemctl --user daemon-reload
-systemctl --user enable --now baoclaw        # 开机自启 + 立即启动
+systemctl --user enable --now baoclaw        # start at boot + start now
 
-# 管理命令
+# Management commands
 systemctl --user status baoclaw
 systemctl --user restart baoclaw
 systemctl --user stop baoclaw
-journalctl --user -u baoclaw -f              # 查看日志
+journalctl --user -u baoclaw -f              # view logs
 ```
 
 #### macOS (launchd)
@@ -106,10 +106,10 @@ sed -i '' "s/YOUR_USERNAME/$(whoami)/g" ~/Library/LaunchAgents/com.baoclaw.daemo
 launchctl load ~/Library/LaunchAgents/com.baoclaw.daemon.plist
 launchctl start com.baoclaw.daemon
 
-# 管理
+# Management
 launchctl list | grep baoclaw
 launchctl stop com.baoclaw.daemon
-launchctl unload ~/Library/LaunchAgents/com.baoclaw.daemon.plist  # 卸载
+launchctl unload ~/Library/LaunchAgents/com.baoclaw.daemon.plist  # uninstall
 ```
 
 #### Windows (Service)
@@ -118,106 +118,106 @@ launchctl unload ~/Library/LaunchAgents/com.baoclaw.daemon.plist  # 卸载
 cd deploy\windows
 PowerShell -ExecutionPolicy Bypass -File install.ps1
 
-# 管理
+# Management
 Get-Service BaoClawDaemon
 Start-Service BaoClawDaemon
 Stop-Service BaoClawDaemon
 Restart-Service BaoClawDaemon
 
-# 卸载
+# Uninstall
 PowerShell -ExecutionPolicy Bypass -File uninstall.ps1
 ```
 
-### Daemon 如何优雅关闭
+### How the daemon shuts down gracefully
 
-daemon 收到关闭信号（SIGTERM/SIGINT 或 Windows SCM Stop）时：
+When the daemon receives a shutdown signal (SIGTERM/SIGINT or Windows SCM Stop):
 
-1. 触发 `persist_all()` — 把所有活跃 session 写入 `~/.baoclaw/sessions/`
-2. 安全退出
+1. It triggers `persist_all()` — writing all active sessions to `~/.baoclaw/sessions/`
+2. It exits safely
 
-**会话不会丢失**：daemon 重启后自动从磁盘恢复 session（消息历史 + 记忆摘要）。
+**Sessions are not lost**: after the daemon restarts, sessions are automatically restored from disk (message history + memory summaries).
 
 ---
 
-## 四、各个渠道如何开启
+## 4. Starting Each Frontend
 
-> **所有渠道共享同一个 daemon**。无论从哪个渠道发消息，都走同一个 IPC，看到同一份 session。
+> **All frontends share the same daemon.** No matter which frontend you send messages from, they all go through the same IPC and see the same sessions.
 
-### 1. CLI（终端聊天，最常用）
-
-```bash
-baoclaw                  # 默认连 daemon（没在跑会自动 fork）
-baoclaw --sandbox docker # Docker 沙箱模式
-baoclaw --think          # 开启扩展思考
-baoclaw --vim            # Vim 模式
-baoclaw --debug          # 调试模式
-```
-
-**退出**：输入 `/exit` 或按 `Ctrl+C`
-
-### 2. TUI（React + ink 的富终端 UI）
+### 1. CLI (terminal chat, most common)
 
 ```bash
-baoclaw-tui              # 需要 daemon 已在跑（systemd 或先开一次 baoclaw）
+baoclaw                  # connects to the daemon by default (auto-forks if not running)
+baoclaw --sandbox docker # Docker sandbox mode
+baoclaw --think          # enable extended thinking
+baoclaw --vim            # Vim mode
+baoclaw --debug          # debug mode
 ```
 
-**退出**：按 `q` 或 `Ctrl+C`
+**Exit**: type `/exit` or press `Ctrl+C`
 
-### 3. Web（浏览器聊天）
+### 2. TUI (rich terminal UI built with React + ink)
 
 ```bash
-baoclaw-web              # 默认 http://localhost:8080
-baoclaw-web --port 9090  # 自定义端口
+baoclaw-tui              # requires the daemon to already be running (systemd, or run baoclaw once first)
 ```
 
-打开浏览器访问 `http://localhost:8080`。**退出**：`Ctrl+C`
+**Exit**: press `q` or `Ctrl+C`
+
+### 3. Web (browser chat)
+
+```bash
+baoclaw-web              # defaults to http://localhost:8080
+baoclaw-web --port 9090  # custom port
+```
+
+Open `http://localhost:8080` in your browser. **Exit**: `Ctrl+C`
 
 ### 4. Telegram Bot
 
 ```bash
-baoclaw-telegram         # 长驻进程，监听 Telegram updates
+baoclaw-telegram         # long-running process that listens for Telegram updates
 ```
 
-**前提**：`~/.baoclaw/config.json` 中 `telegram.token` 已配置。
-**退出**：`Ctrl+C`
+**Prerequisite**: `telegram.token` is configured in `~/.baoclaw/config.json`.
+**Exit**: `Ctrl+C`
 
-### 5. 飞书 Bot
+### 5. Feishu Bot
 
 ```bash
-baoclaw-feishu           # 长驻进程，监听飞书事件
+baoclaw-feishu           # long-running process that listens for Feishu events
 ```
 
-**前提**：飞书应用凭证已配置。
-**退出**：`Ctrl+C`
+**Prerequisite**: Feishu app credentials are configured.
+**Exit**: `Ctrl+C`
 
 ### 6. WhatsApp
 
 ```bash
-baoclaw-whatsapp         # 长驻进程
+baoclaw-whatsapp         # long-running process
 ```
 
-**前提**：`~/.baoclaw/config.json` 中 `whatsapp.phoneNumber` 已配置。
-**退出**：`Ctrl+C`
+**Prerequisite**: `whatsapp.phoneNumber` is configured in `~/.baoclaw/config.json`.
+**Exit**: `Ctrl+C`
 
 ---
 
-## 五、实用斜杠命令（CLI/TUI 通用）
+## 5. Useful Slash Commands (shared by CLI/TUI)
 
 ```
-/help        查看所有命令
-/tokens      查看 token 用量（当前 / 累计 / 距离压缩）
-/cost        查看花费估算
-/memory      记忆系统说明（/memory list 查看条目）
-/model       当前模型配置（key 自动打码）
-/config      完整配置 JSON（key 自动打码）
-/session     当前 session 信息
-/clear       清空当前会话上下文
-/exit        退出
+/help        Show all commands
+/tokens      Show token usage (current / cumulative / distance to compaction)
+/cost        Show cost estimate
+/memory      Memory system info (/memory list to view entries)
+/model       Current model configuration (API keys masked automatically)
+/config      Full configuration JSON (API keys masked automatically)
+/session     Current session info
+/clear       Clear the current session context
+/exit        Exit
 ```
 
 ---
 
-## 六、验证 daemon 是否在跑
+## 6. Verifying the daemon Is Running
 
 ### Linux
 
@@ -242,113 +242,120 @@ ls $env:TEMP\baoclaw-sockets\baoclaw.sock
 
 ---
 
-## 七、目录结构
+## 7. Directory Layout
 
 ```
 ~/.baoclaw/
 ├── bin/
-│   └── baoclaw-core              # Rust daemon 二进制
-├── ts-ipc/                       # CLI + TUI 源码
+│   └── baoclaw-core              # Rust daemon binary
+├── ts-ipc/                       # CLI + TUI source
 ├── baoclaw-web/                  # Web gateway
 ├── baoclaw-telegram/             # Telegram gateway
-├── baoclaw-feishu/               # 飞书 gateway
+├── baoclaw-feishu/               # Feishu gateway
 ├── baoclaw-whatsapp/             # WhatsApp gateway
-├── docs/                         # 文档（USAGE.md / DAEMON_MIGRATION.md）
-├── config.json                   # 配置文件（model_profiles）
-├── memories/                     # 长期记忆（JSONL）
-└── sessions/                     # 会话持久化
-    ├── registry.json             # session 索引
-    ├── <session-id>.json         # 单个 session 状态
-    └── archive/                  # >7 天不活跃的归档
+├── docs/                         # Documentation (USAGE.md / DAEMON_MIGRATION.md)
+├── config.json                   # Configuration file (model_profiles)
+├── memories/                     # Long-term memory (JSONL)
+└── sessions/                     # Session persistence
+    ├── registry.json             # session index
+    ├── <session-id>.json         # individual session state
+    └── archive/                  # archive for sessions inactive > 7 days
 ```
 
 ---
 
-## 八、故障排查
+## 8. Troubleshooting
 
-### daemon 启动失败
+### daemon fails to start
 
 ```bash
-# 检查 socket 文件是否被占用（stale socket）
+# Check whether the socket file is occupied (stale socket)
 ls -la /run/user/$(id -u)/baoclaw.sock
 
-# 如果是 stale socket（daemon 已死但文件残留），删除它
+# If it is a stale socket (daemon dead but the file remains), delete it
 rm /run/user/$(id -u)/baoclaw.sock
 
-# 重新启动
+# Start again
 systemctl --user restart baoclaw      # Linux
 launchctl start com.baoclaw.daemon    # macOS
 Start-Service BaoClawDaemon           # Windows
 ```
 
-### 客户端连不上 daemon
+### Client cannot connect to the daemon
 
 ```bash
-# 1. 确认 daemon 在运行
+# 1. Confirm the daemon is running
 systemctl --user status baoclaw
 
-# 2. 确认 socket 文件存在
+# 2. Confirm the socket file exists
 ls -la /run/user/$(id -u)/baoclaw.sock
 
-# 3. 查看日志
+# 3. Check the logs
 journalctl --user -u baoclaw -f      # Linux
 tail -f /tmp/baoclaw-daemon.stderr.log  # macOS
 Get-EventLog -LogName Application -Source BaoClawDaemon  # Windows
 ```
 
-### session 丢失
+### Lost sessions
 
 ```bash
-# 检查持久化文件
+# Check the persistence files
 ls ~/.baoclaw/sessions/
 
-# 检查索引
+# Check the index
 cat ~/.baoclaw/sessions/registry.json | python3 -m json.tool
 
-# daemon 启动时会自动 load_from_disk()，通常无需手动恢复
+# The daemon automatically runs load_from_disk() at startup; manual recovery is usually unnecessary
 ```
 
-### API key 不生效
+### API key not taking effect
 
-1. 检查 `~/.baoclaw/config.json` 的 `model_profiles.*.api_key`
-2. 如果用环境变量，检查 `ANTHROPIC_API_KEY` / `OPENAI_API_KEY`
-3. 优先级：`config.json` 的 `api_key` > 环境变量
+1. Check `model_profiles.*.api_key` in `~/.baoclaw/config.json`
+2. If using environment variables, check `ANTHROPIC_API_KEY` / `OPENAI_API_KEY`
+3. Precedence: `api_key` in `config.json` > environment variables
 
 ---
 
-## 九、卸载
+## 9. Uninstallation
 
-### 仅卸载客户端（保留 daemon 和配置）
+### Remove clients only (keep the daemon and configuration)
 
 ```bash
 rm ~/.local/bin/baoclaw*
 rm -rf ~/.baoclaw/ts-ipc ~/.baoclaw/baoclaw-*
 ```
 
-### 完全卸载
+### Full uninstall
 
 ```bash
-# 1. 停止并卸载服务
+# 1. Stop and remove the service
 systemctl --user stop baoclaw
 systemctl --user disable baoclaw
 rm ~/.config/systemd/user/baoclaw.service
 systemctl --user daemon-reload
 
-# 2. 删除安装目录和配置
+# 2. Delete the install directory and configuration
 rm -rf ~/.baoclaw/
 rm ~/.local/bin/baoclaw*
 ```
 
 ---
 
-## 十、更多文档
+## 10. Further Documentation
 
-- [Daemon 架构迁移指南](DAEMON_MIGRATION.md) — 从旧版 PID socket 迁移到固定 socket + systemd
-- [systemd 服务安装](../deploy/systemd/README.md)
-- [launchd 服务安装](../deploy/launchd/README.md)
-- [Windows Service 安装](../deploy/windows/README.md)
+- [Daemon architecture migration guide](DAEMON_MIGRATION.md) — migrating from the old PID socket to a fixed socket + systemd
+- [systemd service installation](../deploy/systemd/README.md)
+- [launchd service installation](../deploy/launchd/README.md)
+- [Windows Service installation](../deploy/windows/README.md)
 
 ---
 
-**版本**：v2.1.0  
-**最后更新**：2026-06-19
+**Version**: v2.1.0  
+**Last updated**: 2026-06-19
+
+## See also
+
+- [Configuration reference](CONFIGURATION.md)
+- [Features & command reference](FEATURES.md)
+- [Permission system](PERMISSIONS.md)
+- [Operations runbook](OPERATIONS_RUNBOOK.md)

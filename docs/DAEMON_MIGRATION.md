@@ -1,70 +1,70 @@
-# Daemon 架构迁移指南
+# Daemon Architecture Migration Guide
 
-本文档介绍 BaoClaw daemon 架构的演进和如何从旧版迁移到新版。
+This document describes the evolution of the BaoClaw daemon architecture and how to migrate from the old version to the new one.
 
-## 架构演进
+## Architecture Evolution
 
-### Phase 0（原始）：原始 socket命名
+### Phase 0 (original): original socket naming
 
-- socket 路径：`/tmp/baoclaw-sockets/baoclaw-<PID>.sock`
-- 问题：每个 CLI 启动都 fork 新 daemon，同 cwd 也不能共享 session
+- Socket path: `/tmp/baoclaw-sockets/baoclaw-<PID>.sock`
+- Problem: every CLI launch forks a new daemon; even with the same cwd, sessions cannot be shared
 
-### Phase 1（P1-2，2026-06-19）：cwd-hash socket
+### Phase 1 (P1-2, 2026-06-19): cwd-hash socket
 
-- socket 路径：`/tmp/baoclaw-sockets/baoclaw-cwd-${hash}.sock`
-- 改进：同一 cwd 的所有客户端共享 daemon
-- 限制：仍依赖 cwd，跨目录要切
+- Socket path: `/tmp/baoclaw-sockets/baoclaw-cwd-${hash}.sock`
+- Improvement: all clients in the same cwd share one daemon
+- Limitation: still depends on cwd; cross-directory usage requires switching
 
-### Phase 2（P3-1c，2026-06-19）：固定 socket + 优雅关闭
+### Phase 2 (P3-1c, 2026-06-19): fixed socket + graceful shutdown
 
-socket 路径：
+Socket paths:
 
-- Linux/macOS: `$XDG_RUNTIME_DIR/baoclaw.sock`（/run/user/UID/）或 `/tmp/baoclaw-sockets/baoclaw.sock`
+- Linux/macOS: `$XDG_RUNTIME_DIR/baoclaw.sock` (/run/user/UID/) or `/tmp/baoclaw-sockets/baoclaw.sock`
 - Windows: `%TEMP%/baoclaw.sock`
-  改进：机器级单 daemon，所有 session 共享
-  优雅关闭：SIGTERM/SIGINT 时 persist_all()
+  Improvement: one machine-level daemon shared by all sessions
+  Graceful shutdown: persist_all() on SIGTERM/SIGINT
 
-### Phase 3（P3-1a/b，2026-06-19）：systemd/launchd 服务化
+### Phase 3 (P3-1a/b, 2026-06-19): systemd/launchd service
 
-- daemon 7×24 常驻
-- 开机自启
-- 崩溃自动重启
+- Daemon runs 24/7
+- Starts automatically at boot
+- Automatic restart on crash
 
-## 连接逻辑
+## Connection Logic
 
-客户端按以下顺序查找 daemon：
+Clients locate the daemon in the following order:
 
-1. **固定 socket**（`fixed_socket_path()`）
-   - 优先级最高，systemd/launchd 服务化后用这个
-2. **cwd-hash socket**（`make_socket_path(cwd)`）
-   - Fallback，兼容未服务化的环境
+1. **Fixed socket** (`fixed_socket_path()`)
+   - Highest priority; used once systemd/launchd service is set up
+2. **cwd-hash socket** (`make_socket_path(cwd)`)
+   - Fallback, for compatibility with non-service environments
 
-如果两者都不存在，CLI 会自己 fork 一个 daemon（旧行为，向后兼容）。
+If neither exists, the CLI forks its own daemon (legacy behavior, backward compatible).
 
-## 迁移步骤
+## Migration Steps
 
-### 从 Phase 0/1 迁移到 Phase 2（自动，无需操作）
+### Migrating from Phase 0/1 to Phase 2 (automatic, no action needed)
 
-升级到 `3252fb8` 或更新版本后，客户端连接逻辑自动变为：
+After upgrading to `3252fb8` or later, the client connection logic automatically becomes:
 
-- 先找固定 socket（新行为）
-- 找不到再找 cwd-hash socket（旧行为）
-- 都找不到则 fork 新 daemon
+- Try the fixed socket first (new behavior)
+- If not found, try the cwd-hash socket (old behavior)
+- If neither is found, fork a new daemon
 
-**无需修改任何配置**。
+**No configuration changes required.**
 
-### 从 Phase 2 迁移到 Phase 3（手动，可选）
+### Migrating from Phase 2 to Phase 3 (manual, optional)
 
-如果想用 systemd 服务化（Linux）：
+To use the systemd service (Linux):
 
-1. 按 `deploy/systemd/README.md` 安装 service
-2. 启动 service：`systemctl --user start baoclaw`
-3. 验证：`ls $XDG_RUNTIME_DIR/baoclaw.sock`
-4. 此后所有终端打开都立即连 daemon，无需 CLI 自己 fork
+1. Install the service following `deploy/systemd/README.md`
+2. Start the service: `systemctl --user start baoclaw`
+3. Verify: `ls $XDG_RUNTIME_DIR/baoclaw.sock`
+4. From then on, every terminal connects to the daemon immediately; no CLI fork needed
 
-### 清理旧 socket 文件
+### Cleaning up old socket files
 
-升级后可能残留旧 socket 文件，可清理：
+Old socket files may remain after upgrading; clean them up with:
 
 ```bash
 # Linux/macOS
@@ -72,73 +72,78 @@ rm -f /tmp/baoclaw-sockets/baoclaw-*.sock
 rm -f /tmp/baoclaw-sockets/baoclaw-cwd-*.sock
 rm -f /run/user/$(id -u)/baoclaw-cwd-*.sock
 
-# 只保留固定 socket
+# Keep only the fixed socket
 ls /run/user/$(id -u)/baoclaw.sock          # Linux
 ls /tmp/baoclaw-sockets/baoclaw.sock         # macOS
 ```
 
-## Session 持久化
+## Session Persistence
 
-Phase 2 引入 session 持久化：
+Phase 2 introduces session persistence:
 
-- 存储路径：`~/.baoclaw/sessions/<session-id>.json`
-- 索引文件：`~/.baoclaw/sessions/registry.json`
-- 归档目录：`~/.baoclaw/sessions/archive/`（>7 天不活跃自动归档）
-- 触发时机：每轮对话结束 + daemon 收到 SIGTERM/SIGINT
+- Storage path: `~/.baoclaw/sessions/<session-id>.json`
+- Index file: `~/.baoclaw/sessions/registry.json`
+- Archive directory: `~/.baoclaw/sessions/archive/` (sessions inactive for >7 days are archived automatically)
+- Trigger points: end of each conversation turn + daemon receiving SIGTERM/SIGINT
 
-daemon 崩溃或重启后，启动时会自动从磁盘恢复 session（消息历史 + 记忆摘要）。
+After a daemon crash or restart, sessions (message history + memory summaries) are automatically restored from disk at startup.
 
-## 故障排查
+## Troubleshooting
 
-### daemon 启动失败
+### Daemon fails to start
 
 ```bash
-# 检查 socket 文件是否被占用
+# Check whether the socket file is occupied
 ls -la /run/user/$(id -u)/baoclaw.sock
 
-# 如果是 stale socket（daemon 已死但文件残留），删除它
+# If it is a stale socket (daemon is dead but the file remains), remove it
 rm /run/user/$(id -u)/baoclaw.sock
 
-# 重新启动 daemon
+# Restart the daemon
 systemctl --user restart baoclaw
 ```
 
-### 客户端连不上 daemon
+### Client cannot connect to the daemon
 
 ```bash
-# 1. 确认 daemon 在运行
+# 1. Confirm the daemon is running
 systemctl --user status baoclaw
 
-# 2. 确认 socket 文件存在
+# 2. Confirm the socket file exists
 ls -la /run/user/$(id -u)/baoclaw.sock
 
-# 3. 测试连接（如果有 socat）
+# 3. Test the connection (if socat is available)
 socat - UNIX-CONNECT:/run/user/$(id -u)/baoclaw.sock
 
-# 4. 查看日志
+# 4. Check the logs
 journalctl --user -u baoclaw -f
 ```
 
-### session 丢失
+### Session lost
 
 ```bash
-# 检查持久化文件
+# Check the persistence files
 ls ~/.baoclaw/sessions/
 
-# 检查 registry
+# Check the registry
 cat ~/.baoclaw/sessions/registry.json | jq .
 
-# 手动恢复（通常自动恢复）
-# daemon 启动时会自动 load_from_disk()
+# Manual recovery (usually automatic)
+# The daemon calls load_from_disk() automatically at startup
 ```
 
-## 回滚
+## Rollback
 
-如果新版有问题，可以回滚到旧版：
+If the new version has problems, you can roll back to the old version:
 
 ```bash
 git checkout 929e161    # Phase 0/1
 cargo build --release --bin baoclaw-core
 ```
 
-session 持久化文件（`~/.baoclaw/sessions/`）在新旧版本间兼容（都是 JSON），无需清理。
+Session persistence files (`~/.baoclaw/sessions/`) are compatible between old and new versions (both are JSON); no cleanup is needed.
+
+## See also
+
+- [Engine internals](INTERNALS.md)
+- [Operations runbook](OPERATIONS_RUNBOOK.md)

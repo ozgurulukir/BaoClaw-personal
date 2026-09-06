@@ -100,3 +100,9 @@ Injected into the system prompt for every conversation in this project. Write an
 
 This is a Python web app using FastAPI + SQLAlchemy.
 ```
+
+## See also
+
+- [Usage guide](USAGE.md)
+- [Permission system](PERMISSIONS.md)
+- [Features & command reference](FEATURES.md)

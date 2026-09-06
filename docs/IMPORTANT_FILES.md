@@ -116,3 +116,8 @@ Auto-recorded. Each line is a JSON object:
 ```
 
 Export training data for later DPO/RLHF dataset preparation: ask the agent to `export training data` or use the Evolve tool.
+
+## See also
+
+- [Engine internals](INTERNALS.md)
+- [Permission system](PERMISSIONS.md)

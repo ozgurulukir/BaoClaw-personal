@@ -1,38 +1,38 @@
-# BaoClaw 权限系统 (Permission System)
+# BaoClaw Permission System
 
-本文档描述 BaoClaw 的工具执行权限控制机制，包括架构、数据结构、检查流程和配置方式。
+This document describes BaoClaw's tool execution permission control mechanism, including architecture, data structures, checking flow, and configuration.
 
-## 目录
+## Table of Contents
 
-1. [架构概览](#1-架构概览)
-2. [核心数据结构](#2-核心数据结构)
-3. [PermissionManager — 规则匹配引擎](#3-permissionmanager--规则匹配引擎)
-4. [PermissionGate — 异步决策通道](#4-permissiongate--异步决策通道)
-5. [ToolExecutor — 执行流水线](#5-toolexecutor--执行流水线)
-6. [RuleBasedPermissionGate — 引擎级规则缓存](#6-rulebasedpermissiongate--引擎级规则缓存)
-7. [Security 模块 — 危险命令阻断](#7-security-模块--危险命令阻断)
-8. [权限检查完整流程图](#8-权限检查完整流程图)
-9. [配置方式](#9-配置方式)
+1. [Architecture Overview](#1-architecture-overview)
+2. [Core Data Structures](#2-core-data-structures)
+3. [PermissionManager — Rule Matching Engine](#3-permissionmanager--rule-matching-engine)
+4. [PermissionGate — Async Decision Channel](#4-permissiongate--async-decision-channel)
+5. [ToolExecutor — Execution Pipeline](#5-toolexecutor--execution-pipeline)
+6. [RuleBasedPermissionGate — Engine-Level Rule Cache](#6-rulebasedpermissiongate--engine-level-rule-cache)
+7. [Security Module — Dangerous Command Blocking](#7-security-module--dangerous-command-blocking)
+8. [Full Permission Check Flow](#8-full-permission-check-flow)
+9. [Configuration](#9-configuration)
 
 ---
 
-## 1. 架构概览
+## 1. Architecture Overview
 
-BaoClaw 权限系统由以下组件组成（分层设计）：
+The BaoClaw permission system consists of the following components (layered design):
 
 ```
 ┌────────────────────────────────────────────────────────────────────┐
 │                         CLI (ts-ipc/cli.ts)                         │
-│                     斜杠命令 /permission, /permissions              │
-│                         用户交互层                                    │
+│                Slash commands /permission, /permissions             │
+│                       User interaction layer                        │
 └───────────────┬────────────────────────────────────┬───────────────┘
                 │ JSON-RPC                            │ PermissionRequest
-                │ 事件                                 │ 事件 (EngineEvent)
+                │ events                              │ events (EngineEvent)
 ┌───────────────▼────────────────────────────────────▼───────────────┐
 │                      Daemon (main.rs)                               │
 │  ┌─────────────────────┐  ┌──────────────────────────────────────┐ │
 │  │   IPC Router        │  │   QueryEngine                         │ │
-│  │   ClientMethod 枚举  │  │   ┌──────────────────────────────┐   │ │
+│  │   ClientMethod enum │  │   ┌──────────────────────────────┐   │ │
 │  │   - PermissionStatus│  │   │  ToolExecutor                 │   │ │
 │  │   - PermissionGrant │  │   │  execute_tool_with_permission │   │ │
 │  │   - PermissionRevoke│  │   └──────────┬───────────────────┘   │ │
@@ -48,56 +48,56 @@ BaoClaw 权限系统由以下组件组成（分层设计）：
 │                           └──────────────────────────────────────┘ │
 │  ┌─────────────────────────────────────────────────────────────┐  │
 │  │  RuleBasedPermissionGate (engine/permission_gate)           │  │
-│  │  - 内置安全规则 (deny rm -rf, sudo, etc.)                   │  │
-│  │  - 用户缓存授权 (AllowSession / AllowPermanent)             │  │
+│  │  - Built-in security rules (deny rm -rf, sudo, etc.)        │  │
+│  │  - Cached user grants (AllowSession / AllowPermanent)       │  │
 │  └─────────────────────────────────────────────────────────────┘  │
 │  ┌─────────────────────────────────────────────────────────────┐  │
-│  │  Security 模块 (engine/security.rs)                         │  │
-│  │  - check_dangerous_command() 硬阻断                          │  │
-│  │  - check_ssrf_url() SSRF 防护                                │  │
-│  │  - validate_memory_content() 凭据泄漏检测                     │  │
+│  │  Security module (engine/security.rs)                       │  │
+│  │  - check_dangerous_command() hard blocking                  │  │
+│  │  - check_ssrf_url() SSRF protection                         │  │
+│  │  - validate_memory_content() credential leak detection      │  │
 │  └─────────────────────────────────────────────────────────────┘  │
 └────────────────────────────────────────────────────────────────────┘
 ```
 
-### 文件清单
+### File Inventory
 
-| 文件                                              | 职责                                                                         |
-| ------------------------------------------------- | ---------------------------------------------------------------------------- |
-| `baoclaw-core/src/permissions/manager.rs`         | `PermissionManager` + `PermissionMode` + `PermissionRule` + glob 匹配        |
-| `baoclaw-core/src/permissions/gate.rs`            | `PermissionGate` (pending 请求队列 + oneshot channel) + `PermissionDecision` |
-| `baoclaw-core/src/tools/executor.rs`              | `ToolExecutor` — 工具执行流水线，调用 PermissionManager + PermissionGate     |
-| `baoclaw-core/src/engine/permission_gate/gate.rs` | `RuleBasedPermissionGate` — 引擎级规则策略 + 缓存                            |
-| `baoclaw-core/src/engine/security.rs`             | 危险命令阻断、SSRF 防护、内容验证                                            |
+| File                                              | Responsibility                                                                     |
+| ------------------------------------------------- | ---------------------------------------------------------------------------------- |
+| `baoclaw-core/src/permissions/manager.rs`         | `PermissionManager` + `PermissionMode` + `PermissionRule` + glob matching          |
+| `baoclaw-core/src/permissions/gate.rs`            | `PermissionGate` (pending request queue + oneshot channel) + `PermissionDecision`  |
+| `baoclaw-core/src/tools/executor.rs`              | `ToolExecutor` — tool execution pipeline, calls PermissionManager + PermissionGate |
+| `baoclaw-core/src/engine/permission_gate/gate.rs` | `RuleBasedPermissionGate` — engine-level rule policy + cache                       |
+| `baoclaw-core/src/engine/security.rs`             | Dangerous command blocking, SSRF protection, content validation                    |
 
 ---
 
-## 2. 核心数据结构
+## 2. Core Data Structures
 
 ### PermissionMode
 
 ```rust
 pub enum PermissionMode {
-    Default,            // 默认模式：不匹配 allow 规则的工具 → Ask
-    Plan,               // 计划模式：只读工具自动 Allow，其他 Ask
-    BypassPermissions,  // 绕过模式：所有非 deny 工具自动 Allow
-    Auto,               // 自动模式（预留）
+    Default,            // Default mode: tools not matching an allow rule → Ask
+    Plan,               // Plan mode: read-only tools auto-Allow, everything else Ask
+    BypassPermissions,  // Bypass mode: all non-deny tools auto-Allow
+    Auto,               // Auto mode (reserved)
 }
 ```
 
-| 模式              | 读操作                        | 写操作 | deny 规则   |
-| ----------------- | ----------------------------- | ------ | ----------- |
-| Default           | Ask (除非 allow 规则匹配)     | Ask    | ✅ 强制阻断 |
-| Plan              | Allow (Read/Grep/Glob/Search) | Ask    | ✅ 强制阻断 |
-| BypassPermissions | Allow                         | Allow  | ✅ 强制阻断 |
-| Auto              | (预留)                        | (预留) | ✅ 强制阻断 |
+| Mode              | Read operations                    | Writes     | deny rules        |
+| ----------------- | ---------------------------------- | ---------- | ----------------- |
+| Default           | Ask (unless an allow rule matches) | Ask        | ✅ enforced block |
+| Plan              | Allow (Read/Grep/Glob/Search)      | Ask        | ✅ enforced block |
+| BypassPermissions | Allow                              | Allow      | ✅ enforced block |
+| Auto              | (reserved)                         | (reserved) | ✅ enforced block |
 
 ### PermissionRule
 
 ```rust
 pub struct PermissionRule {
-    pub tool_name: String,        // 工具名（大小写不敏感）
-    pub rule_content: Option<String>,  // glob 模式，如 "rm -rf *"；None = 匹配所有输入
+    pub tool_name: String,        // Tool name (case-insensitive)
+    pub rule_content: Option<String>,  // glob pattern, e.g. "rm -rf *"; None = match any input
 }
 ```
 
@@ -114,7 +114,7 @@ pub struct ToolPermissionContext {
 }
 ```
 
-**规则按 source 分组**，`source` 可以是 `"builtin"`、`"user"`、`"config"` 等。检查时遍历所有 source 的规则。
+**Rules are grouped by source**, where `source` can be `"builtin"`, `"user"`, `"config"`, etc. Checks iterate over the rules from all sources.
 
 ### PermissionResult
 
@@ -128,266 +128,266 @@ pub enum PermissionResult {
 
 ---
 
-## 3. PermissionManager — 规则匹配引擎
+## 3. PermissionManager — Rule Matching Engine
 
-**文件**: `baoclaw-core/src/permissions/manager.rs`
+**File**: `baoclaw-core/src/permissions/manager.rs`
 
-### check_permission() 检查顺序
+### check_permission() evaluation order
 
-`check_permission(tool_name, input_description)` 按以下顺序求值（短路返回）：
+`check_permission(tool_name, input_description)` is evaluated in the following order (short-circuits on return):
 
 ```
-Step 1: deny 规则检查（最高优先级）
-  → 匹配 → return Deny
+Step 1: deny rule check (highest priority)
+  → match → return Deny
 
-Step 2: BypassPermissions 模式
-  → return Allow (跳过后续所有检查)
+Step 2: BypassPermissions mode
+  → return Allow (skips all subsequent checks)
 
-Step 3: allow 规则检查
-  → 匹配 → return Allow
+Step 3: allow rule check
+  → match → return Allow
 
-Step 4: ask 规则检查
-  → 匹配 → return Ask
+Step 4: ask rule check
+  → match → return Ask
 
-Step 5: Plan 模式
-  → 只读工具 (Read/Grep/Glob/Search) → Allow
-  → 其他 → Ask
+Step 5: Plan mode
+  → read-only tools (Read/Grep/Glob/Search) → Allow
+  → everything else → Ask
 
-Step 6: 默认 → Ask
+Step 6: default → Ask
 ```
 
-**关键设计**: deny 规则始终最先检查，确保即使用户设了 BypassPermissions 模式，危险操作仍被阻断。
+**Key design**: deny rules are always checked first, ensuring that even in BypassPermissions mode, dangerous operations are still blocked.
 
-### glob_matches() — 通配符匹配
+### glob_matches() — wildcard matching
 
-使用动态规划实现 `*` 通配符匹配：
+Implements `*` wildcard matching with dynamic programming:
 
-- `*` 匹配任意长度字符序列（包括空串）
-- 匹配是大小写不敏感的
-- 示例：
-  - `"git *"` 匹配 `"git push origin main"`
-  - `"rm -rf *"` 匹配 `"rm -rf /tmp/build"`
-  - `"*"` 匹配任何字符串
+- `*` matches any-length character sequence (including the empty string)
+- Matching is case-insensitive
+- Examples:
+  - `"git *"` matches `"git push origin main"`
+  - `"rm -rf *"` matches `"rm -rf /tmp/build"`
+  - `"*"` matches any string
 
-### matches_rule() — 单条规则匹配
+### matches_rule() — single-rule matching
 
 ```rust
 fn matches_rule(rule: &PermissionRule, tool_name: &str, input_description: Option<&str>) -> bool {
-    // 1. 工具名大小写不敏感匹配
+    // 1. Case-insensitive tool name match
     if !rule.tool_name.eq_ignore_ascii_case(tool_name) { return false; }
 
-    // 2. 如果规则有 content 模式，输入描述必须匹配 glob
+    // 2. If the rule has a content pattern, the input description must match the glob
     match (&rule.rule_content, input_description) {
         (Some(pattern), Some(desc)) => glob_matches(pattern, desc),
-        (Some(_), None) => false,  // 有模式但无输入描述 → 不匹配
-        (None, _) => true,          // 无模式 → 匹配任意输入
+        (Some(_), None) => false,  // has pattern but no input description → no match
+        (None, _) => true,          // no pattern → match any input
     }
 }
 ```
 
-### API 方法
+### API methods
 
-| 方法                                                          | 说明             |
-| ------------------------------------------------------------- | ---------------- |
-| `new(context: ToolPermissionContext)`                         | 创建 manager     |
-| `check_permission(tool_name, input_desc) -> PermissionResult` | 核心检查方法     |
-| `update_context(FnOnce(&mut ctx))`                            | 用闭包更新上下文 |
-| `get_context() -> ToolPermissionContext`                      | 获取上下文快照   |
-| `add_allow_always_rule(source, tool_name, rule_content)`      | 添加 allow 规则  |
+| Method                                                        | Description                    |
+| ------------------------------------------------------------- | ------------------------------ |
+| `new(context: ToolPermissionContext)`                         | Create the manager             |
+| `check_permission(tool_name, input_desc) -> PermissionResult` | Core check method              |
+| `update_context(FnOnce(&mut ctx))`                            | Update the context via closure |
+| `get_context() -> ToolPermissionContext`                      | Get a context snapshot         |
+| `add_allow_always_rule(source, tool_name, rule_content)`      | Add an allow rule              |
 
 ---
 
-## 4. PermissionGate — 异步决策通道
+## 4. PermissionGate — Async Decision Channel
 
-**文件**: `baoclaw-core/src/permissions/gate.rs`
+**File**: `baoclaw-core/src/permissions/gate.rs`
 
-`PermissionGate` 是 CLI ↔ Daemon 之间的异步通信桥梁，用于处理需要用户确认的权限请求。
+`PermissionGate` is the async communication bridge between CLI ↔ Daemon, used to handle permission requests that require user confirmation.
 
-### 工作机制
+### How it works
 
 ```
 Daemon (ToolExecutor)                     CLI
     │                                       │
     │  PermissionGate.request(tool_use_id)   │
-    │  → 返回 oneshot::Receiver              │
-    │  → 阻塞等待...                          │
+    │  → returns oneshot::Receiver           │
+    │  → blocking wait...                    │
     │                           ◄──────────│  EngineEvent::PermissionRequest
-    │                           (IPC event) │  显示确认提示给用户
+    │                           (IPC event) │  show confirmation prompt to user
     │                                       │
     │                           ◄──────────│  PermissionResponse { decision }
     │  PermissionGate.respond(tool_use_id,  │  (allow/deny/allow_always)
     │    decision)                           │
     │  → oneshot::Sender.send(decision)      │
-    │  ← oneshot::Receiver 收到 decision     │
-    │  → 继续执行或拒绝                        │
+    │  ← oneshot::Receiver gets decision     │
+    │  → continue execution or deny          │
 ```
 
 ### PermissionDecision
 
 ```rust
 pub enum PermissionDecision {
-    Allow,                  // 本次允许
-    Deny,                   // 拒绝
-    AllowAlways {           // 永久允许（添加到 allow 规则）
+    Allow,                  // Allow this once
+    Deny,                   // Deny
+    AllowAlways {           // Allow permanently (added to allow rules)
         rule: Option<String>,
     },
 }
 ```
 
-### 超时机制
+### Timeout mechanism
 
-`ToolExecutor` 在 `execute_tool_with_permission` 中等待用户决定，超时后自动拒绝。
-超时时长来自配置 `permissions.ask_timeout_secs`（默认 **300 秒**，允许 5–3600 秒），
-executor 每次 prompt 都会从共享的 PermissionManager 实时读取，因此修改立即生效：
+`ToolExecutor` waits for the user's decision inside `execute_tool_with_permission`; on timeout it automatically denies.
+The timeout comes from the `permissions.ask_timeout_secs` config (default **300 seconds**, allowed range 5–3600 seconds).
+The executor reads it live from the shared PermissionManager on every prompt, so changes take effect immediately:
 
 ```rust
 let decision = match tokio::time::timeout(ask_timeout, rx).await {
     Ok(Ok(decision)) => decision,
-    Ok(Err(_)) => PermissionDecision::Deny,  // channel 关闭 → 拒绝
-    Err(_) => PermissionDecision::Deny,      // 超时 → 自动拒绝
+    Ok(Err(_)) => PermissionDecision::Deny,  // channel closed → deny
+    Err(_) => PermissionDecision::Deny,      // timeout → auto-deny
 };
 ```
 
-### API 方法
+### API methods
 
-| 方法                                                   | 说明                                |
-| ------------------------------------------------------ | ----------------------------------- |
-| `new()`                                                | 创建空 gate                         |
-| `request(tool_use_id) -> Receiver<PermissionDecision>` | 注册 pending 请求，返回等待 channel |
-| `respond(tool_use_id, decision) -> bool`               | 提交用户决策，返回是否成功投递      |
-| `pending_count() -> usize`                             | 当前 pending 请求数                 |
+| Method                                                 | Description                                                  |
+| ------------------------------------------------------ | ------------------------------------------------------------ |
+| `new()`                                                | Create an empty gate                                         |
+| `request(tool_use_id) -> Receiver<PermissionDecision>` | Register a pending request, return the wait channel          |
+| `respond(tool_use_id, decision) -> bool`               | Submit the user's decision, returns whether it was delivered |
+| `pending_count() -> usize`                             | Current number of pending requests                           |
 
 ---
 
-## 5. ToolExecutor — 执行流水线
+## 5. ToolExecutor — Execution Pipeline
 
-**文件**: `baoclaw-core/src/tools/executor.rs`
+**File**: `baoclaw-core/src/tools/executor.rs`
 
 ### execute_tool_with_permission()
 
-这是核心工具执行函数，集成了 PermissionManager + PermissionGate：
+This is the core tool execution function, integrating PermissionManager + PermissionGate:
 
 ```
 ┌─────────────────────────────────────────────────────┐
 │  Step 1: validate_input(&request.input)             │
-│  → Invalid → 返回错误                                │
+│  → Invalid → return error                           │
 ├─────────────────────────────────────────────────────┤
 │  Step 2: permission_manager.check_permission(       │
 │            tool_name, input_description)             │
 │                                                      │
-│  → Allow  → 直接执行 (call_tool_and_wrap)            │
-│  → Deny   → 返回 "Permission denied"                │
-│  → Ask    → 进入交互式确认流程 ──┐                   │
+│  → Allow  → execute directly (call_tool_and_wrap)   │
+│  → Deny   → return "Permission denied"              │
+│  → Ask    → enter interactive confirmation flow ──┐ │
 ├───────────────────────────────◄──┘                   │
-│  Step 3 (Ask 分支):                                  │
-│  a. 发送 EngineEvent::PermissionRequest              │
+│  Step 3 (Ask branch):                                │
+│  a. send EngineEvent::PermissionRequest              │
 │  b. PermissionGate.request(tool_use_id)              │
-│  c. 等待 ask_timeout_secs 超时                       │
+│  c. wait up to ask_timeout_secs                      │
 │                                                      │
-│  → Allow          → 执行                            │
-│  → AllowAlways    → 添加规则 + 执行                  │
-│  → Deny           → 返回 "Permission denied by user"│
+│  → Allow          → execute                         │
+│  → AllowAlways    → add rule + execute              │
+│  → Deny           → return "Permission denied by user"│
 ├─────────────────────────────────────────────────────┤
 │  Step 4: tool.call(input, context, progress)        │
 │  → maybe_persist_or_truncate(result)                │
 └─────────────────────────────────────────────────────┘
 ```
 
-### 两条执行路径
+### Two execution paths
 
-| 函数                             | 用途                                    | 权限检查方式                                                                                           |
-| -------------------------------- | --------------------------------------- | ------------------------------------------------------------------------------------------------------ |
-| `execute_tool()`                 | 简单路径（直接/批量执行）               | 检查 Tool trait 的 `check_permissions`；非只读工具遇 `Ask` 默认 Fail-Closed 阻断（只读工具警告后允许） |
-| `execute_tool_with_permission()` | 完整路径（带 PermissionManager + Gate） | PermissionManager → Gate 交互式确认（ask_timeout_secs 超时后自动 Fail-Closed 拒绝，默认 300 秒）       |
+| Function                         | Purpose                                   | Permission check method                                                                                                                                         |
+| -------------------------------- | ----------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `execute_tool()`                 | Simple path (direct/batch execution)      | Checks the Tool trait's `check_permissions`; non-read-only tools hit `Ask` and are blocked Fail-Closed by default (read-only tools are allowed after a warning) |
+| `execute_tool_with_permission()` | Full path (with PermissionManager + Gate) | PermissionManager → Gate interactive confirmation (auto Fail-Closed deny after ask_timeout_secs timeout, default 300 seconds)                                   |
 
 ---
 
-## 6. RuleBasedPermissionGate — 引擎级规则缓存
+## 6. RuleBasedPermissionGate — Engine-Level Rule Cache
 
-**文件**: `baoclaw-core/src/engine/permission_gate/gate.rs`
+**File**: `baoclaw-core/src/engine/permission_gate/gate.rs`
 
-这是一个独立的权限策略引擎，用于 QueryEngine 层面的规则管理和会话缓存。
+This is a standalone permission policy engine used for rule management and session caching at the QueryEngine layer.
 
-### 内置默认规则
+### Built-in default rules
 
-| 工具                  | 模式                                                             | 策略                    |
+| Tool                  | Pattern                                                          | Policy                  |
 | --------------------- | ---------------------------------------------------------------- | ----------------------- |
 | FileRead              | `*`                                                              | ✅ Always Allow         |
 | FileWrite             | `*.env`, `.git/*`, `*/.ssh/*`                                    | ❌ Auto Deny            |
 | FileWrite             | `*.md`                                                           | ✅ Allow                |
-| FileWrite             | `*` (其他)                                                       | ❓ Require Confirmation |
+| FileWrite             | `*` (everything else)                                            | ❓ Require Confirmation |
 | Bash                  | `rm -rf /`, `sudo `, `chmod 777`, `dd if=`, `mkfs.`, `> /dev/sd` | ❌ Auto Deny            |
 | Bash                  | `git status`, `git diff`, `ls `, `cat `, `grep `, `find `, `pwd` | ✅ Allow                |
-| Bash                  | `*` (其他)                                                       | ❓ Require Confirmation |
+| Bash                  | `*` (everything else)                                            | ❓ Require Confirmation |
 | FileDelete / FileEdit | `*`                                                              | ❓ Require Confirmation |
 | WebFetch              | `localhost:*`, `127.*`, `10.*`                                   | ❌ Auto Deny            |
-| WebFetch              | `*` (外部)                                                       | ❓ Require Confirmation |
+| WebFetch              | `*` (external)                                                   | ❓ Require Confirmation |
 | WebSearch             | `*`                                                              | ✅ Allow                |
 
-### 缓存决策类型
+### Cached decision types
 
 ```rust
 pub enum DecisionType {
-    AllowOnce,        // 只本次（不缓存）
-    AllowSession,     // 会话内有效（默认 TTL 24h）
-    AllowPermanent,   // 永久
+    AllowOnce,        // This time only (not cached)
+    AllowSession,     // Valid within the session (default TTL 24h)
+    AllowPermanent,   // Permanent
     Deny,
     AskUser,
 }
 ```
 
-### 评估顺序
+### Evaluation order
 
-1. **检查缓存** — 如果有 AllowSession/AllowPermanent 的缓存授权 → 直接返回
-2. **按顺序匹配规则** — 第一个匹配的规则生效
-3. **默认** → AskUser
+1. **Check cache** — if there is a cached AllowSession/AllowPermanent grant → return immediately
+2. **Match rules in order** — the first matching rule wins
+3. **Default** → AskUser
 
 ---
 
-## 7. Security 模块 — 危险命令阻断
+## 7. Security Module — Dangerous Command Blocking
 
-**文件**: `baoclaw-core/src/engine/security.rs`
+**File**: `baoclaw-core/src/engine/security.rs`
 
-Security 模块提供了三层额外的安全防护（独立于 PermissionManager）：
+The Security module provides three additional layers of protection (independent of PermissionManager):
 
-### 7.1 危险命令阻断 — `check_dangerous_command()`
+### 7.1 Dangerous command blocking — `check_dangerous_command()`
 
-硬编码的危险命令黑名单（子串匹配，大小写不敏感）：
+A hardcoded blocklist of dangerous commands (substring match, case-insensitive):
 
-- `rm -rf /*` / `rm -rf /` — 递归根删除
+- `rm -rf /*` / `rm -rf /` — recursive root deletion
 - `:(){ :|:& };:` — fork bomb
-- `dd if=` / `of=/dev/sd*` — 块设备写入
-- `mkfs` — 文件系统格式化
-- `chmod 777 /` / `chmod -r 777 /` — 根目录全局可写
-- `> /etc/passwd` / `> /etc/shadow` — 覆盖认证文件
-- `shutdown` / `reboot` / `poweroff` / `halt` — 系统电源操作
-- `> /dev/sda*` / `> /dev/nvme*` — 直接写块设备
+- `dd if=` / `of=/dev/sd*` — block device writes
+- `mkfs` — filesystem formatting
+- `chmod 777 /` / `chmod -r 777 /` — world-writable root
+- `> /etc/passwd` / `> /etc/shadow` — overwrite auth files
+- `shutdown` / `reboot` / `poweroff` / `halt` — system power operations
+- `> /dev/sda*` / `> /dev/nvme*` — direct block device writes
 
-### 7.2 SSRF 防护 — `check_ssrf_url()`
+### 7.2 SSRF protection — `check_ssrf_url()`
 
-阻断指向内部/私有网络的 URL：
+Blocks URLs pointing to internal/private networks:
 
 - `127.0.0.0/8` — Loopback
 - `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16` — RFC 1918
-- `169.254.0.0/16` — Link-local (含 `169.254.169.254` 云元数据)
+- `169.254.0.0/16` — Link-local (including `169.254.169.254` cloud metadata)
 - `100.64.0.0/10` — CGNAT
-- `::1`, `fc00::/7`, `fe80::/10` — IPv6 私有
-- `metadata.google.internal`, `metadata.internal` — 云元数据端点
+- `::1`, `fc00::/7`, `fe80::/10` — IPv6 private
+- `metadata.google.internal`, `metadata.internal` — cloud metadata endpoints
 
-### 7.3 内存内容验证 — `validate_memory_content()`
+### 7.3 Memory content validation — `validate_memory_content()`
 
-检测以下内容并拒绝写入长期记忆：
+Detects the following and refuses to write to long-term memory:
 
-- **凭据泄漏**: `sk-*`, `ghp_*`, `AKIA*`, `xox[bpas]-*`, `Bearer *`
-- **不可见 Unicode**: 零宽空格 `\u200B`、BOM `\uFEFF`、RTL 覆盖 `\u202E` 等
-- **提示注入**: "ignore previous instructions" 等短语
+- **Credential leaks**: `sk-*`, `ghp_*`, `AKIA*`, `xox[bpas]-*`, `Bearer *`
+- **Invisible Unicode**: zero-width space `\u200B`, BOM `\uFEFF`, RTL override `\u202E`, etc.
+- **Prompt injection**: phrases like "ignore previous instructions"
 
 ---
 
-## 8. 权限检查完整流程图
+## 8. Full Permission Check Flow
 
 ```
-用户发送消息 → LLM 返回 tool_use
+User sends message → LLM returns tool_use
        │
        ▼
 ┌──────────────────────────┐
@@ -411,10 +411,10 @@ Security 模块提供了三层额外的安全防护（独立于 PermissionManage
            │      │  └──────────────────┘
            │  ┌───▼──────────────────────┐
            │  │ EngineEvent::Permission  │
-           │  │ Request → CLI             │
+           │  │ Request → CLI            │
            │  ├──────────────────────────┤
-           │  │ PermissionGate.request()  │
-           │  │ 等待 ask_timeout_secs    │
+           │  │ PermissionGate.request() │
+           │  │ wait ask_timeout_secs    │
            │  └───┬──────────┬──────┬─────┘
            │      │          │      │
            │   Allow    AllowAlways Deny
@@ -424,7 +424,7 @@ Security 模块提供了三层额外的安全防护（独立于 PermissionManage
            │      │    └─────┬──────────┘
            │      │          │
      ┌─────▼──────▼──────────▼──┐
-     │ call_tool_and_wrap()      │
+     │ call_tool_and_wrap()     │
      │  tool.call(input, ctx)   │
      │  → maybe_persist/truncate│
      └──────────────────────────┘
@@ -432,9 +432,9 @@ Security 模块提供了三层额外的安全防护（独立于 PermissionManage
 
 ---
 
-## 9. 配置方式
+## 9. Configuration
 
-### ~/.baoclaw/config.json 中的 permissions 字段
+### The permissions field in ~/.baoclaw/config.json
 
 ```json
 {
@@ -464,23 +464,29 @@ Security 模块提供了三层额外的安全防护（独立于 PermissionManage
 }
 ```
 
-### 运行时修改
+### Runtime modification
 
-通过 IPC 方法或斜杠命令：
+Via IPC methods or slash commands:
 
-- `/permission status` — 查看引擎级规则状态
-- `/permission grant <tool> <action> <target> [--permanent]` — 授权
-- `/permission revoke <tool> <action> <target>` — 撤销
-- `/permissions` — 查看 PermissionManager 上下文（mode + 三类规则）
-- `/permissions mode <default|plan|bypass|auto>` — 切换权限模式
-- `/permissions allow <tool> [glob]` — 添加 allow 规则
-- `/permissions deny <tool> [glob]` — 添加 deny 规则
-- `/permissions ask <tool> [glob]` — 添加 ask 规则
-- `/permissions timeout <5-3600>` — 设置 prompt 超时（秒，实时生效）
-- `/permissions persist <on|off>` — 切换 allow-always 规则是否写入配置
-- TUI：`p` / `Ctrl+P` — 切换 TUI 频道的自动允许（`permissions.setAutoAllow`）
+- `/permission status` — view engine-level rule status
+- `/permission grant <tool> <action> <target> [--permanent]` — grant
+- `/permission revoke <tool> <action> <target>` — revoke
+- `/permissions` — view the PermissionManager context (mode + the three rule kinds)
+- `/permissions mode <default|plan|bypass|auto>` — switch permission mode
+- `/permissions allow <tool> [glob]` — add an allow rule
+- `/permissions deny <tool> [glob]` — add a deny rule
+- `/permissions ask <tool> [glob]` — add an ask rule
+- `/permissions timeout <5-3600>` — set the prompt timeout (seconds, takes effect immediately)
+- `/permissions persist <on|off>` — toggle whether allow-always rules are written to config
+- TUI: `p` / `Ctrl+P` — toggle auto-allow for the TUI channel (`permissions.setAutoAllow`)
 
-### 向后兼容
+### Backward compatibility
 
-- `config.json` 中 `permissions` 字段不存在时，使用默认值（mode=Default, 空规则）
-- `BaoclawConfig` 通过 `#[serde(flatten)] extra` 保留未知字段，确保前向兼容
+- When the `permissions` field is absent from `config.json`, defaults are used (mode=Default, empty rules)
+- `BaoclawConfig` preserves unknown fields via `#[serde(flatten)] extra`, ensuring forward compatibility
+
+## See also
+
+- [Configuration reference](CONFIGURATION.md)
+- [Engine internals](INTERNALS.md)
+- [Usage guide](USAGE.md)
