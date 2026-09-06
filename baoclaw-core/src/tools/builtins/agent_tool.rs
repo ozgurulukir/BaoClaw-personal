@@ -145,6 +145,7 @@ impl Tool for AgentTool {
             hook_manager: None,      // Sub-agents don't trigger hooks
             permission: None,
             telemetry: None,
+            evolution: None,
         };
 
         let mut sub_engine = QueryEngine::new(sub_engine_config);

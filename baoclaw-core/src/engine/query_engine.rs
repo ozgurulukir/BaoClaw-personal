@@ -64,6 +64,8 @@ pub struct QueryEngineConfig {
     /// Local telemetry recorder. When present, each turn and each session
     /// close is written to the telemetry database; None disables recording.
     pub telemetry: Option<Arc<crate::engine::telemetry::collector::TelemetryCollector>>,
+    /// Evolution engine for trajectory recording; None disables recording.
+    pub evolution: Option<Arc<crate::engine::evolution::EvolutionEngine>>,
 }
 
 /// Thinking mode configuration for the LLM.
@@ -1084,6 +1086,7 @@ impl QueryEngine {
             context_window: self.config.context_window,
             auto_compact_threshold_ratio: self.config.auto_compact_threshold_ratio,
             telemetry: self.config.telemetry.clone(),
+            evolution: self.config.evolution.clone(),
         };
 
         let messages_shared = Arc::new(tokio::sync::Mutex::new(self.messages.clone()));
@@ -1164,6 +1167,8 @@ pub struct QueryLoopConfig {
     pub auto_compact_threshold_ratio: f64,
     /// Local telemetry recorder (cloned from the engine config).
     pub telemetry: Option<Arc<crate::engine::telemetry::collector::TelemetryCollector>>,
+    /// Evolution engine for trajectory recording.
+    pub evolution: Option<Arc<crate::engine::evolution::EvolutionEngine>>,
 }
 
 impl QueryLoopConfig {
@@ -1285,6 +1290,7 @@ mod tests {
             hook_manager: None,
             permission: None,
             telemetry: None,
+            evolution: None,
         }
     }
 
@@ -1769,6 +1775,7 @@ mod tests {
             hook_manager: None,
             permission: None,
             telemetry: None,
+            evolution: None,
             context_window: 200_000,
             auto_compact_threshold_ratio: 0.7,
         };
@@ -1825,6 +1832,7 @@ mod tests {
             hook_manager: None,
             permission: None,
             telemetry: None,
+            evolution: None,
             context_window: 200_000,
             auto_compact_threshold_ratio: 0.7,
         };
@@ -1878,6 +1886,7 @@ mod tests {
             hook_manager: None,
             permission: None,
             telemetry: None,
+            evolution: None,
             context_window: 200_000,
             auto_compact_threshold_ratio: 0.7,
         };
@@ -2022,6 +2031,7 @@ mod tests {
             hook_manager: None,
             permission: None,
             telemetry: None,
+            evolution: None,
             context_window: 200_000,
             auto_compact_threshold_ratio: 0.7,
         };
@@ -2075,6 +2085,7 @@ mod tests {
             hook_manager: None,
             permission: None,
             telemetry: None,
+            evolution: None,
             context_window: 200_000,
             auto_compact_threshold_ratio: 0.7,
         };
@@ -2281,6 +2292,7 @@ mod tests {
             hook_manager: None,
             permission: None,
             telemetry: None,
+            evolution: None,
             context_window: 200_000,
             auto_compact_threshold_ratio: 0.7,
         }

@@ -772,6 +772,7 @@ pub(super) async fn start_cron_scheduler(shared: &SharedState) {
                     // permission prompt — mutating tools fail closed instead.
                     permission: None,
                     telemetry: None,
+                    evolution: None,
                 });
 
                 let mut rx = engine.submit_message(prompt).await;

@@ -618,6 +618,7 @@ mod tests {
             hook_manager: None,
             permission: None,
             telemetry: None,
+            evolution: None,
         })
     }
 

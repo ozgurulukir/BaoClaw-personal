@@ -262,6 +262,7 @@ fn build_shared_engine(
         context_window: shared.baoclaw_config.context_window,
         auto_compact_threshold_ratio: shared.baoclaw_config.auto_compact_threshold_ratio,
         telemetry: shared.telemetry.clone(),
+        evolution: Some(Arc::clone(&shared.evolution_engine)),
         parent_turn_id: None,
         agent_label: None,
         session_memory: Some(Arc::new(

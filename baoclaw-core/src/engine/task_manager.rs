@@ -139,6 +139,7 @@ impl TaskManager {
                 hook_manager: None,
                 permission: None,
                 telemetry: None,
+                evolution: None,
             };
 
             let mut engine = QueryEngine::new(config);

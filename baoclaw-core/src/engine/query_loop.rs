@@ -49,6 +49,24 @@ pub async fn run_query_loop(
     tx: mpsc::Sender<EngineEvent>,
 ) {
     let start_time = std::time::Instant::now();
+    // Trajectory recording: the prompt that started this query (last
+    // non-tool-result user message) plus the tool actions across turns.
+    let traj_prompt: String = messages
+        .iter()
+        .rev()
+        .find_map(|m| match &m.content {
+            MessageContent::User {
+                message,
+                tool_use_result: None,
+                ..
+            } => match &message.content {
+                serde_json::Value::String(s) => Some(s.clone()),
+                _ => None,
+            },
+            _ => None,
+        })
+        .unwrap_or_default();
+    let mut traj_actions: Vec<crate::engine::evolution::TrajectoryAction> = Vec::new();
     let mut turn_count = 0u32;
     let mut total_usage = EMPTY_USAGE;
     let mut cost_tracker = CostTracker::new();
@@ -143,6 +161,14 @@ pub async fn run_query_loop(
             if fixed > 0 {
                 eprintln!("Cleaned up {} orphan tool_use block(s) after abort", fixed);
             }
+            record_query_trajectory(
+                &config,
+                &traj_prompt,
+                std::mem::take(&mut traj_actions),
+                crate::engine::evolution::TrajectoryOutcome::Aborted,
+                start_time.elapsed().as_millis() as u64,
+            )
+            .await;
             let _ = tx
                 .send(EngineEvent::Result(QueryResult {
                     status: QueryStatus::Aborted,
@@ -189,6 +215,14 @@ pub async fn run_query_loop(
                 // and we return MaxTurns.
                 if turn_count > max {
                     // Safety: second time hitting the limit, hard stop
+                    record_query_trajectory(
+                        &config,
+                        &traj_prompt,
+                        std::mem::take(&mut traj_actions),
+                        crate::engine::evolution::TrajectoryOutcome::MaxTurns,
+                        start_time.elapsed().as_millis() as u64,
+                    )
+                    .await;
                     let _ = tx
                         .send(EngineEvent::Result(QueryResult {
                             status: QueryStatus::MaxTurns,
@@ -315,6 +349,16 @@ pub async fn run_query_loop(
                     .saturating_sub(turn_output_tokens_at_start),
                 Vec::new(),
             );
+            record_query_trajectory(
+                &config,
+                &traj_prompt,
+                std::mem::take(&mut traj_actions),
+                crate::engine::evolution::TrajectoryOutcome::Completed {
+                    final_text_preview: text.clone().unwrap_or_default(),
+                },
+                start_time.elapsed().as_millis() as u64,
+            )
+            .await;
             let _ = tx
                 .send(EngineEvent::Result(QueryResult {
                     status: QueryStatus::Complete,
@@ -337,6 +381,7 @@ pub async fn run_query_loop(
             &tx,
             &mut transcript_writer,
             &total_usage,
+            &mut traj_actions,
             turn_id_counter,
             turn_start_time,
             turn_input_tokens_at_start,
@@ -552,6 +597,7 @@ async fn call_api_with_fallback(
         hook_manager: config.hook_manager.clone(),
         permission: config.permission.clone(),
         telemetry: None,
+        evolution: None,
         context_window: config.context_window,
         auto_compact_threshold_ratio: config.auto_compact_threshold_ratio,
     };
@@ -1297,6 +1343,7 @@ async fn execute_tool_turn(
     tx: &mpsc::Sender<EngineEvent>,
     transcript_writer: &mut Option<TranscriptWriter>,
     total_usage: &Usage,
+    traj_actions: &mut Vec<crate::engine::evolution::TrajectoryAction>,
     turn_id_counter: u32,
     turn_start_time: std::time::Instant,
     turn_input_tokens_at_start: u64,
@@ -1455,6 +1502,27 @@ async fn execute_tool_turn(
                 }
             }
         }
+    }
+
+    // Collect per-tool actions for the query trajectory.
+    for res in &tool_results {
+        traj_actions.push(crate::engine::evolution::TrajectoryAction {
+            tool_name: res.tool_name.clone(),
+            input_summary: tool_uses
+                .iter()
+                .find(|tu| tu.id == res.tool_use_id)
+                .map(|tu| serde_json::to_string(&tu.input).unwrap_or_default())
+                .unwrap_or_default()
+                .chars()
+                .take(300)
+                .collect::<String>(),
+            output_summary: serde_json::to_string(&res.output)
+                .unwrap_or_default()
+                .chars()
+                .take(300)
+                .collect::<String>(),
+            is_error: res.is_error,
+        });
     }
 
     // Build tool result user message and append to messages
@@ -1706,6 +1774,36 @@ pub async fn compact_messages(
 
 /// Maximum consecutive compact failures before the circuit breaker trips.
 const MAX_COMPACT_FAILURES: usize = 3;
+
+/// Record the whole query as one trajectory (best-effort; no-op when no
+/// evolution engine is attached). Actions are collected across tool turns.
+async fn record_query_trajectory(
+    config: &QueryLoopConfig,
+    user_prompt: &str,
+    actions: Vec<crate::engine::evolution::TrajectoryAction>,
+    outcome: crate::engine::evolution::TrajectoryOutcome,
+    duration_ms: u64,
+) {
+    use crate::engine::evolution::Trajectory;
+    let Some(evolution) = config.evolution.as_ref() else {
+        return;
+    };
+    let tool_count = actions.len();
+    let prompt_preview: String = user_prompt.chars().take(500).collect();
+    evolution
+        .record_trajectory(Trajectory {
+            id: uuid::Uuid::new_v4().to_string(),
+            timestamp: chrono::Utc::now().to_rfc3339(),
+            cwd: config.cwd.to_string_lossy().to_string(),
+            user_prompt: prompt_preview,
+            assistant_actions: actions,
+            outcome,
+            tool_count,
+            duration_ms,
+            user_rating: None,
+        })
+        .await;
+}
 
 /// Record one turn into the local telemetry database (best-effort; no-op
 /// when telemetry is disabled or the DB cannot be opened).
