@@ -377,7 +377,12 @@ pub(super) fn build_engine_tools(
     Arc<engine::evolution::EvolutionEngine>,
     Vec<Arc<dyn tools::Tool>>,
     permissions::GrantedSearchDirs,
+    engine::tool_health::ToolHealthHandle,
 ) {
+    // Daemon-wide tool-health tracker: failure stats accumulate across every
+    // engine (interactive, sub-agent, cron, tasks, teams).
+    let tool_health = engine::tool_health::ToolHealthHandle::default();
+
     // Allow tools to access ~/.baoclaw/ in addition to project cwd
     let home_dir = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
     let baoclaw_home = std::path::PathBuf::from(&home_dir).join(".baoclaw");
@@ -426,7 +431,11 @@ pub(super) fn build_engine_tools(
     ];
 
     // AgentTool gets the full core tool set so sub-agents can write, edit, run bash, etc.
-    let agent_tool = AgentTool::new_with_full_tools(Arc::clone(api_client), core_tools.clone());
+    let agent_tool = AgentTool::new_with_full_tools(
+        Arc::clone(api_client),
+        core_tools.clone(),
+        Arc::clone(&tool_health),
+    );
 
     let mut engine_tools: Vec<Arc<dyn tools::Tool>> = core_tools;
     engine_tools.push(Arc::new(agent_tool));
@@ -496,7 +505,12 @@ pub(super) fn build_engine_tools(
         all
     };
 
-    (evolution_engine, engine_tools, granted_search_dirs)
+    (
+        evolution_engine,
+        engine_tools,
+        granted_search_dirs,
+        tool_health,
+    )
 }
 
 /// Load skill prompt, long-term memory, and the user profile; combine them
@@ -607,6 +621,7 @@ pub(super) async fn assemble_shared_state(
     api_client: Arc<UnifiedClient>,
     engine_tools: Vec<Arc<dyn tools::Tool>>,
     granted_search_dirs: permissions::GrantedSearchDirs,
+    tool_health: engine::tool_health::ToolHealthHandle,
     evolution_engine: Arc<engine::evolution::EvolutionEngine>,
     memory_store: Arc<engine::memory::MemoryStore>,
     user_profile: Arc<engine::user_profile::UserProfileManager>,
@@ -662,7 +677,6 @@ pub(super) async fn assemble_shared_state(
     // plus the default ~/.baoclaw parity the file tools already get. Grown
     // live by interactive "Always allow" grants in the executor.
     let granted_dirs = Arc::clone(&granted_search_dirs);
-    let tool_health = Arc::new(engine::tool_health::ToolHealthTracker::new());
     {
         let home_dir = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
         let mut dirs = granted_dirs.write().unwrap();
@@ -680,6 +694,7 @@ pub(super) async fn assemble_shared_state(
         engine_tools.clone(),
         baoclaw_config.context_window,
         baoclaw_config.auto_compact_threshold_ratio,
+        Arc::clone(&tool_health),
     ));
 
     let team_executor = Arc::new(engine::team::TeamManager::new(
@@ -687,6 +702,7 @@ pub(super) async fn assemble_shared_state(
         engine_tools.clone(),
         PathBuf::from(cwd_str),
         baoclaw_config.model.clone(),
+        Arc::clone(&tool_health),
     ));
 
     // Create memory archive and cleanup scheduler for periodic memory maintenance
@@ -758,6 +774,7 @@ pub(super) async fn start_cron_scheduler(shared: &SharedState) {
         let cron_file_cache = Arc::clone(&shared.file_cache);
         let cron_tool_result_store = shared.tool_result_store.as_ref().map(Arc::clone);
         let cron_hook_manager = Arc::clone(&shared.hook_manager);
+        let cron_tool_health = Arc::clone(&shared.tool_health);
 
         let run_fn: Arc<
             dyn Fn(String, Option<String>) -> tokio::task::JoinHandle<String> + Send + Sync,
@@ -771,6 +788,7 @@ pub(super) async fn start_cron_scheduler(shared: &SharedState) {
             let file_cache = Arc::clone(&cron_file_cache);
             let tool_result_store = cron_tool_result_store.as_ref().map(Arc::clone);
             let hook_manager = Arc::clone(&cron_hook_manager);
+            let tool_health = Arc::clone(&cron_tool_health);
 
             let job_session_id = format!("cron-{}", &uuid::Uuid::new_v4().to_string()[..8]);
 
@@ -786,7 +804,7 @@ pub(super) async fn start_cron_scheduler(shared: &SharedState) {
                     tools,
                     api_client,
                     model: baoclaw_config.model.clone(),
-                    tool_health: None,
+                    tool_health: Some(tool_health),
                     thinking_config,
                     max_turns: Some(10),
                     max_budget_usd: Some(0.5),

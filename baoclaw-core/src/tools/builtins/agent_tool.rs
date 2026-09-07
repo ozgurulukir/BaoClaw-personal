@@ -14,6 +14,9 @@ pub struct AgentTool {
     api_client: Arc<UnifiedClient>,
     available_tools: Vec<Arc<dyn Tool>>,
     default_max_turns: u32,
+    /// Daemon-wide tool-health tracker shared with sub-agent engines, so
+    /// failure accumulation and Disabled blocking cover sub-agents too.
+    tool_health: crate::engine::tool_health::ToolHealthHandle,
 }
 
 impl AgentTool {
@@ -21,11 +24,13 @@ impl AgentTool {
     pub fn new_with_full_tools(
         api_client: Arc<UnifiedClient>,
         available_tools: Vec<Arc<dyn Tool>>,
+        tool_health: crate::engine::tool_health::ToolHealthHandle,
     ) -> Self {
         Self {
             api_client,
             available_tools,
             default_max_turns: 10,
+            tool_health,
         }
     }
 }
@@ -146,7 +151,7 @@ impl Tool for AgentTool {
             permission: None,
             telemetry: None,
             evolution: None,
-            tool_health: None,
+            tool_health: Some(std::sync::Arc::clone(&self.tool_health)),
         };
 
         let mut sub_engine = QueryEngine::new(sub_engine_config);
@@ -218,31 +223,51 @@ mod tests {
 
     #[test]
     fn test_agent_tool_name() {
-        let tool = AgentTool::new_with_full_tools(make_api_client(), vec![]);
+        let tool = AgentTool::new_with_full_tools(
+            make_api_client(),
+            vec![],
+            std::sync::Arc::new(crate::engine::tool_health::ToolHealthTracker::default()),
+        );
         assert_eq!(tool.name(), "AgentTool");
     }
 
     #[test]
     fn test_agent_tool_aliases() {
-        let tool = AgentTool::new_with_full_tools(make_api_client(), vec![]);
+        let tool = AgentTool::new_with_full_tools(
+            make_api_client(),
+            vec![],
+            std::sync::Arc::new(crate::engine::tool_health::ToolHealthTracker::default()),
+        );
         assert_eq!(tool.aliases(), vec!["Agent"]);
     }
 
     #[test]
     fn test_agent_tool_is_not_read_only() {
-        let tool = AgentTool::new_with_full_tools(make_api_client(), vec![]);
+        let tool = AgentTool::new_with_full_tools(
+            make_api_client(),
+            vec![],
+            std::sync::Arc::new(crate::engine::tool_health::ToolHealthTracker::default()),
+        );
         assert!(!tool.is_read_only(&json!({})));
     }
 
     #[test]
     fn test_agent_tool_is_concurrency_safe() {
-        let tool = AgentTool::new_with_full_tools(make_api_client(), vec![]);
+        let tool = AgentTool::new_with_full_tools(
+            make_api_client(),
+            vec![],
+            std::sync::Arc::new(crate::engine::tool_health::ToolHealthTracker::default()),
+        );
         assert!(tool.is_concurrency_safe(&json!({})));
     }
 
     #[test]
     fn test_agent_tool_input_schema() {
-        let tool = AgentTool::new_with_full_tools(make_api_client(), vec![]);
+        let tool = AgentTool::new_with_full_tools(
+            make_api_client(),
+            vec![],
+            std::sync::Arc::new(crate::engine::tool_health::ToolHealthTracker::default()),
+        );
         let schema = tool.input_schema();
         assert_eq!(schema.schema_type, "object");
         assert_eq!(schema.required, Some(vec!["prompt".to_string()]));
@@ -255,13 +280,21 @@ mod tests {
 
     #[test]
     fn test_agent_tool_default_max_turns() {
-        let tool = AgentTool::new_with_full_tools(make_api_client(), vec![]);
+        let tool = AgentTool::new_with_full_tools(
+            make_api_client(),
+            vec![],
+            std::sync::Arc::new(crate::engine::tool_health::ToolHealthTracker::default()),
+        );
         assert_eq!(tool.default_max_turns, 10);
     }
 
     #[tokio::test]
     async fn test_agent_tool_validate_missing_prompt() {
-        let tool = AgentTool::new_with_full_tools(make_api_client(), vec![]);
+        let tool = AgentTool::new_with_full_tools(
+            make_api_client(),
+            vec![],
+            std::sync::Arc::new(crate::engine::tool_health::ToolHealthTracker::default()),
+        );
         let (_tx, rx) = tokio::sync::watch::channel(false);
         let ctx = ToolContext {
             cwd: std::path::PathBuf::from("/tmp"),
@@ -278,7 +311,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_agent_tool_validate_empty_prompt() {
-        let tool = AgentTool::new_with_full_tools(make_api_client(), vec![]);
+        let tool = AgentTool::new_with_full_tools(
+            make_api_client(),
+            vec![],
+            std::sync::Arc::new(crate::engine::tool_health::ToolHealthTracker::default()),
+        );
         let (_tx, rx) = tokio::sync::watch::channel(false);
         let ctx = ToolContext {
             cwd: std::path::PathBuf::from("/tmp"),
@@ -295,7 +332,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_agent_tool_validate_valid_prompt() {
-        let tool = AgentTool::new_with_full_tools(make_api_client(), vec![]);
+        let tool = AgentTool::new_with_full_tools(
+            make_api_client(),
+            vec![],
+            std::sync::Arc::new(crate::engine::tool_health::ToolHealthTracker::default()),
+        );
         let (_tx, rx) = tokio::sync::watch::channel(false);
         let ctx = ToolContext {
             cwd: std::path::PathBuf::from("/tmp"),
@@ -314,7 +355,11 @@ mod tests {
 
     #[test]
     fn test_agent_tool_prompt_description() {
-        let tool = AgentTool::new_with_full_tools(make_api_client(), vec![]);
+        let tool = AgentTool::new_with_full_tools(
+            make_api_client(),
+            vec![],
+            std::sync::Arc::new(crate::engine::tool_health::ToolHealthTracker::default()),
+        );
         let prompt = tool.prompt();
         assert!(prompt.contains("sub-agent"));
     }

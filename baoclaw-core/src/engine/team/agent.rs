@@ -251,6 +251,8 @@ pub struct SubAgentExecutor {
     context_window: u64,
     /// Auto-compact threshold ratio for sub-agent engine config.
     auto_compact_threshold_ratio: f64,
+    /// Optional shared tool-health tracker for the sub-agent engine.
+    tool_health: Option<crate::engine::tool_health::ToolHealthHandle>,
 }
 
 impl SubAgentExecutor {
@@ -272,6 +274,7 @@ impl SubAgentExecutor {
             agent_id,
             context_window: 200_000,
             auto_compact_threshold_ratio: 0.7,
+            tool_health: None,
         }
     }
 
@@ -325,6 +328,7 @@ impl SubAgentExecutor {
 
         // Create engine config
         let config = QueryEngineConfig {
+            tool_health: self.tool_health.clone(),
             cwd: self.cwd.clone(),
             tools: filtered_tools,
             api_client: Arc::clone(&self.api_client),
@@ -353,7 +357,6 @@ impl SubAgentExecutor {
             permission: None,
             telemetry: None,
             evolution: None,
-            tool_health: None,
         };
 
         // Create engine and submit prompt

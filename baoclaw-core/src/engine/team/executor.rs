@@ -125,6 +125,8 @@ pub struct TeamExecutor {
     default_cwd: PathBuf,
     /// Default model.
     default_model: String,
+    /// Shared tool-health tracker (failure stats accumulate daemon-wide).
+    tool_health: crate::engine::tool_health::ToolHealthHandle,
     /// Default policy for team execution.
     default_policy: crate::engine::team::policy::TeamPolicy,
     /// Model context window (tokens) — propagated from engine config.
@@ -140,12 +142,14 @@ impl TeamExecutor {
         tools: Vec<Arc<dyn Tool>>,
         default_cwd: PathBuf,
         default_model: String,
+        tool_health: crate::engine::tool_health::ToolHealthHandle,
     ) -> Self {
         Self {
             api_client,
             tools,
             teams: Arc::new(RwLock::new(HashMap::new())),
             abort_handles: Arc::new(RwLock::new(HashMap::new())),
+            tool_health,
             default_cwd,
             default_model,
             default_policy: crate::engine::team::policy::TeamPolicy::default(),
@@ -194,6 +198,7 @@ impl TeamExecutor {
         default_cwd: PathBuf,
         default_model: String,
         default_policy: crate::engine::team::policy::TeamPolicy,
+        tool_health: crate::engine::tool_health::ToolHealthHandle,
     ) -> Self {
         Self {
             api_client,
@@ -203,6 +208,7 @@ impl TeamExecutor {
             default_cwd,
             default_model,
             default_policy,
+            tool_health,
             context_window: 1_000_000,         // Default context window
             auto_compact_threshold_ratio: 0.7, // Default auto-compact threshold ratio
         }
@@ -418,6 +424,7 @@ impl TeamExecutor {
                 crate::engine::team::policy::AgentPolicy::from_team_policy(&team_policy, 1);
             let ctx_window = self.context_window;
             let compact_ratio = self.auto_compact_threshold_ratio;
+            let tool_health_clone = std::sync::Arc::clone(&self.tool_health);
 
             join_set.spawn(async move {
                 let result = Self::execute_single_agent(
@@ -431,6 +438,7 @@ impl TeamExecutor {
                     agent_id_clone.clone(),
                     ctx_window,
                     compact_ratio,
+                    Some(tool_health_clone),
                 )
                 .await;
 
@@ -562,6 +570,7 @@ impl TeamExecutor {
                 agent.id.clone(),
                 self.context_window,
                 self.auto_compact_threshold_ratio,
+                Some(std::sync::Arc::clone(&self.tool_health)),
             )
             .await;
 
@@ -740,6 +749,7 @@ impl TeamExecutor {
                 let agent_id_for_result = agent_id.clone();
                 let ctx_window = self.context_window;
                 let compact_ratio = self.auto_compact_threshold_ratio;
+                let tool_health_clone = std::sync::Arc::clone(&self.tool_health);
 
                 join_set.spawn(async move {
                     let result = Self::execute_single_agent(
@@ -753,6 +763,7 @@ impl TeamExecutor {
                         agent_id_for_result.clone(),
                         ctx_window,
                         compact_ratio,
+                        Some(tool_health_clone),
                     )
                     .await;
 
@@ -903,6 +914,7 @@ impl TeamExecutor {
         agent_id: String,
         context_window: u64,
         auto_compact_threshold_ratio: f64,
+        tool_health: Option<crate::engine::tool_health::ToolHealthHandle>,
     ) -> Result<crate::engine::team::policy::AgentResult, TeamError> {
         use crate::engine::team::policy::{AgentResult, AgentUsage};
 
@@ -929,6 +941,7 @@ impl TeamExecutor {
         };
 
         let config = QueryEngineConfig {
+            tool_health,
             cwd,
             tools: filtered_tools,
             api_client,
@@ -956,7 +969,6 @@ impl TeamExecutor {
             permission: None,
             telemetry: None,
             evolution: None,
-            tool_health: None,
         };
 
         let mut engine = QueryEngine::new(config);
@@ -1166,6 +1178,7 @@ mod tests {
             tools,
             PathBuf::from("/tmp"),
             "claude-sonnet-4-20250514".to_string(),
+            std::sync::Arc::new(crate::engine::tool_health::ToolHealthTracker::new()),
         )
     }
 

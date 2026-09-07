@@ -32,6 +32,10 @@ pub enum ToolStatus {
 }
 
 /// Manages tool health across sessions.
+/// Shared daemon-wide handle for the tracker (interior mutability via the
+/// records Mutex means `Arc` alone is enough to share and mutate).
+pub type ToolHealthHandle = std::sync::Arc<ToolHealthTracker>;
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ToolHealthTracker {
     /// Interior mutability: the tracker is reached through a shared

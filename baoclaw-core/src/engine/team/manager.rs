@@ -27,6 +27,8 @@ pub struct TeamManager {
     default_cwd: PathBuf,
     /// Default model.
     default_model: String,
+    /// Shared tool-health tracker (failure stats accumulate daemon-wide).
+    tool_health: crate::engine::tool_health::ToolHealthHandle,
 }
 
 impl TeamManager {
@@ -36,6 +38,7 @@ impl TeamManager {
         tools: Vec<Arc<dyn Tool>>,
         default_cwd: PathBuf,
         default_model: String,
+        tool_health: crate::engine::tool_health::ToolHealthHandle,
     ) -> Self {
         Self {
             teams: Arc::new(RwLock::new(HashMap::new())),
@@ -43,6 +46,7 @@ impl TeamManager {
             tools,
             default_cwd,
             default_model,
+            tool_health,
         }
     }
 

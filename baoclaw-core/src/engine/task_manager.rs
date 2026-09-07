@@ -37,6 +37,8 @@ pub struct TaskManager {
     context_window: u64,
     /// Auto-compact threshold ratio — propagated from engine config.
     auto_compact_threshold_ratio: f64,
+    /// Shared tool-health tracker (failure stats accumulate daemon-wide).
+    tool_health: crate::engine::tool_health::ToolHealthHandle,
 }
 
 impl TaskManager {
@@ -46,12 +48,14 @@ impl TaskManager {
         tools: Vec<Arc<dyn Tool>>,
         context_window: u64,
         auto_compact_threshold_ratio: f64,
+        tool_health: crate::engine::tool_health::ToolHealthHandle,
     ) -> Self {
         Self {
             tasks: Arc::new(RwLock::new(HashMap::new())),
             abort_handles: Arc::new(RwLock::new(HashMap::new())),
             api_client,
             tools,
+            tool_health,
             context_window,
             auto_compact_threshold_ratio,
         }
@@ -63,12 +67,14 @@ impl TaskManager {
         tools: Vec<Arc<dyn Tool>>,
         context_window: u64,
         auto_compact_threshold_ratio: f64,
+        tool_health: crate::engine::tool_health::ToolHealthHandle,
     ) -> Self {
         Self::new(
             api_client,
             tools,
             context_window,
             auto_compact_threshold_ratio,
+            tool_health,
         )
     }
 
@@ -110,9 +116,11 @@ impl TaskManager {
         let tid = task_id.clone();
         let ctx_window = self.context_window;
         let compact_ratio = self.auto_compact_threshold_ratio;
+        let tool_health = std::sync::Arc::clone(&self.tool_health);
 
         tokio::spawn(async move {
             let config = QueryEngineConfig {
+                tool_health: Some(tool_health),
                 cwd,
                 tools,
                 api_client,
@@ -140,7 +148,6 @@ impl TaskManager {
                 permission: None,
                 telemetry: None,
                 evolution: None,
-                tool_health: None,
             };
 
             let mut engine = QueryEngine::new(config);
@@ -241,7 +248,13 @@ mod tests {
     async fn test_create_task_returns_id() {
         let api_client = make_api_client();
         let tools: Vec<Arc<dyn Tool>> = vec![];
-        let manager = TaskManager::new(api_client, tools, 200_000, 0.7);
+        let manager = TaskManager::new(
+            api_client,
+            tools,
+            200_000,
+            0.7,
+            std::sync::Arc::new(crate::engine::tool_health::ToolHealthTracker::new()),
+        );
 
         let task_id = manager
             .create_task(
@@ -260,7 +273,13 @@ mod tests {
     async fn test_list_tasks_after_create() {
         let api_client = make_api_client();
         let tools: Vec<Arc<dyn Tool>> = vec![];
-        let manager = TaskManager::new(api_client, tools, 200_000, 0.7);
+        let manager = TaskManager::new(
+            api_client,
+            tools,
+            200_000,
+            0.7,
+            std::sync::Arc::new(crate::engine::tool_health::ToolHealthTracker::new()),
+        );
 
         let task_id = manager
             .create_task(
@@ -281,7 +300,13 @@ mod tests {
     async fn test_get_task_status() {
         let api_client = make_api_client();
         let tools: Vec<Arc<dyn Tool>> = vec![];
-        let manager = TaskManager::new(api_client, tools, 200_000, 0.7);
+        let manager = TaskManager::new(
+            api_client,
+            tools,
+            200_000,
+            0.7,
+            std::sync::Arc::new(crate::engine::tool_health::ToolHealthTracker::new()),
+        );
 
         let task_id = manager
             .create_task(
@@ -303,7 +328,13 @@ mod tests {
     async fn test_get_task_status_not_found() {
         let api_client = make_api_client();
         let tools: Vec<Arc<dyn Tool>> = vec![];
-        let manager = TaskManager::new(api_client, tools, 200_000, 0.7);
+        let manager = TaskManager::new(
+            api_client,
+            tools,
+            200_000,
+            0.7,
+            std::sync::Arc::new(crate::engine::tool_health::ToolHealthTracker::new()),
+        );
 
         let task = manager.get_task_status("nonexistent").await;
         assert!(task.is_none());
@@ -313,7 +344,13 @@ mod tests {
     async fn test_stop_task() {
         let api_client = make_api_client();
         let tools: Vec<Arc<dyn Tool>> = vec![];
-        let manager = TaskManager::new(api_client, tools, 200_000, 0.7);
+        let manager = TaskManager::new(
+            api_client,
+            tools,
+            200_000,
+            0.7,
+            std::sync::Arc::new(crate::engine::tool_health::ToolHealthTracker::new()),
+        );
 
         let task_id = manager
             .create_task(
@@ -336,7 +373,13 @@ mod tests {
     async fn test_stop_nonexistent_task() {
         let api_client = make_api_client();
         let tools: Vec<Arc<dyn Tool>> = vec![];
-        let manager = TaskManager::new(api_client, tools, 200_000, 0.7);
+        let manager = TaskManager::new(
+            api_client,
+            tools,
+            200_000,
+            0.7,
+            std::sync::Arc::new(crate::engine::tool_health::ToolHealthTracker::new()),
+        );
 
         let stopped = manager.stop_task("nonexistent").await;
         assert!(!stopped);
@@ -346,7 +389,13 @@ mod tests {
     async fn test_list_empty_tasks() {
         let api_client = make_api_client();
         let tools: Vec<Arc<dyn Tool>> = vec![];
-        let manager = TaskManager::new(api_client, tools, 200_000, 0.7);
+        let manager = TaskManager::new(
+            api_client,
+            tools,
+            200_000,
+            0.7,
+            std::sync::Arc::new(crate::engine::tool_health::ToolHealthTracker::new()),
+        );
 
         let tasks = manager.list_tasks().await;
         assert!(tasks.is_empty());
