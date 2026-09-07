@@ -224,12 +224,32 @@ pub async fn execute_tool_with_permission(
             // Read-only tools are never worth a prompt: the manager defaults
             // to Ask for everything, and prompting for reads would regress
             // the daemon UX (the direct path lets read-only Ask through too).
+            //
+            // Exception: a Glob/Grep request whose `path` resolves outside
+            // the project cwd (and outside the granted/search-allowed dirs)
+            // MUST prompt — reads through those tools are how an agent
+            // looks around the rest of the filesystem.
+            let mut search_grant: Option<std::path::PathBuf> = None;
             if tool.is_read_only(&request.input) {
-                eprintln!(
-                    "[permissions] WARN: Ask permission on read-only tool '{}'; proceeding without confirmation",
-                    tool_name
-                );
-                return call_tool_and_wrap(tool, request, context, progress).await;
+                match out_of_cwd_search_target(&tool_name, &request.input, &context.cwd) {
+                    None => {
+                        eprintln!(
+                            "[permissions] WARN: Ask permission on read-only tool '{}'; proceeding without confirmation",
+                            tool_name
+                        );
+                        return call_tool_and_wrap(tool, request, context, progress).await;
+                    }
+                    Some(target) => {
+                        // Pre-approved (config knob or a prior Always grant)
+                        // → the tool's own validator will accept it; skip
+                        // the prompt.
+                        if dir_granted(&permission.bridge.granted_dirs, &target) {
+                            return call_tool_and_wrap(tool, request, context, progress).await;
+                        }
+                        search_grant = Some(target);
+                        // Fall through to the interactive prompt below.
+                    }
+                }
             }
 
             // Live knob read: every prompt uses the current config values
@@ -264,10 +284,39 @@ pub async fn execute_tool_with_permission(
 
             match decision {
                 PermissionDecision::Allow => {
+                    // One-shot grant: the approved dir is pushed for exactly
+                    // this call. The guard removes it BY IDENTITY on drop, so
+                    // concurrent one-shot grants (tools run in parallel) can
+                    // never pop each other's entry, and a dropped future still
+                    // cleans up after itself.
+                    let _grant_guard = search_grant
+                        .map(|dir| OneShotGrantGuard::push(&permission.bridge.granted_dirs, dir));
                     call_tool_and_wrap(tool, request, context, progress).await
                 }
                 PermissionDecision::AllowAlways { rule } => {
-                    {
+                    if let Some(dir) = search_grant.clone() {
+                        // Directory-scoped "Always allow": record the granted
+                        // dir (live + persisted) instead of the client's
+                        // whole-tool rule, so only this directory opens up.
+                        push_granted_dir(&permission.bridge.granted_dirs, dir.clone());
+                        let dir_str = dir.to_string_lossy().to_string();
+                        {
+                            let manager = permission.bridge.manager.write().await;
+                            manager.update_context(|c| {
+                                if !c.additional_search_dirs.contains(&dir_str) {
+                                    c.additional_search_dirs.push(dir_str.clone());
+                                }
+                            });
+                            // The write guard doubles as the serialization point
+                            // against the permission.* RPC handlers that save
+                            // the same file.
+                            if persist_grants {
+                                crate::permissions::persist_context_to_config(
+                                    &manager.get_context(),
+                                );
+                            }
+                        }
+                    } else {
                         let manager = permission.bridge.manager.write().await;
                         manager.add_allow_always_rule("user", &tool_name, rule);
                         // The write guard doubles as the serialization point
@@ -285,6 +334,81 @@ pub async fn execute_tool_with_permission(
                     output: Value::String("Permission denied by user".to_string()),
                     is_error: true,
                 },
+            }
+        }
+    }
+}
+
+/// If `input` asks the Glob/Grep tools to operate outside the project cwd,
+/// return the lexically-resolved target (directory or file) that a grant
+/// would cover. `None` = not an out-of-cwd search (no prompt needed for
+/// boundary reasons).
+fn out_of_cwd_search_target(
+    tool_name: &str,
+    input: &Value,
+    cwd: &std::path::Path,
+) -> Option<std::path::PathBuf> {
+    if tool_name != "GlobTool" && tool_name != "GrepTool" {
+        return None;
+    }
+    let path = input.get("path")?.as_str()?.trim();
+    if path.is_empty() {
+        return None;
+    }
+    // The tools' validator rejects anything outside cwd + granted dirs, so
+    // "the validator would fail" is exactly the prompt condition. (An `Ok`
+    // here means the path is already inside the boundary.)
+    match super::builtins::path_utils::resolve_and_validate_path(path, cwd, &[]) {
+        Ok(_) => None,
+        Err(_) => {
+            // Lexical resolve for the grant record; the tool re-runs the full
+            // validation (including symlink canonicalization) after approval.
+            let joined = cwd.join(path);
+            Some(crate::tools::builtins::path_utils::normalize_path(&joined))
+        }
+    }
+}
+
+fn dir_granted(
+    granted_dirs: &crate::permissions::GrantedSearchDirs,
+    target: &std::path::Path,
+) -> bool {
+    granted_dirs
+        .read()
+        .map(|dirs| dirs.iter().any(|d| target.starts_with(d)))
+        .unwrap_or(false)
+}
+
+fn push_granted_dir(granted_dirs: &crate::permissions::GrantedSearchDirs, dir: std::path::PathBuf) {
+    if let Ok(mut dirs) = granted_dirs.write() {
+        dirs.push(dir);
+    }
+}
+
+/// One-shot search-dir grant: pushes `dir` on creation and removes exactly
+/// that entry (by identity, not position) when dropped — safe under the
+/// parallel execution of concurrency-safe tools, and leak-free if the
+/// executor future is dropped mid-call.
+struct OneShotGrantGuard {
+    granted_dirs: crate::permissions::GrantedSearchDirs,
+    dir: std::path::PathBuf,
+}
+
+impl OneShotGrantGuard {
+    fn push(granted_dirs: &crate::permissions::GrantedSearchDirs, dir: std::path::PathBuf) -> Self {
+        push_granted_dir(granted_dirs, dir.clone());
+        Self {
+            granted_dirs: crate::permissions::GrantedSearchDirs::clone(granted_dirs),
+            dir,
+        }
+    }
+}
+
+impl Drop for OneShotGrantGuard {
+    fn drop(&mut self) {
+        if let Ok(mut dirs) = self.granted_dirs.write() {
+            if let Some(pos) = dirs.iter().position(|d| d == &self.dir) {
+                dirs.remove(pos);
             }
         }
     }
@@ -945,7 +1069,7 @@ mod tests {
     fn make_manager_ctx() -> ToolPermissionContext {
         ToolPermissionContext {
             mode: PermissionMode::Default,
-            additional_working_directories: std::collections::HashMap::new(),
+            additional_search_dirs: Vec::new(),
             always_allow_rules: std::collections::HashMap::new(),
             always_deny_rules: std::collections::HashMap::new(),
             always_ask_rules: std::collections::HashMap::new(),
@@ -966,6 +1090,7 @@ mod tests {
         let bridge = crate::permissions::PermissionBridge {
             manager: Arc::new(tokio::sync::RwLock::new(manager)),
             gate,
+            granted_dirs: crate::permissions::GrantedSearchDirs::default(),
         };
         (PermissionChannels::new(bridge, event_tx), event_rx)
     }
@@ -1157,6 +1282,161 @@ mod tests {
                 .is_err(),
             "read-only tools must not prompt"
         );
+    }
+
+    // ── Out-of-cwd Glob/Grep search grants ──
+
+    #[test]
+    fn test_one_shot_grant_guard_is_identity_scoped() {
+        // Two overlapping one-shot grants (tools run in parallel): each guard
+        // removes only its own entry, whatever the drop order.
+        let granted: crate::permissions::GrantedSearchDirs =
+            std::sync::Arc::new(std::sync::RwLock::new(Vec::new()));
+
+        let g1 = OneShotGrantGuard::push(&granted, PathBuf::from("/a"));
+        {
+            let _g2 = OneShotGrantGuard::push(&granted, PathBuf::from("/b"));
+            assert_eq!(
+                granted.read().unwrap().as_slice(),
+                [PathBuf::from("/a"), PathBuf::from("/b")]
+            );
+        } // g2 dropped: /b removed, /a untouched
+        assert_eq!(granted.read().unwrap().as_slice(), [PathBuf::from("/a")]);
+        drop(g1); // g1 dropped: /a removed
+        assert!(granted.read().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_out_of_cwd_search_prompts_and_allow_once_executes() {
+        let tool = MockTool::new("GlobTool").with_read_only(true);
+        let ctx = make_context(); // cwd = /tmp
+        let progress = MockProgressSender;
+        let mut request = make_request("req-search-1", "GlobTool");
+        request.input = json!({"pattern": "*.conf", "path": "/etc"});
+
+        let (channels, mut event_rx) =
+            make_channels(manager_ctx_with_timeout(5), PermissionGate::new());
+
+        let gate = channels.bridge.gate.clone();
+        let responder = tokio::spawn(async move {
+            let event = tokio::time::timeout(Duration::from_secs(2), event_rx.recv())
+                .await
+                .expect("timed out waiting for PermissionRequest")
+                .expect("event channel closed");
+            match event {
+                EngineEvent::PermissionRequest { tool_use_id, .. } => {
+                    gate.respond(&tool_use_id, PermissionDecision::Allow);
+                }
+                other => panic!("unexpected event: {other:?}"),
+            }
+        });
+
+        let result =
+            execute_tool_with_permission(&tool, &request, &ctx, &channels, &progress).await;
+        responder.await.unwrap();
+
+        assert!(!result.is_error);
+        assert_eq!(tool.call_count.load(Ordering::SeqCst), 1);
+        // The one-shot grant is popped after the call.
+        assert!(channels.bridge.granted_dirs.read().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_out_of_cwd_search_granted_runs_without_prompt() {
+        let tool = MockTool::new("GrepTool").with_read_only(true);
+        let ctx = make_context();
+        let progress = MockProgressSender;
+        let mut request = make_request("req-search-2", "GrepTool");
+        request.input = json!({"pattern": "root", "path": "/etc"});
+
+        let (channels, mut event_rx) =
+            make_channels(manager_ctx_with_timeout(5), PermissionGate::new());
+        channels
+            .bridge
+            .granted_dirs
+            .write()
+            .unwrap()
+            .push(PathBuf::from("/etc"));
+
+        let result =
+            execute_tool_with_permission(&tool, &request, &ctx, &channels, &progress).await;
+
+        // Pre-approved directory: no prompt, tool just runs.
+        assert!(event_rx.try_recv().is_err());
+        assert!(!result.is_error);
+        assert_eq!(tool.call_count.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn test_out_of_cwd_search_allow_always_records_dir() {
+        let tool = MockTool::new("GlobTool").with_read_only(true);
+        let ctx = make_context();
+        let progress = MockProgressSender;
+        let mut request = make_request("req-search-3", "GlobTool");
+        request.input = json!({"pattern": "*.conf", "path": "/etc"});
+
+        let (channels, mut event_rx) =
+            make_channels(manager_ctx_with_timeout(5), PermissionGate::new());
+
+        let gate = channels.bridge.gate.clone();
+        let responder = tokio::spawn(async move {
+            let event = tokio::time::timeout(Duration::from_secs(2), event_rx.recv())
+                .await
+                .expect("timed out waiting for PermissionRequest")
+                .expect("event channel closed");
+            if let EngineEvent::PermissionRequest { tool_use_id, .. } = event {
+                gate.respond(&tool_use_id, PermissionDecision::AllowAlways { rule: None });
+            }
+        });
+
+        let result =
+            execute_tool_with_permission(&tool, &request, &ctx, &channels, &progress).await;
+        responder.await.unwrap();
+
+        assert!(!result.is_error);
+        // Directory grant is live for future calls...
+        assert!(channels
+            .bridge
+            .granted_dirs
+            .read()
+            .unwrap()
+            .contains(&PathBuf::from("/etc")));
+        // ...and recorded in the context. (persist_grants=false in this
+        // fixture, so nothing touches the real config.)
+        let ctx_now = channels.bridge.manager.read().await.get_context();
+        assert!(ctx_now.additional_search_dirs.iter().any(|d| d == "/etc"));
+    }
+
+    #[tokio::test]
+    async fn test_out_of_cwd_search_deny_blocks_tool() {
+        let tool = MockTool::new("GlobTool").with_read_only(true);
+        let ctx = make_context();
+        let progress = MockProgressSender;
+        let mut request = make_request("req-search-4", "GlobTool");
+        request.input = json!({"pattern": "*.conf", "path": "/etc"});
+
+        let (channels, mut event_rx) =
+            make_channels(manager_ctx_with_timeout(5), PermissionGate::new());
+
+        let gate = channels.bridge.gate.clone();
+        let responder = tokio::spawn(async move {
+            let event = tokio::time::timeout(Duration::from_secs(2), event_rx.recv())
+                .await
+                .expect("timed out waiting for PermissionRequest")
+                .expect("event channel closed");
+            if let EngineEvent::PermissionRequest { tool_use_id, .. } = event {
+                gate.respond(&tool_use_id, PermissionDecision::Deny);
+            }
+        });
+
+        let result =
+            execute_tool_with_permission(&tool, &request, &ctx, &channels, &progress).await;
+        responder.await.unwrap();
+
+        assert!(result.is_error);
+        assert_eq!(tool.call_count.load(Ordering::SeqCst), 0);
+        // A denial grants nothing.
+        assert!(channels.bridge.granted_dirs.read().unwrap().is_empty());
     }
 
     #[tokio::test]

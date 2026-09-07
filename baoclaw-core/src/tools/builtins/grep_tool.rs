@@ -23,7 +23,12 @@ pub struct GrepMatch {
 
 /// GrepTool — searches file contents using regex patterns.
 /// Respects .gitignore rules via the `ignore` crate.
-pub struct GrepTool;
+pub struct GrepTool {
+    /// Extra directories (or files) this tool may search beyond the project
+    /// cwd — seeded from `permissions.additional_search_dirs` and grown live
+    /// by interactive "Always allow" grants (see [`crate::permissions`]).
+    granted_dirs: crate::permissions::GrantedSearchDirs,
+}
 
 impl Default for GrepTool {
     fn default() -> Self {
@@ -33,7 +38,15 @@ impl Default for GrepTool {
 
 impl GrepTool {
     pub fn new() -> Self {
-        Self
+        Self {
+            granted_dirs: crate::permissions::GrantedSearchDirs::default(),
+        }
+    }
+
+    /// Share the daemon-wide grant list so config seeds and interactive
+    /// grants apply to this tool's boundary checks without a restart.
+    pub fn with_granted_dirs(granted_dirs: crate::permissions::GrantedSearchDirs) -> Self {
+        Self { granted_dirs }
     }
 }
 
@@ -111,8 +124,13 @@ impl Tool for GrepTool {
             .and_then(|v| v.as_str())
             .ok_or_else(|| ToolError::ExecutionFailed("Missing 'pattern' field".to_string()))?;
 
+        let extra_dirs = self
+            .granted_dirs
+            .read()
+            .map(|dirs| dirs.clone())
+            .unwrap_or_default();
         let search_path = match input.get("path").and_then(|v| v.as_str()) {
-            Some(p) => resolve_and_validate_path(p, &context.cwd, &[])
+            Some(p) => resolve_and_validate_path(p, &context.cwd, &extra_dirs)
                 .map_err(ToolError::ExecutionFailed)?,
             None => context.cwd.clone(),
         };

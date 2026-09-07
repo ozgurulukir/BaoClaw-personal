@@ -65,7 +65,7 @@ fn is_within_canonical_boundaries(path: &Path, cwd: &Path, additional_dirs: &[Pa
 }
 
 /// Normalize a path by resolving `.` and `..` components lexically.
-fn normalize_path(path: &Path) -> PathBuf {
+pub fn normalize_path(path: &Path) -> PathBuf {
     let mut components = Vec::new();
     for component in path.components() {
         match component {

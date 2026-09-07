@@ -26,7 +26,12 @@ pub type ToolPermissionRulesBySource = HashMap<String, Vec<PermissionRule>>;
 #[serde(default)]
 pub struct ToolPermissionContext {
     pub mode: PermissionMode,
-    pub additional_working_directories: HashMap<String, String>,
+    /// Extra directories the Glob/Grep search tools may read beyond the
+    /// project cwd. Interactive "Always allow" grants on out-of-cwd search
+    /// prompts append here (live, and persisted when `persist_grants`), and
+    /// the executor consults the same list before deciding to prompt.
+    #[serde(default)]
+    pub additional_search_dirs: Vec<String>,
     pub always_allow_rules: ToolPermissionRulesBySource,
     pub always_deny_rules: ToolPermissionRulesBySource,
     pub always_ask_rules: ToolPermissionRulesBySource,
@@ -362,7 +367,7 @@ impl Default for ToolPermissionContext {
     fn default() -> Self {
         Self {
             mode: PermissionMode::Default,
-            additional_working_directories: HashMap::new(),
+            additional_search_dirs: Vec::new(),
             always_allow_rules: HashMap::new(),
             always_deny_rules: HashMap::new(),
             always_ask_rules: HashMap::new(),
@@ -405,7 +410,7 @@ mod tests {
     fn empty_context() -> ToolPermissionContext {
         ToolPermissionContext {
             mode: PermissionMode::Default,
-            additional_working_directories: HashMap::new(),
+            additional_search_dirs: Vec::new(),
             always_allow_rules: HashMap::new(),
             always_deny_rules: HashMap::new(),
             always_ask_rules: HashMap::new(),
@@ -847,7 +852,7 @@ mod tests {
         }))
         .expect("partial context must deserialize");
         assert_eq!(ctx.mode, PermissionMode::Default);
-        assert!(ctx.additional_working_directories.is_empty());
+        assert!(ctx.additional_search_dirs.is_empty());
         assert_eq!(ctx.always_allow_rules["user"].len(), 1);
         assert!(!ctx.is_bypass_permissions_mode_available);
     }

@@ -9,7 +9,12 @@ const MAX_GLOB_RESULTS: usize = 1000;
 
 /// GlobTool — searches for files by name pattern using glob syntax.
 /// Returns matching file paths relative to the current working directory.
-pub struct GlobTool;
+pub struct GlobTool {
+    /// Extra directories this tool may search beyond the project cwd —
+    /// seeded from `permissions.additional_search_dirs` and grown live by
+    /// interactive "Always allow" grants (see [`crate::permissions`]).
+    granted_dirs: crate::permissions::GrantedSearchDirs,
+}
 
 impl Default for GlobTool {
     fn default() -> Self {
@@ -19,7 +24,15 @@ impl Default for GlobTool {
 
 impl GlobTool {
     pub fn new() -> Self {
-        Self
+        Self {
+            granted_dirs: crate::permissions::GrantedSearchDirs::default(),
+        }
+    }
+
+    /// Share the daemon-wide grant list so config seeds and interactive
+    /// grants apply to this tool's boundary checks without a restart.
+    pub fn with_granted_dirs(granted_dirs: crate::permissions::GrantedSearchDirs) -> Self {
+        Self { granted_dirs }
     }
 }
 
@@ -86,8 +99,13 @@ impl Tool for GlobTool {
             .and_then(|v| v.as_str())
             .ok_or_else(|| ToolError::ExecutionFailed("Missing 'pattern' field".to_string()))?;
 
+        let extra_dirs = self
+            .granted_dirs
+            .read()
+            .map(|dirs| dirs.clone())
+            .unwrap_or_default();
         let base = match input.get("path").and_then(|v| v.as_str()) {
-            Some(p) => resolve_and_validate_path(p, &context.cwd, &[])
+            Some(p) => resolve_and_validate_path(p, &context.cwd, &extra_dirs)
                 .map_err(ToolError::ExecutionFailed)?,
             None => context.cwd.clone(),
         };
@@ -365,6 +383,44 @@ mod tests {
                 .await;
             assert!(result.is_err(), "expected rejection for path {:?}", path);
         }
+    }
+
+    #[tokio::test]
+    async fn test_glob_tool_accepts_granted_dir() {
+        let project = TempDir::new().unwrap();
+        let other = TempDir::new().unwrap();
+        std::fs::write(other.path().join("granted.txt"), "content").unwrap();
+
+        // With the directory granted (config knob / Always-allow), a path
+        // outside the project cwd is accepted; without it, rejected.
+        let tool = GlobTool::with_granted_dirs(Arc::new(std::sync::RwLock::new(vec![other
+            .path()
+            .to_path_buf()])));
+        let ctx = make_context(project.path());
+        let progress = NoopProgress;
+
+        let result = tool
+            .call(
+                json!({"pattern": "*.txt", "path": other.path().to_str().unwrap()}),
+                &ctx,
+                &progress,
+            )
+            .await
+            .unwrap();
+        assert_eq!(result.data["count"], 1);
+
+        let locked = GlobTool::new();
+        assert!(
+            locked
+                .call(
+                    json!({"pattern": "*.txt", "path": other.path().to_str().unwrap()}),
+                    &ctx,
+                    &progress,
+                )
+                .await
+                .is_err(),
+            "ungranted out-of-cwd path must still be rejected"
+        );
     }
 
     #[test]

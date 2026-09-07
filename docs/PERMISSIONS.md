@@ -106,7 +106,7 @@ pub struct PermissionRule {
 ```rust
 pub struct ToolPermissionContext {
     pub mode: PermissionMode,
-    pub additional_working_directories: HashMap<String, String>,
+    pub additional_search_dirs: Vec<String>,  // dirs Glob/Grep may search beyond cwd
     pub always_allow_rules: ToolPermissionRulesBySource,  // HashMap<source, Vec<PermissionRule>>
     pub always_deny_rules: ToolPermissionRulesBySource,
     pub always_ask_rules: ToolPermissionRulesBySource,
@@ -445,13 +445,26 @@ User sends message → LLM returns tool_use
 
 ## 9. Configuration
 
+### Glob/Grep out-of-cwd searches (`additional_search_dirs`)
+
+The Glob and Grep tools can only read inside the project cwd **plus** the
+directories in `permissions.additional_search_dirs` (and the default
+`~/.baoclaw`, mirroring the file tools). A search targeting any other
+directory triggers an interactive permission prompt showing the requested
+path; the user can **allow** it for that single call, or **always allow**,
+which adds the directory to `additional_search_dirs` (live immediately, and
+persisted to config when `persist_grants` is on). Other channels' "always
+allow" buttons map to the same directory-scoped grant — never a whole-tool
+opening. Headless contexts (cron, sub-agents) have no one to ask: they get
+cwd + config dirs only, and anything else fails closed as before.
+
 ### The permissions field in ~/.baoclaw/config.json
 
 ```json
 {
   "permissions": {
     "mode": "Default",
-    "additional_working_directories": {},
+    "additional_search_dirs": ["/opt/shared-data"],
     "always_allow_rules": {
       "builtin": [
         { "tool_name": "Read", "rule_content": null },

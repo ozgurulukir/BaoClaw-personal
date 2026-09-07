@@ -23,9 +23,8 @@ pub use bash_tool::BashTool;
 pub use file_edit_tool::FileEditTool;
 pub use file_read_tool::FileReadTool;
 pub use file_write_tool::FileWriteTool;
-// TODO: re-enable when GlobTool/GrepTool are used
-// pub use glob_tool::GlobTool;
-// pub use grep_tool::GrepTool;
+pub use glob_tool::GlobTool;
+pub use grep_tool::GrepTool;
 pub use memory_tool::MemoryTool;
 pub use notebook_edit_tool::NotebookEditTool;
 pub use project_note_tool::ProjectNoteTool;

@@ -11,7 +11,14 @@ use manager::PermissionManager;
 /// user interactively. Cloned per turn into the query loop; the gate shares
 /// its pending-request map across clones, so a `permissionResponse` arriving
 /// on any daemon connection resolves prompts from every session.
-///
+/// Live allow-list of extra directories the Glob/Grep search tools may read
+/// beyond the project cwd. Seeded at startup from
+/// `ToolPermissionContext::additional_search_dirs` (config
+/// `extra["permissions"]`), grown by interactive "Always allow" grants in the
+/// executor, and read by the tools themselves on every call — so grants apply
+/// to later calls without a restart.
+pub type GrantedSearchDirs = Arc<std::sync::RwLock<Vec<std::path::PathBuf>>>;
+
 /// The prompt timeout and grant-persistence settings are NOT carried here —
 /// they live on `ToolPermissionContext` (config `extra["permissions"]`) and
 /// are read live from the shared manager at each prompt, so config changes
@@ -20,6 +27,9 @@ use manager::PermissionManager;
 pub struct PermissionBridge {
     pub manager: Arc<tokio::sync::RwLock<PermissionManager>>,
     pub gate: gate::PermissionGate,
+    /// Out-of-cwd directories Glob/Grep are allowed to search (see
+    /// [`GrantedSearchDirs`]).
+    pub granted_dirs: GrantedSearchDirs,
 }
 
 /// Write the current permission rules to ~/.baoclaw/config.json

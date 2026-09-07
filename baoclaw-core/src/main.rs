@@ -45,6 +45,8 @@ struct SharedState {
     api_client: Arc<UnifiedClient>,
     permission_gate: PermissionGate,
     permission_manager: Arc<tokio::sync::RwLock<permissions::manager::PermissionManager>>,
+    /// Out-of-cwd directories Glob/Grep may search (config seed + live grants).
+    granted_dirs: permissions::GrantedSearchDirs,
     task_manager: Arc<TaskManager>,
     state_manager: Arc<StateManager>,
     baoclaw_config: BaoclawConfig,
@@ -281,6 +283,7 @@ fn build_shared_engine(
         permission: Some(PermissionBridge {
             manager: Arc::clone(&shared.permission_manager),
             gate: shared.permission_gate.clone(),
+            granted_dirs: Arc::clone(&shared.granted_dirs),
         }),
     })
 }
@@ -1081,7 +1084,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (baoclaw_config, api_client) = startup::load_config_and_api_client();
 
     // Build engine tools (core tools + AgentTool + ToolSearchTool)
-    let (evolution_engine, engine_tools) =
+    let (evolution_engine, engine_tools, granted_search_dirs) =
         startup::build_engine_tools(&opts.cwd_str, &opts.sandbox_config, &api_client);
 
     // Load skill prompt + long-term memory, combine into append_system_prompt
@@ -1101,6 +1104,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         baoclaw_config,
         api_client,
         engine_tools,
+        granted_search_dirs,
         evolution_engine,
         memory_store,
         user_profile,

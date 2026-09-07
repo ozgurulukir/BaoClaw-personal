@@ -376,11 +376,18 @@ pub(super) fn build_engine_tools(
 ) -> (
     Arc<engine::evolution::EvolutionEngine>,
     Vec<Arc<dyn tools::Tool>>,
+    permissions::GrantedSearchDirs,
 ) {
     // Allow tools to access ~/.baoclaw/ in addition to project cwd
     let home_dir = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
     let baoclaw_home = std::path::PathBuf::from(&home_dir).join(".baoclaw");
-    let additional_dirs = vec![baoclaw_home];
+    let additional_dirs = vec![baoclaw_home.clone()];
+
+    // Shared allow-list of extra directories Glob/Grep may search (config
+    // seed + interactive "Always allow" grants). Seeded after the permission
+    // context loads; the Arc is shared with the executor via SharedState so
+    // grants apply without a restart.
+    let granted_search_dirs = permissions::GrantedSearchDirs::default();
 
     // Create evolution engine for self-improvement
     let evolution_engine = Arc::new(engine::evolution::EvolutionEngine::new(
@@ -398,6 +405,12 @@ pub(super) fn build_engine_tools(
         Arc::new(FileReadTool::new(additional_dirs.clone())),
         Arc::new(FileWriteTool::new(additional_dirs.clone())),
         Arc::new(FileEditTool::new(additional_dirs.clone())),
+        Arc::new(tools::builtins::GlobTool::with_granted_dirs(Arc::clone(
+            &granted_search_dirs,
+        ))),
+        Arc::new(tools::builtins::GrepTool::with_granted_dirs(Arc::clone(
+            &granted_search_dirs,
+        ))),
         Arc::new(WebFetchTool::new()),
         Arc::new(WebSearchTool::new()),
         Arc::new(ImageGenTool::new()),
@@ -483,7 +496,7 @@ pub(super) fn build_engine_tools(
         all
     };
 
-    (evolution_engine, engine_tools)
+    (evolution_engine, engine_tools, granted_search_dirs)
 }
 
 /// Load skill prompt, long-term memory, and the user profile; combine them
@@ -593,6 +606,7 @@ pub(super) async fn assemble_shared_state(
     baoclaw_config: BaoclawConfig,
     api_client: Arc<UnifiedClient>,
     engine_tools: Vec<Arc<dyn tools::Tool>>,
+    granted_search_dirs: permissions::GrantedSearchDirs,
     evolution_engine: Arc<engine::evolution::EvolutionEngine>,
     memory_store: Arc<engine::memory::MemoryStore>,
     user_profile: Arc<engine::user_profile::UserProfileManager>,
@@ -644,6 +658,20 @@ pub(super) async fn assemble_shared_state(
             mgr.update_context(|c| *c = ctx);
         }
     }
+    // Seed the search-dir allow-list: config (`permissions.additional_search_dirs`)
+    // plus the default ~/.baoclaw parity the file tools already get. Grown
+    // live by interactive "Always allow" grants in the executor.
+    let granted_dirs = Arc::clone(&granted_search_dirs);
+    {
+        let home_dir = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
+        let mut dirs = granted_dirs.write().unwrap();
+        dirs.push(std::path::PathBuf::from(home_dir).join(".baoclaw"));
+        if let Ok(ctx) = permission_manager.try_read() {
+            for d in &ctx.get_context().additional_search_dirs {
+                dirs.push(std::path::PathBuf::from(d));
+            }
+        }
+    }
 
     // Create TaskManager for background task execution
     let task_manager = Arc::new(TaskManager::new(
@@ -674,6 +702,7 @@ pub(super) async fn assemble_shared_state(
         api_client,
         permission_gate,
         permission_manager,
+        granted_dirs,
         task_manager,
         state_manager,
         baoclaw_config,
