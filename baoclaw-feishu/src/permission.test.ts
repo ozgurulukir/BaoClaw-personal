@@ -74,7 +74,8 @@ test("'always' forwards allow_always with rule set to the tool name", async () =
   pm.registerRequest("chat1", "tu_2", "Bash", () => {});
 
   const reply = await pm.handleResponse("chat1", "always", control);
-  assert.equal(reply?.decision, "allow_always");
+  assert.ok(reply && reply !== "late");
+  assert.equal(reply.decision, "allow_always");
   assert.equal(control.calls[0].params.decision, "allow_always");
   assert.equal(control.calls[0].params.rule, "Bash");
 });
@@ -111,6 +112,9 @@ test("supersede invokes onExpire with the OLD id and reason 'superseded'", () =>
 
   assert.deepEqual(fired, [{ id: "tu_old", reason: "superseded" }]);
   assert.equal(pm.getPending("chat1")?.tool_use_id, "tu_new");
+  // Supersede also marks the chat as recently resolved, so a late keyword
+  // meant for the OLD prompt is acked instead of reaching the new state.
+  assert.equal(pm.isRecentlyResolved("chat1"), true);
   pm.cleanup();
 });
 
@@ -208,4 +212,36 @@ test("resolvePending resolves without keyword parsing and reports delivery", asy
 
   // Nothing pending → null.
   assert.equal(await pm.resolvePending("chat1", "allow", control), null);
+});
+
+test("handleResponse returns 'late' for a keyword right after expiry", async () => {
+  const pm = new PermissionManager();
+  const control = fakeControl();
+
+  pm.registerRequest("chat1", "tu_1", "Bash", () => {}, 20);
+  await new Promise((r) => setTimeout(r, 60)); // expiry fires
+
+  // Keyword with nothing pending but recently resolved → late ack, and no
+  // permissionResponse is forwarded to the daemon.
+  assert.equal(await pm.handleResponse("chat1", "YES", control), "late");
+  assert.equal(control.calls.length, 0);
+
+  // Non-keyword text is never late — falls through as normal chat.
+  assert.equal(
+    await pm.handleResponse("chat1", "please continue", control),
+    null,
+  );
+
+  // isRecentlyResolved flips off once the grace window elapses.
+  assert.equal(pm.isRecentlyResolved("chat1", 20), false);
+  assert.equal(pm.isRecentlyResolved("chat1", 60_000), true);
+});
+
+test("handleResponse returns 'late' for a keyword after an explicit decision", async () => {
+  const pm = new PermissionManager();
+  const control = fakeControl();
+  pm.registerRequest("chat1", "tu_1", "Bash", () => {}, 60_000);
+  await pm.handleResponse("chat1", "yes", control);
+  assert.equal(await pm.handleResponse("chat1", "yes", control), "late");
+  pm.cleanup();
 });

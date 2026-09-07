@@ -45,6 +45,7 @@ import {
 } from "./commands.js";
 import { formatForFeishu, splitMessage } from "./formatter.js";
 import {
+  LATE_PERMISSION_ACK,
   PermissionManager,
   buildPermissionCard,
   formatPermissionRequest,
@@ -574,20 +575,24 @@ async function handleMessage(event: FeishuEvent): Promise<void> {
   // ── Permission reply check (before commands and the busy bounce) ──
   // A decision necessarily arrives while the turn is parked on the gate, so
   // this must precede both parseCommand and the isProcessing rejection.
-  if (bridge.permissions.getPending(chatId)) {
-    const reply = await bridge.permissions.handleResponse(
-      chatId,
-      text,
-      bridge.controlChannel!,
-    );
-    if (reply) {
-      if (!reply.delivered) {
-        await sendFeishuMessage(chatId, "⚠️ This request has expired.");
-        return;
-      }
-      await sendFeishuMessage(chatId, ackFor(reply.decision));
+  // Right after a request resolved, a keyword is acknowledged as a late
+  // reply so it never leaks into the model as a chat prompt.
+  const permissionReply = await bridge.permissions.handleResponse(
+    chatId,
+    text,
+    bridge.controlChannel!,
+  );
+  if (permissionReply === "late") {
+    await sendFeishuMessage(chatId, LATE_PERMISSION_ACK);
+    return;
+  }
+  if (permissionReply) {
+    if (!permissionReply.delivered) {
+      await sendFeishuMessage(chatId, "⚠️ This request has expired.");
       return;
     }
+    await sendFeishuMessage(chatId, ackFor(permissionReply.decision));
+    return;
   }
 
   // ── Slash command detection ──

@@ -78,6 +78,9 @@ test("supersede invokes onExpire with the OLD id and reason 'superseded'", () =>
 
   assert.deepEqual(fired, [{ id: "tu_old", reason: "superseded" }]);
   assert.equal(mgr.get(1)?.tool_use_id, "tu_new");
+  // Supersede also marks the chat as recently resolved, so a late keyword
+  // meant for the OLD prompt is acked instead of reaching the new state.
+  assert.equal(mgr.isRecentlyResolved(1), true);
   mgr.cleanup();
 });
 
@@ -112,4 +115,21 @@ test("cleanup cancels pending timers so no expiry fires", async () => {
   await new Promise((r) => setTimeout(r, 60));
   assert.equal(fired.length, 0);
   assert.equal(mgr.get(1), null);
+});
+
+test("isRecentlyResolved tracks resolution from expiry and explicit resolve", async () => {
+  const mgr = new TelegramPermissionManager();
+  assert.equal(mgr.isRecentlyResolved(1), false); // nothing ever resolved
+
+  mgr.register(1, { tool_use_id: "tu_1", tool_name: "Bash" }, () => {}, 20);
+  await new Promise((r) => setTimeout(r, 60)); // expiry fires
+  assert.equal(mgr.get(1), null);
+  assert.equal(mgr.isRecentlyResolved(1, 60_000), true);
+  assert.equal(mgr.isRecentlyResolved(1, 20), false); // grace elapsed
+
+  mgr.register(1, { tool_use_id: "tu_2", tool_name: "Bash" }, () => {});
+  mgr.resolve(1);
+  assert.equal(mgr.isRecentlyResolved(1), true);
+  mgr.cleanup();
+  assert.equal(mgr.isRecentlyResolved(1), false); // shutdown wipes history
 });

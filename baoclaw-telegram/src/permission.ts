@@ -39,6 +39,19 @@ export interface PendingPermission {
 const PERMISSION_TIMEOUT_MS = 300_000; // 300 seconds
 
 /**
+ * How long after a chat's permission request leaves the pending state
+ * (timeout, supersede, or decision) a reply keyword is still treated as a
+ * late answer to THAT request rather than as a normal chat message — so a
+ * user replying "yes" to an already-resolved prompt doesn't accidentally
+ * submit "yes" to the model as a chat prompt.
+ */
+const LATE_REPLY_GRACE_MS = 60_000; // 60 seconds
+
+/** Acknowledgement sent for a decision keyword arriving after resolution. */
+export const LATE_PERMISSION_ACK =
+  "⏳ That permission request was already resolved — it timed out or was handled elsewhere. Nothing to approve.";
+
+/**
  * Parse a plain-text reply as a permission decision.
  * Returns null when the text is not a decision keyword — the caller should
  * treat it as a normal chat message.
@@ -114,6 +127,8 @@ export class TelegramPermissionManager {
   private pending = new Map<number, PendingPermission>();
   /** chatId → expiry timer handle. */
   private timers = new Map<number, ReturnType<typeof setTimeout>>();
+  /** chatId → when the pending request last left the pending state. */
+  private lastResolved = new Map<number, number>();
 
   /**
    * Register a prompt for `chatId`, superseding any pending one.
@@ -140,6 +155,7 @@ export class TelegramPermissionManager {
         clearTimeout(oldTimer);
         this.timers.delete(chatId);
       }
+      this.lastResolved.set(chatId, Date.now());
       onExpire(chatId, existing.tool_use_id, "superseded");
     }
 
@@ -147,6 +163,7 @@ export class TelegramPermissionManager {
     const timer = setTimeout(() => {
       this.pending.delete(chatId);
       this.timers.delete(chatId);
+      this.lastResolved.set(chatId, Date.now());
       onExpire(chatId, request.tool_use_id, "timeout");
     }, timeoutMs);
     // Never keep the Node.js event loop alive just for an expiry timer.
@@ -164,6 +181,7 @@ export class TelegramPermissionManager {
     const request = this.pending.get(chatId) ?? null;
     if (request) {
       this.pending.delete(chatId);
+      this.lastResolved.set(chatId, Date.now());
       const timer = this.timers.get(chatId);
       if (timer !== undefined) {
         clearTimeout(timer);
@@ -173,10 +191,24 @@ export class TelegramPermissionManager {
     return request;
   }
 
+  /**
+   * Whether the chat's last permission request left the pending state within
+   * `graceMs` — i.e. a decision keyword arriving now is a late reply to that
+   * request, not a normal chat message.
+   */
+  isRecentlyResolved(
+    chatId: number,
+    graceMs: number = LATE_REPLY_GRACE_MS,
+  ): boolean {
+    const at = this.lastResolved.get(chatId);
+    return at !== undefined && Date.now() - at < graceMs;
+  }
+
   /** Clear every pending request and timer (gateway shutdown). */
   cleanup(): void {
     for (const timer of this.timers.values()) clearTimeout(timer);
     this.timers.clear();
     this.pending.clear();
+    this.lastResolved.clear();
   }
 }

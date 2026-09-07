@@ -32,6 +32,19 @@ export interface PermissionRequest {
 const PERMISSION_TIMEOUT_MS = 300_000; // 300 seconds
 
 /**
+ * How long after a chat's permission request leaves the pending state
+ * (timeout, supersede, or decision) a reply keyword is still treated as a
+ * late answer to THAT request rather than as a normal chat message — so a
+ * user replying "yes" to an already-resolved prompt doesn't accidentally
+ * submit "yes" to the model as a chat prompt.
+ */
+const LATE_REPLY_GRACE_MS = 60_000; // 60 seconds
+
+/** Acknowledgement sent for a decision keyword arriving after resolution. */
+export const LATE_PERMISSION_ACK =
+  "⏳ That permission request was already resolved — it timed out or was handled elsewhere. Nothing to approve.";
+
+/**
  * Parse a plain-text reply as a permission decision.
  * Returns null when the text is not a decision keyword — the caller should
  * treat it as a normal chat message.
@@ -184,6 +197,8 @@ export class PermissionManager {
   private pending = new Map<string, PermissionRequest>();
   /** chatId → expiry timer handle. */
   private timers = new Map<string, ReturnType<typeof setTimeout>>();
+  /** chatId → when the pending request last left the pending state. */
+  private lastResolved = new Map<string, number>();
 
   /**
    * Register a prompt for `chatId`, superseding any pending one.
@@ -211,6 +226,7 @@ export class PermissionManager {
         clearTimeout(oldTimer);
         this.timers.delete(chatId);
       }
+      this.lastResolved.set(chatId, Date.now());
       onExpire(chatId, existing.tool_use_id, "superseded");
     }
 
@@ -221,6 +237,7 @@ export class PermissionManager {
     const timer = setTimeout(() => {
       this.pending.delete(chatId);
       this.timers.delete(chatId);
+      this.lastResolved.set(chatId, Date.now());
       onExpire(chatId, toolUseId, "timeout");
     }, timeoutMs);
     // Never keep the Node.js event loop alive just for an expiry timer.
@@ -236,25 +253,27 @@ export class PermissionManager {
   /**
    * Process an inbound chat message as a potential permission reply.
    *
-   * Idempotent: no pending request for the chat → returns null and the
-   * caller treats the message as normal chat. An unrecognized keyword while
-   * a request is pending also returns null and keeps the request open.
-   *
-   * On a keyword match the decision is forwarded via `client.request` (the
-   * gateway passes its control channel) and the pending entry is cleared.
-   * `"always"` records a whole-tool allow rule (rule = tool name).
-   *
-   * @returns The decision plus whether the daemon still knew the request
-   *          (`delivered` false = already timed out or answered elsewhere),
-   *          or null when the message was not a permission reply.
+   * Returns, in order of precedence:
+   * - `"late"` — the text is a decision keyword and this chat's request left
+   *   the pending state within the grace window: the caller should ack the
+   *   stale reply instead of treating it as chat.
+   * - `{decision, delivered}` — a live pending request was resolved.
+   * - `null` — not a permission reply; the caller treats the text as normal
+   *   chat (an unrecognized keyword while a request is pending also returns
+   *   null and keeps the request open).
    */
   async handleResponse(
     chatId: string,
     text: string,
     client: { request: (method: string, params?: unknown) => Promise<unknown> },
-  ): Promise<{ decision: PermissionDecision; delivered: boolean } | null> {
+  ): Promise<
+    { decision: PermissionDecision; delivered: boolean } | "late" | null
+  > {
     const decision = parsePermissionReply(text);
     if (!decision) return null;
+    if (!this.pending.has(chatId)) {
+      return this.isRecentlyResolved(chatId) ? "late" : null;
+    }
     return this.resolvePending(chatId, decision, client);
   }
 
@@ -290,6 +309,7 @@ export class PermissionManager {
     }
 
     this.pending.delete(chatId);
+    this.lastResolved.set(chatId, Date.now());
     const timer = this.timers.get(chatId);
     if (timer !== undefined) {
       clearTimeout(timer);
@@ -298,10 +318,24 @@ export class PermissionManager {
     return { decision, delivered };
   }
 
+  /**
+   * Whether the chat's last permission request left the pending state within
+   * `graceMs` — i.e. a decision keyword arriving now is a late reply to that
+   * request, not a normal chat message.
+   */
+  isRecentlyResolved(
+    chatId: string,
+    graceMs: number = LATE_REPLY_GRACE_MS,
+  ): boolean {
+    const at = this.lastResolved.get(chatId);
+    return at !== undefined && Date.now() - at < graceMs;
+  }
+
   /** Clear every pending request and timer (gateway shutdown). */
   cleanup(): void {
     for (const timer of this.timers.values()) clearTimeout(timer);
     this.timers.clear();
     this.pending.clear();
+    this.lastResolved.clear();
   }
 }

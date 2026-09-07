@@ -41,7 +41,7 @@ import { createLogger } from "baoclaw-ipc/logger";
 import { SessionManager } from "./session.js";
 // New modules
 import { SenderTracker } from "./senderTracker.js";
-import { PermissionManager } from "./permission.js";
+import { LATE_PERMISSION_ACK, PermissionManager } from "./permission.js";
 import {
   parseCommand,
   isRegisteredCommand,
@@ -350,7 +350,9 @@ export class WhatsAppGateway {
           "";
         if (!text) continue;
 
-        // Permission reply check (before command check)
+        // Permission reply check (before command check). Right after a
+        // request resolved, a keyword is acknowledged as a late reply so it
+        // never leaks into the model as a chat prompt.
         if (this.ipcClient?.connected) {
           const permissionReply = await this.permissionManager.handleResponse(
             senderPhone,
@@ -358,6 +360,12 @@ export class WhatsAppGateway {
             // Via the control channel so the gate resolves mid-turn.
             this.control!,
           );
+          if (permissionReply === "late") {
+            try {
+              await sock.sendMessage(replyJid, { text: LATE_PERMISSION_ACK });
+            } catch {}
+            continue;
+          }
           if (permissionReply) {
             try {
               await sock.sendMessage(replyJid, {

@@ -58,6 +58,9 @@ test("supersede fires onTimeout with reason 'superseded' for the old id", () => 
     tracker.getPendingPermission("+15550000001")?.tool_use_id,
     "tu_new",
   );
+  // Supersede also marks the sender as recently resolved, so a late keyword
+  // meant for the OLD prompt is acked instead of reaching the new state.
+  assert.equal(pm.isRecentlyResolved("+15550000001"), true);
   pm.cleanup();
 });
 
@@ -169,4 +172,32 @@ test("cleanup cancels pending timers so no timeout fires", async () => {
   // Timers never fire after cleanup (tracker state is left as-is by design;
   // shutdown follows immediately anyway).
   assert.equal(fired.length, 0);
+});
+
+test("handleResponse returns 'late' for a keyword right after timeout", async () => {
+  const { pm, tracker } = makeManager();
+  const client = fakeClient();
+
+  pm.registerRequest("+15550000001", "tu_1", "bash", "", () => {}, 20);
+  await new Promise((r) => setTimeout(r, 60)); // expiry fires
+  assert.equal(tracker.getPendingPermission("+15550000001"), null);
+
+  // Keyword with nothing pending but recently resolved → late ack, and no
+  // permissionResponse is forwarded to the daemon.
+  assert.equal(
+    await pm.handleResponse("+15550000001", "yes", client as any),
+    "late",
+  );
+  assert.equal(client.calls.length, 0);
+
+  // Non-keyword text is never late — falls through as normal chat.
+  assert.equal(
+    await pm.handleResponse("+15550000001", "please continue", client as any),
+    null,
+  );
+
+  // isRecentlyResolved flips off once the grace window elapses.
+  assert.equal(pm.isRecentlyResolved("+15550000001", 20), false);
+  assert.equal(pm.isRecentlyResolved("+15550000001", 60_000), true);
+  pm.cleanup();
 });

@@ -31,6 +31,7 @@ import {
 import { splitMessage } from "./messageSplitter.js";
 import { isAllowedChat } from "./authorization.js";
 import {
+  LATE_PERMISSION_ACK,
   TelegramPermissionManager,
   buildPermissionKeyboard,
   formatPermissionRequest,
@@ -841,17 +842,26 @@ async function main() {
 
     // ── Permission reply fallback (before command routing) ──
     // A decision keyword only counts while a prompt is pending in this chat;
-    // anything else falls through to commands/chat as usual.
-    if (permissionManager.get(chatId)) {
-      const decision = parsePermissionReply(msg.text);
-      if (decision) {
-        const outcome = await applyPermissionDecision(chatId, decision);
+    // right after a request resolved it is acknowledged as a late reply so it
+    // never leaks into the model as a chat prompt; anything else falls
+    // through to commands/chat as usual.
+    const permissionDecision = parsePermissionReply(msg.text);
+    if (permissionDecision) {
+      if (permissionManager.get(chatId)) {
+        const outcome = await applyPermissionDecision(
+          chatId,
+          permissionDecision,
+        );
         await sendMessage(
           chatId,
           outcome === "applied"
             ? "✅ Processed."
             : "⚠️ This request has expired.",
         );
+        return;
+      }
+      if (permissionManager.isRecentlyResolved(chatId)) {
+        await sendMessage(chatId, LATE_PERMISSION_ACK);
         return;
       }
     }

@@ -30,6 +30,19 @@ const logger = createLogger("whatsapp");
 const PERMISSION_TIMEOUT_MS = 300_000; // 300 seconds
 
 /**
+ * How long after a sender's permission request leaves the pending state
+ * (timeout, supersede, or decision) a reply keyword is still treated as a
+ * late answer to THAT request rather than as a normal chat message — so a
+ * user replying "yes" to an already-resolved prompt doesn't accidentally
+ * submit "yes" to the model as a chat prompt.
+ */
+const LATE_REPLY_GRACE_MS = 60_000; // 60 seconds
+
+/** Acknowledgement sent for a decision keyword arriving after resolution. */
+export const LATE_PERMISSION_ACK =
+  "⏳ That permission request was already resolved — it timed out or was handled elsewhere. Nothing to approve.";
+
+/**
  * Manages permission request / response flow on behalf of the WhatsApp Gateway.
  *
  * Usage:
@@ -52,6 +65,8 @@ export class PermissionManager {
   private senderTracker: SenderTracker;
   /** Per-phone timeout handles so we can cancel them on explicit replies. */
   private timers = new Map<string, ReturnType<typeof setTimeout>>();
+  /** Per-phone timestamp of when the pending request last left pending state. */
+  private lastResolved = new Map<string, number>();
 
   /**
    * @param senderTracker  The shared `SenderTracker` instance that stores
@@ -149,6 +164,7 @@ export class PermissionManager {
         this.timers.delete(phone);
       }
       // Notify caller about the superseded request so it can deny it.
+      this.lastResolved.set(phone, Date.now());
       onTimeout(phone, existing.tool_use_id, "superseded");
     }
 
@@ -167,6 +183,7 @@ export class PermissionManager {
     const timer = setTimeout(() => {
       this.senderTracker.clearPendingPermission(phone);
       this.timers.delete(phone);
+      this.lastResolved.set(phone, Date.now());
       onTimeout(phone, toolUseId, "timeout");
     }, timeoutMs);
 
@@ -182,41 +199,38 @@ export class PermissionManager {
   /**
    * Process an inbound WhatsApp text message as a potential permission reply.
    *
-   * The method is **idempotent** — if no permission is pending for the sender
-   * it simply returns `null` and the caller can treat the message as a normal
-   * chat prompt.
-   *
-   * Recognised keywords (case-insensitive, trimmed):
-   *   - `"yes"`, `"allow"`  → allow
-   *   - `"no"`, `"deny"`    → deny
-   *
-   * When a valid keyword is detected:
-   *   1. The decision is forwarded to the daemon via
-   *      `client.request('permissionResponse', { tool_use_id, decision })`.
-   *   2. The pending permission and its timer are cleared.
-   *   3. Returns `{ decision, delivered }` — `delivered` is false when the
-   *      daemon no longer knows the request (already timed out or answered
-   *      elsewhere), so the caller can adjust its acknowledgement.
-   *
-   * If the text does **not** match any keyword but a permission **is** pending,
-   * the method still returns `null` — the caller should handle the text as a
-   * regular message (and may optionally warn the user).
+   * Returns, in order of precedence:
+   * - `"late"` — the text is a decision keyword and this sender's request
+   *   left the pending state within the grace window: the caller should ack
+   *   the stale reply instead of treating it as chat.
+   * - `{decision, delivered}` — a live pending request was resolved; the
+   *   `delivered` flag is false when the daemon no longer knew the request
+   *   (already timed out or answered elsewhere).
+   * - `null` — not a permission reply; the caller can treat the message as a
+   *   normal chat prompt (an unrecognized keyword while a permission is
+   *   pending also returns null and keeps the request pending).
    *
    * @param phone      Sender phone (E.164).
    * @param text       Raw message text from WhatsApp.
    * @param client     Connected IPC client or control channel for the daemon.
-   * @returns The decision + daemon delivery flag, or `null` when the message
-   *          was not a permission reply.
    */
   async handleResponse(
     phone: string,
     text: string,
     client: Pick<IpcClient, "request">,
-  ): Promise<{ decision: "allow" | "deny"; delivered: boolean } | null> {
+  ): Promise<
+    { decision: "allow" | "deny"; delivered: boolean } | "late" | null
+  > {
     // 1. Check for a pending request.
     const pending = this.senderTracker.getPendingPermission(phone);
     if (!pending) {
-      return null;
+      const normalized = text.trim().toLowerCase();
+      const isKeyword =
+        normalized === "yes" ||
+        normalized === "allow" ||
+        normalized === "no" ||
+        normalized === "deny";
+      return isKeyword && this.isRecentlyResolved(phone) ? "late" : null;
     }
 
     // 2. Parse the reply.
@@ -252,6 +266,7 @@ export class PermissionManager {
 
     // 5. Clean up local state.
     this.senderTracker.clearPendingPermission(phone);
+    this.lastResolved.set(phone, Date.now());
     const timer = this.timers.get(phone);
     if (timer !== undefined) {
       clearTimeout(timer);
@@ -262,7 +277,18 @@ export class PermissionManager {
     return { decision, delivered };
   }
 
-  // ── Lifecycle ─────────────────────────────────────────────────────────────
+  /**
+   * Whether the sender's last permission request left the pending state
+   * within `graceMs` — i.e. a decision keyword arriving now is a late reply
+   * to that request, not a normal chat message.
+   */
+  isRecentlyResolved(
+    phone: string,
+    graceMs: number = LATE_REPLY_GRACE_MS,
+  ): boolean {
+    const at = this.lastResolved.get(phone);
+    return at !== undefined && Date.now() - at < graceMs;
+  }
 
   /**
    * Clear all pending timers.
@@ -277,5 +303,6 @@ export class PermissionManager {
       clearTimeout(timer);
     }
     this.timers.clear();
+    this.lastResolved.clear();
   }
 }
