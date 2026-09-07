@@ -249,6 +249,49 @@ impl ToolHealthTracker {
             record.last_status_change = chrono::Utc::now().to_rfc3339();
         }
     }
+
+    /// Point-in-time view for inspection surfaces (the `toolHealth` RPC):
+    /// lazily recovers every record first so the view matches what
+    /// `is_available`/`get_warnings` would do, then returns clones in a
+    /// stable order — problem tools first (Disabled, then Degraded),
+    /// Healthy by call count descending.
+    pub fn snapshot(&self) -> ToolHealthSnapshot {
+        fn status_rank(status: &ToolStatus) -> u8 {
+            match status {
+                ToolStatus::Disabled => 0,
+                ToolStatus::Degraded => 1,
+                ToolStatus::Healthy => 2,
+            }
+        }
+        let mut tools: Vec<ToolHealthRecord> = {
+            let mut map = self.records.lock().unwrap_or_else(|p| p.into_inner());
+            for record in map.values_mut() {
+                self.maybe_recover(record);
+            }
+            map.values().cloned().collect()
+        };
+        tools.sort_by(|a, b| {
+            status_rank(&a.status)
+                .cmp(&status_rank(&b.status))
+                .then_with(|| b.total_calls.cmp(&a.total_calls))
+                .then_with(|| a.tool_name.cmp(&b.tool_name))
+        });
+        ToolHealthSnapshot {
+            tools,
+            degrade_threshold: self.degrade_threshold,
+            disable_threshold: self.disable_threshold,
+            recovery_minutes: self.recovery_minutes,
+        }
+    }
+}
+
+/// JSON-ready snapshot returned by `ToolHealthTracker::snapshot`.
+#[derive(Debug, Serialize)]
+pub struct ToolHealthSnapshot {
+    pub tools: Vec<ToolHealthRecord>,
+    pub degrade_threshold: u32,
+    pub disable_threshold: u32,
+    pub recovery_minutes: u32,
 }
 
 impl ToolHealthRecord {
@@ -323,6 +366,36 @@ mod tests {
         }
         assert!(t.degraded_tools().is_empty());
         assert!(t.is_available("Grep"));
+    }
+
+    #[test]
+    fn snapshot_recovers_and_orders_problem_tools_first() {
+        let t = ToolHealthTracker::new();
+        for _ in 0..6 {
+            t.record_failure("Bash", "boom");
+        } // Disabled
+        for _ in 0..3 {
+            t.record_failure("Grep", "meh");
+        } // Degraded
+        t.record_success("Read");
+        t.record_success("Read");
+        t.record_success("Edit");
+
+        // Age the Disabled record past the recovery window; snapshot()
+        // must apply the same lazy recovery as is_available/get_warnings.
+        {
+            let mut records = t.records.lock().unwrap();
+            records.get_mut("Bash").unwrap().last_status_change =
+                (chrono::Utc::now() - chrono::Duration::minutes(31)).to_rfc3339();
+        }
+        let snap = t.snapshot();
+        let names: Vec<&str> = snap.tools.iter().map(|r| r.tool_name.as_str()).collect();
+        // Degraded first; recovered Bash sorts among Healthy by call count.
+        assert_eq!(names, vec!["Grep", "Bash", "Read", "Edit"]);
+        let bash = snap.tools.iter().find(|r| r.tool_name == "Bash").unwrap();
+        assert_eq!(bash.status, ToolStatus::Healthy);
+        assert_eq!(bash.consecutive_failures, 0);
+        assert_eq!(snap.disable_threshold, 6);
     }
 
     #[test]

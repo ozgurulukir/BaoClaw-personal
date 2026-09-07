@@ -623,6 +623,9 @@ pub(super) async fn handle_shared_client(
                         ClientMethod::ConfigShow => {
                             scm_config_show(&shared, &writer, id).await;
                         }
+                        ClientMethod::ToolHealth => {
+                            scm_tool_health(&shared, &writer, id).await;
+                        }
                     }
                 }
                 Err(e) => {
@@ -3332,6 +3335,32 @@ async fn scm_session_info(
         "model": shared.baoclaw_config.model,
         "created_at": created_at,
         "last_active": last_active,
+    });
+    let mut conn_guard = writer.lock().await;
+    let _ = conn_guard.send_response(id, result).await;
+}
+
+async fn scm_tool_health(shared: &SharedState, writer: WriterRef<'_>, id: RequestId) {
+    use engine::tool_health::ToolStatus;
+
+    let snap = shared.tool_health.snapshot();
+    let total_calls: u64 = snap.tools.iter().map(|r| r.total_calls).sum();
+    let count_status =
+        |status: ToolStatus| snap.tools.iter().filter(|r| r.status == status).count();
+    let result = serde_json::json!({
+        "summary": {
+            "tracked": snap.tools.len(),
+            "healthy": count_status(ToolStatus::Healthy),
+            "degraded": count_status(ToolStatus::Degraded),
+            "disabled": count_status(ToolStatus::Disabled),
+            "total_calls": total_calls,
+        },
+        "thresholds": {
+            "degrade": snap.degrade_threshold,
+            "disable": snap.disable_threshold,
+            "recovery_minutes": snap.recovery_minutes,
+        },
+        "tools": snap.tools,
     });
     let mut conn_guard = writer.lock().await;
     let _ = conn_guard.send_response(id, result).await;

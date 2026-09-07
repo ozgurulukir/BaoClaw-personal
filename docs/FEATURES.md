@@ -158,6 +158,11 @@ loop — each carries an inline status note and a tracking issue.
   run with a warning in the dynamic reminder (kept out of the cached prompt)
 - Auto-recovers after 5 consecutive successes, or lazily after 30 minutes
   in a non-Healthy status
+- **Visible on demand**: the `toolHealth` RPC returns a snapshot (per-tool
+  status, counts, last failure reasons, thresholds), surfaced as
+  `/health [all]` in Telegram/WhatsApp/Feishu/the web UI/the TUI and as the
+  one-shot `baoclaw health [all] [--json]` CLI subcommand (exit code 1 when
+  any tool is Disabled)
 
 #### 🎯 Intent Prediction (#11)
 

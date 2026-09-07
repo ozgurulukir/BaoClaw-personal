@@ -15,6 +15,12 @@ export {
 } from "./daemon.js";
 export { logger, createLogger, setLogLevel, setLogFile } from "./logger.js";
 export { securePrivateFile } from "./security.js";
+export {
+  formatToolHealth,
+  type FormatToolHealthOptions,
+  type ToolHealthData,
+  type ToolHealthRecordInfo,
+} from "./toolHealth.js";
 export type {
   StreamEvent,
   StatePatch,

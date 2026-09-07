@@ -10,6 +10,7 @@ import { spawn, ChildProcess } from "child_process";
 import { renderMarkdown } from "./markdownRenderer.js";
 import { IpcClient } from "./client.js";
 import { attachControlChannel, type ControlChannel } from "./controlChannel.js";
+import { formatToolHealth, type ToolHealthData } from "./toolHealth.js";
 import * as fs from "fs";
 import * as os from "os";
 // @ts-ignore — pdf-parse and mammoth loaded dynamically for CJS compat
@@ -942,6 +943,7 @@ const COMMANDS = [
   "/projects",
   "/cron",
   "/history",
+  "/health",
   "/doc",
   "/team",
   "/template",
@@ -1018,6 +1020,9 @@ function printHelp(): void {
   console.log(`${BOLD}COMMANDS:${RESET}`);
   console.log(`  doctor              Run system diagnostics & health checks`);
   console.log(
+    `  health [all]        Show daemon tool health (--json for raw output)`,
+  );
+  console.log(
     `  completion <shell>  Generate shell completion script (bash, zsh, fish)\n`,
   );
   console.log(`${BOLD}OPTIONS:${RESET}`);
@@ -1088,6 +1093,41 @@ function resolveCoreBinary(): string {
     }
   }
   return candidates[0] || "baoclaw-core";
+}
+
+/**
+ * One-shot `baoclaw health`: query the running daemon's tool health and
+ * print it. Read-only — unlike the prompt path this never spawns a daemon.
+ * Exit code 1 when the query fails or any tool is Disabled.
+ */
+async function runHealthCommand(args: string[]): Promise<number> {
+  const verbose = args.includes("all");
+  const asJson = args.includes("--json");
+  const socketPath = resolveDaemonSocket(process.cwd());
+  if (!fs.existsSync(socketPath)) {
+    console.error("❌ No running daemon found. Start one with: baoclaw");
+    return 1;
+  }
+  const client = new IpcClient({ requestTimeoutMs: 10_000 });
+  let data: ToolHealthData;
+  try {
+    await client.connect(socketPath);
+    await client.request("initialize", {
+      cwd: process.cwd(),
+      settings: {},
+      shared_session_id: "default",
+    });
+    data = await client.request<ToolHealthData>("toolHealth", {});
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error(`❌ Failed to query daemon tool health: ${message}`);
+    return 1;
+  } finally {
+    client.disconnect();
+  }
+  if (asJson) console.log(JSON.stringify(data, null, 2));
+  else console.log(`\n${formatToolHealth(data, { verbose })}\n`);
+  return data.summary.disabled > 0 ? 1 : 0;
 }
 
 async function runDoctor(): Promise<void> {
@@ -1330,6 +1370,10 @@ async function main() {
   if (args[0] === "doctor") {
     await runDoctor();
     process.exit(0);
+  }
+
+  if (args[0] === "health") {
+    process.exit(await runHealthCommand(args.slice(1)));
   }
 
   let thinkingEnabled = false;
@@ -5439,6 +5483,24 @@ async function main() {
       return;
     };
 
+    const cmd_health = async (args: string): Promise<void> => {
+      try {
+        const data = await client.request<ToolHealthData>("toolHealth", {});
+        console.log(
+          `\n${FG_ORANGE}${BOLD}🏥 Tool Health${RESET}\n${formatToolHealth(
+            data,
+            {
+              verbose: args.trim() === "all",
+            },
+          )}\n`,
+        );
+      } catch (err) {
+        console.error(`${FG_RED}Failed to get tool health: ${err}${RESET}\n`);
+      }
+      rl.prompt();
+      return;
+    };
+
     const cmd_config = async (): Promise<void> => {
       try {
         const result = await client.request<any>("config.show", {});
@@ -5666,6 +5728,7 @@ async function main() {
       { names: ["/tokens", "/token"], handler: cmd_tokens },
       { names: ["/cost"], handler: cmd_cost },
       { names: ["/session"], handler: cmd_session },
+      { names: ["/health"], handler: cmd_health },
       { names: ["/config"], handler: cmd_config },
       { names: ["/rate"], handler: cmd_rate },
       { names: ["/help"], handler: cmd_help },

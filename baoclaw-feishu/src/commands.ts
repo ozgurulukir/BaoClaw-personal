@@ -3,7 +3,12 @@
  * Adapts WhatsApp's commands.ts — same registry, same handlers,
  * but uses chatId/sendReply instead of jid/sock.
  */
-import { IpcClient, type ControlChannel } from "baoclaw-ipc";
+import {
+  IpcClient,
+  formatToolHealth,
+  type ControlChannel,
+  type ToolHealthData,
+} from "baoclaw-ipc";
 import { logger } from "./log.js";
 import * as fs from "fs";
 import * as os from "os";
@@ -431,6 +436,11 @@ async function handleTools(ctx: CommandContext): Promise<string> {
   return formatTools(tools);
 }
 
+async function handleHealth(ctx: CommandContext): Promise<string> {
+  const data = await ctx.ipcClient.request<ToolHealthData>("toolHealth", {});
+  return formatToolHealth(data, { verbose: ctx.args.trim() === "all" });
+}
+
 async function handleMcp(ctx: CommandContext): Promise<string> {
   const result = await ctx.ipcClient.request<
     { servers: McpServerInfo[] } | McpServerInfo[]
@@ -702,6 +712,12 @@ export const COMMAND_REGISTRY: Record<string, CommandDef> = {
     description: "List registered tools",
     handler: handleTools,
   },
+  "/health": {
+    name: "/health",
+    description: "Tool health overview",
+    usage: "/health [all]",
+    handler: handleHealth,
+  },
   "/mcp": { name: "/mcp", description: "List MCP servers", handler: handleMcp },
   "/skills": {
     name: "/skills",
@@ -818,7 +834,10 @@ export function formatHelp(): string {
       ],
     ],
     ["📂 Projects & Git", ["/projects", "/git", "/diff", "/commit"]],
-    ["🔧 Tools & Extensions", ["/tools", "/mcp", "/skills", "/plugins"]],
+    [
+      "🔧 Tools & Extensions",
+      ["/tools", "/health", "/mcp", "/skills", "/plugins"],
+    ],
     ["⚙️ Automation", ["/task", "/tasks", "/task_stop", "/cron"]],
     ["📋 Spec", ["/spec"]],
     ["🚪 Gateway", ["/gateway"]],

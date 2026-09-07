@@ -99,6 +99,7 @@ export interface CommandDefinition {
 
 export const COMMAND_REGISTRY: Record<string, CommandDefinition> = {
   "/tools": { description: "List registered tools" },
+  "/health": { description: "Tool health: /health [all]" },
   "/skills": { description: "List loaded skills" },
   "/mcp": { description: "List MCP servers" },
   "/plugins": { description: "List installed plugins" },

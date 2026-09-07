@@ -4,7 +4,11 @@
  * Commands are dispatched via IPC JSON-RPC to baoclaw-core daemon.
  */
 import { IpcClient } from "baoclaw-ipc/client";
-import type { ControlChannel } from "baoclaw-ipc";
+import {
+  formatToolHealth,
+  type ControlChannel,
+  type ToolHealthData,
+} from "baoclaw-ipc";
 import * as fs from "fs";
 import * as os from "os";
 
@@ -623,6 +627,16 @@ const toolsCommand: Command = {
   },
 };
 
+const healthCommand: Command = {
+  name: "/health",
+  description: "Tool health overview",
+  usage: "/health [all]",
+  async handler(ctx) {
+    const data = await ctx.ipcClient.request<ToolHealthData>("toolHealth", {});
+    return formatToolHealth(data, { verbose: ctx.args.trim() === "all" });
+  },
+};
+
 const mcpCommand: Command = {
   name: "/mcp",
   description: "List MCP servers",
@@ -943,6 +957,7 @@ export const COMMAND_REGISTRY: Record<string, Command> = {
 
   // Tools & Extensions
   "/tools": toolsCommand,
+  "/health": healthCommand,
   "/mcp": mcpCommand,
   "/skills": skillsCommand,
   "/plugins": pluginsCommand,
@@ -1047,7 +1062,10 @@ export function formatHelp(): string {
       ],
     ],
     ["📂 *Project & Git*", ["/projects", "/git", "/diff", "/commit"]],
-    ["🔧 *Tools & Extensions*", ["/tools", "/mcp", "/skills", "/plugins"]],
+    [
+      "🔧 *Tools & Extensions*",
+      ["/tools", "/health", "/mcp", "/skills", "/plugins"],
+    ],
     ["⚙️ *Automation*", ["/task", "/tasks", "/task_stop", "/cron"]],
     ["📋 *Spec*", ["/spec"]],
     ["🚪 *Gateway*", ["/gateway"]],

@@ -312,6 +312,10 @@ pub enum ClientMethod {
     #[serde(rename = "evolution.rateTrajectory")]
     EvolutionRateTrajectory { rating: String },
 
+    // ── Tool Health RPC ──
+    #[serde(rename = "toolHealth")]
+    ToolHealth,
+
     // ── Session Info / Token / Cost RPC (P2-2) ──
     #[serde(rename = "session.tokens")]
     SessionTokens,
@@ -1105,5 +1109,19 @@ mod tests {
         let req = make_request("session.info", json!(null));
         let method = parse_client_method(&req).unwrap();
         assert_eq!(method, ClientMethod::SessionInfo);
+    }
+
+    #[test]
+    fn test_parse_tool_health_with_empty_map() {
+        let req = make_request("toolHealth", json!({}));
+        let method = parse_client_method(&req).unwrap();
+        assert_eq!(method, ClientMethod::ToolHealth);
+    }
+
+    #[test]
+    fn test_parse_tool_health_with_null() {
+        let req = make_request("toolHealth", json!(null));
+        let method = parse_client_method(&req).unwrap();
+        assert_eq!(method, ClientMethod::ToolHealth);
     }
 }

@@ -211,9 +211,17 @@ baoclaw-whatsapp         # long-running process
 /model       Current model configuration (API keys masked automatically)
 /config      Full configuration JSON (API keys masked automatically)
 /session     Current session info
+/health      Tool health overview (/health all for every tracked tool)
 /rate       Rate the last interaction (good|bad|neutral) for preference data
 /clear       Clear the screen
 /exit        Exit
+```
+
+The daemon's tool health is also queryable without the REPL:
+
+```bash
+baoclaw health            # one-shot tool health summary (exit 1 if a tool is Disabled)
+baoclaw health all --json # full per-tool table as raw JSON
 ```
 
 ---

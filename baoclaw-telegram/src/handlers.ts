@@ -10,8 +10,10 @@ import * as path from "path";
 import {
   DaemonConnector,
   IpcClient,
+  formatToolHealth,
   type ControlChannel,
   type DaemonInfo,
+  type ToolHealthData,
 } from "baoclaw-ipc";
 import { createLogger } from "baoclaw-ipc/logger";
 import {
@@ -106,6 +108,16 @@ export function createCommandHandlers(
         "listTools",
       );
       return formatTools(result.tools, result.count);
+    } catch (err) {
+      return formatError(err);
+    }
+  }
+
+  async function handleHealth(args: string): Promise<string> {
+    if (!ipcClient.connected) return formatDisconnected();
+    try {
+      const data = await ipcClient.request<ToolHealthData>("toolHealth", {});
+      return formatToolHealth(data, { verbose: args.trim() === "all" });
     } catch (err) {
       return formatError(err);
     }
@@ -690,6 +702,7 @@ export function createCommandHandlers(
     (args: string, chatId: number) => Promise<string> | string
   > = {
     "/tools": (args) => handleTools(),
+    "/health": (args) => handleHealth(args),
     "/skills": (args) => handleSkills(),
     "/mcp": (args) => handleMcp(),
     "/plugins": (args) => handlePlugins(),

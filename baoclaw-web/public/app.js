@@ -1100,6 +1100,15 @@ function sendMessage() {
       doAbort();
       return;
     }
+    if (t === "/health" || t === "/health all") {
+      panelBody.dataset.healthAll = t === "/health all" ? "1" : "";
+      openPanel(
+        "🏥 Tool Health",
+        '<div id="panel-health-info" class="panel-empty">Loading...</div>',
+      );
+      panelRpc("toolHealth");
+      return;
+    }
     if (t.startsWith("/spec ") || t === "/spec") {
       const parts = t.split(/\s+/);
       const sub = parts[1] || "list";
@@ -1970,6 +1979,96 @@ $("btn-history").onclick = () => {
     };
 };
 
+function renderHealthPanel(data) {
+  const el = $("panel-health-info");
+  if (!el) return;
+  if (data.error) {
+    el.innerHTML = panelError(data.error);
+    return;
+  }
+  const sum = data.summary || {},
+    th = data.thresholds || {},
+    tools = data.tools || [];
+  const verbose = panelBody.dataset.healthAll === "1";
+  const html = [];
+  if (!sum.tracked) {
+    html.push('<div class="panel-empty">No tool calls recorded yet.</div>');
+  } else if (!sum.degraded && !sum.disabled) {
+    html.push(
+      "<div>✅ All <b>" +
+        sum.tracked +
+        "</b> tracked tool" +
+        (sum.tracked === 1 ? "" : "s") +
+        " healthy (" +
+        sum.total_calls +
+        " call" +
+        (sum.total_calls === 1 ? "" : "s") +
+        ")</div>",
+    );
+  } else {
+    for (const t of tools) {
+      if (t.status === "Healthy") continue;
+      const icon = t.status === "Disabled" ? "🚫" : "⚠️";
+      const rate = t.total_calls
+        ? Math.round((t.failure_count / t.total_calls) * 100) + "%"
+        : "0%";
+      html.push(
+        "<div style='margin:6px 0 2px'>" +
+          icon +
+          " <b>" +
+          esc(t.tool_name) +
+          "</b> — " +
+          esc(t.status) +
+          " · " +
+          t.consecutive_failures +
+          " consecutive failures · " +
+          rate +
+          " failure rate</div>",
+      );
+      const last = (t.recent_failures || []).slice(-1)[0];
+      if (last)
+        html.push(
+          '<div style="font-size:11px;color:var(--text-dim);margin-left:18px;word-break:break-all">' +
+            esc(String(last).slice(0, 120)) +
+            "</div>",
+        );
+    }
+    html.push(
+      '<div style="margin-top:8px">✅ ' +
+        (sum.healthy || 0) +
+        "/" +
+        sum.tracked +
+        " healthy · " +
+        sum.total_calls +
+        " calls total</div>",
+    );
+  }
+  if (verbose) {
+    html.push(
+      '<div style="margin-top:8px;color:var(--text-dim);font-size:11px">thresholds: degrade ' +
+        th.degrade +
+        " / disable " +
+        th.disable +
+        " / recover " +
+        th.recovery_minutes +
+        "m</div>",
+    );
+    for (const t of tools) {
+      if (t.status !== "Healthy") continue;
+      html.push(
+        '<div style="font-size:12px">• ' +
+          esc(t.tool_name) +
+          " — " +
+          t.total_calls +
+          " calls · " +
+          t.failure_count +
+          " failures</div>",
+      );
+    }
+  }
+  el.innerHTML = html.join("");
+}
+
 // ═══════════════════════════════════════════════════════════════
 // Panel RPC Result Handler (extend handleTabMessage)
 // ═══════════════════════════════════════════════════════════════
@@ -2012,6 +2111,8 @@ handleTabMessage = function (tab, msg) {
       panelRpc("memoryList");
     } else if (method === "cronList") {
       renderCronPanel(data.jobs || data.items || []);
+    } else if (method === "toolHealth") {
+      renderHealthPanel(data);
     } else if (
       method === "cronAdd" ||
       method === "cronRemove" ||
