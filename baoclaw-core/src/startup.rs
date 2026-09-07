@@ -662,6 +662,7 @@ pub(super) async fn assemble_shared_state(
     // plus the default ~/.baoclaw parity the file tools already get. Grown
     // live by interactive "Always allow" grants in the executor.
     let granted_dirs = Arc::clone(&granted_search_dirs);
+    let tool_health = Arc::new(engine::tool_health::ToolHealthTracker::new());
     {
         let home_dir = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
         let mut dirs = granted_dirs.write().unwrap();
@@ -703,6 +704,7 @@ pub(super) async fn assemble_shared_state(
         permission_gate,
         permission_manager,
         granted_dirs,
+        tool_health,
         task_manager,
         state_manager,
         baoclaw_config,
@@ -784,6 +786,7 @@ pub(super) async fn start_cron_scheduler(shared: &SharedState) {
                     tools,
                     api_client,
                     model: baoclaw_config.model.clone(),
+                    tool_health: None,
                     thinking_config,
                     max_turns: Some(10),
                     max_budget_usd: Some(0.5),

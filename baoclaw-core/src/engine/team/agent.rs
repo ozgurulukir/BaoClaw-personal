@@ -353,6 +353,7 @@ impl SubAgentExecutor {
             permission: None,
             telemetry: None,
             evolution: None,
+            tool_health: None,
         };
 
         // Create engine and submit prompt

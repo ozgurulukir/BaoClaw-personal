@@ -72,7 +72,7 @@ proptest! {
             initial_budget: None,
             cached_rules_raw: vec![],
             adaptive_compact: baoclaw_core::engine::query_engine::AdaptiveCompactTracker::new(),
-            tool_health: baoclaw_core::engine::tool_health::ToolHealthTracker::new(),
+            tool_health: std::sync::Arc::new(baoclaw_core::engine::tool_health::ToolHealthTracker::new()),
             hook_manager: None,
             permission: None,
         };

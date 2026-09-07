@@ -146,6 +146,7 @@ impl Tool for AgentTool {
             permission: None,
             telemetry: None,
             evolution: None,
+            tool_health: None,
         };
 
         let mut sub_engine = QueryEngine::new(sub_engine_config);

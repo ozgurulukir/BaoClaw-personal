@@ -636,7 +636,7 @@ async fn call_api_with_fallback(
         initial_budget: None,
         cached_rules_raw: config.cached_rules_raw.clone(),
         adaptive_compact: AdaptiveCompactTracker::new(),
-        tool_health: crate::engine::tool_health::ToolHealthTracker::new(),
+        tool_health: Arc::clone(&config.tool_health),
         hook_manager: config.hook_manager.clone(),
         permission: config.permission.clone(),
         telemetry: None,
@@ -1454,6 +1454,7 @@ async fn execute_tool_turn(
         &tool_context,
         &progress,
         permission_channels.as_ref(),
+        Some(&config.tool_health),
     )
     .await;
 
@@ -1554,14 +1555,20 @@ async fn execute_tool_turn(
         }
     }
 
-    // Feed the tool-health tracker (informational warnings only).
+    // Feed the shared tool-health tracker. Only real tools are recorded —
+    // unknown-tool results would otherwise pile garbage records under the
+    // raw (misspelled) names the model sent. The reason is truncated by
+    // CHARS, not bytes, to avoid panicking inside a multi-byte character.
     for res in &tool_results {
         if res.is_error {
-            config.tool_health.record_failure(
-                &res.tool_name,
-                &serde_json::to_string(&res.output).unwrap_or_default()
-                    [..200.min(serde_json::to_string(&res.output).unwrap_or_default().len())],
-            );
+            if config.tools.iter().any(|t| t.name() == res.tool_name) {
+                let reason: String = serde_json::to_string(&res.output)
+                    .unwrap_or_default()
+                    .chars()
+                    .take(200)
+                    .collect();
+                config.tool_health.record_failure(&res.tool_name, &reason);
+            }
         } else {
             config.tool_health.record_success(&res.tool_name);
         }

@@ -619,6 +619,7 @@ mod tests {
             permission: None,
             telemetry: None,
             evolution: None,
+            tool_health: None,
         })
     }
 

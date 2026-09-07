@@ -146,15 +146,18 @@ loop — each carries an inline status note and a tracking issue.
 
 #### 🏥 Tool Health Monitoring (#10)
 
-> **Status: wired, informational only (see #38, closed).** Every tool
-> result feeds the tracker; degraded/failing tools produce a Tool Health
-> Warnings block in the system prompt. Tools are never auto-disabled —
-> that policy decision is deliberately out of scope.
+> **Status: wired and enforced daemon-wide.** Every tool result feeds a
+> shared tracker (failure stats accumulate across queries); degraded/failing
+> tools produce a Tool Health Warnings block in the dynamic reminder, and a
+> tool that reaches **Disabled** is hard-blocked at dispatch until it
+> recovers.
 
-- Tracks success/failure/timeout rates per tool in real time
+- Tracks success/failure/timeout rates per tool, shared across queries
 - **3 statuses**: Healthy → Degraded (3 consecutive failures) → Disabled (6 failures)
-- Degraded tools get warning messages in the system prompt
-- Auto-recovers after 5 consecutive successes
+- Disabled tools are blocked at dispatch with a clear error; Degraded tools
+  run with a warning in the dynamic reminder (kept out of the cached prompt)
+- Auto-recovers after 5 consecutive successes, or lazily after 30 minutes
+  in a non-Healthy status
 
 #### 🎯 Intent Prediction (#11)
 

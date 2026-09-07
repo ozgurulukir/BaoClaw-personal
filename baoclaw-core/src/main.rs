@@ -47,6 +47,8 @@ struct SharedState {
     permission_manager: Arc<tokio::sync::RwLock<permissions::manager::PermissionManager>>,
     /// Out-of-cwd directories Glob/Grep may search (config seed + live grants).
     granted_dirs: permissions::GrantedSearchDirs,
+    /// Daemon-wide tool-health tracker (failure accumulation + Disabled blocking).
+    tool_health: std::sync::Arc<engine::tool_health::ToolHealthTracker>,
     task_manager: Arc<TaskManager>,
     state_manager: Arc<StateManager>,
     baoclaw_config: BaoclawConfig,
@@ -258,6 +260,7 @@ fn build_shared_engine(
         api_client: Arc::clone(&shared.api_client),
         model,
         thinking_config: shared.cli_thinking_config.clone(),
+        tool_health: Some(std::sync::Arc::clone(&shared.tool_health)),
         max_turns: None,
         max_budget_usd: None,
         verbose: false,

@@ -134,14 +134,36 @@ impl ToolHealthTracker {
         }
     }
 
-    /// Check if a tool is available (not disabled).
+    /// Check if a tool is available (not disabled). A Disabled/Degraded
+    /// record older than `recovery_minutes` is lazily reset to Healthy —
+    /// the tool gets a fresh start and its next failure re-degrades it.
     pub fn is_available(&self, tool_name: &str) -> bool {
-        self.records
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .get(tool_name)
-            .map(|r| r.status != ToolStatus::Disabled)
-            .unwrap_or(true) // unknown tools are available by default
+        let mut records = self.records.lock().unwrap_or_else(|p| p.into_inner());
+        match records.get_mut(tool_name) {
+            Some(record) => {
+                self.maybe_recover(record);
+                record.status != ToolStatus::Disabled
+            }
+            None => true, // unknown tools are available by default
+        }
+    }
+
+    /// If `record` has sat in a non-Healthy status longer than
+    /// `recovery_minutes`, reset it to Healthy (consecutive failures
+    /// cleared). Callers must hold the records lock in write mode.
+    fn maybe_recover(&self, record: &mut ToolHealthRecord) {
+        if record.status == ToolStatus::Healthy {
+            return;
+        }
+        let Ok(changed) = chrono::DateTime::parse_from_rfc3339(&record.last_status_change) else {
+            return;
+        };
+        let elapsed = chrono::Utc::now().signed_duration_since(changed);
+        if elapsed.num_minutes() >= self.recovery_minutes as i64 {
+            record.status = ToolStatus::Healthy;
+            record.consecutive_failures = 0;
+            record.last_status_change = chrono::Utc::now().to_rfc3339();
+        }
     }
 
     /// Get warning message for degraded tools (to inject into system prompt).
@@ -151,8 +173,9 @@ impl ToolHealthTracker {
             .records
             .lock()
             .unwrap_or_else(|p| p.into_inner())
-            .values()
+            .values_mut()
         {
+            self.maybe_recover(record);
             match record.status {
                 ToolStatus::Degraded => {
                     let rate = if record.total_calls > 0 {
@@ -237,5 +260,79 @@ impl ToolHealthRecord {
             consecutive_failures: 0,
             last_status_change: chrono::Utc::now().to_rfc3339(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn thresholds_degrade_then_disable() {
+        let t = ToolHealthTracker::new();
+        for _ in 0..3 {
+            t.record_failure("Bash", "boom");
+        }
+        assert_eq!(t.degraded_tools(), vec!["Bash".to_string()]);
+        for _ in 0..3 {
+            t.record_failure("Bash", "boom");
+        }
+        assert_eq!(t.disabled_tools(), vec!["Bash".to_string()]);
+        assert!(!t.is_available("Bash"));
+        assert!(t.is_available("FileRead")); // untouched tools stay available
+    }
+
+    #[tokio::test]
+    async fn disabled_tool_recovers_after_recovery_minutes() {
+        let t = ToolHealthTracker::new();
+        for _ in 0..6 {
+            t.record_failure("Bash", "boom");
+        }
+        assert!(!t.is_available("Bash"));
+
+        // Age the status change past the recovery window (30 min default).
+        {
+            let mut records = t.records.lock().unwrap();
+            let record = records.get_mut("Bash").unwrap();
+            record.last_status_change =
+                (chrono::Utc::now() - chrono::Duration::minutes(31)).to_rfc3339();
+        }
+        assert!(t.is_available("Bash")); // lazily recovered
+        assert!(t.get_warnings().is_empty());
+
+        // And a fresh failure counts from zero again — the full threshold
+        // is needed to re-degrade (fresh-start semantics).
+        t.record_failure("Bash", "boom again");
+        assert!(t.degraded_tools().is_empty());
+        assert!(t.is_available("Bash"));
+    }
+
+    #[tokio::test]
+    async fn degraded_tool_recovers_on_successes() {
+        let t = ToolHealthTracker::new();
+        for _ in 0..3 {
+            t.record_failure("Grep", "nope");
+        }
+        assert_eq!(t.degraded_tools(), vec!["Grep".to_string()]);
+        for _ in 0..5 {
+            t.record_success("Grep");
+        }
+        assert!(t.degraded_tools().is_empty());
+        assert!(t.is_available("Grep"));
+    }
+
+    #[test]
+    fn warnings_describe_degraded_and_disabled() {
+        let t = ToolHealthTracker::new();
+        for _ in 0..3 {
+            t.record_failure("FileWrite", "disk on fire");
+        }
+        for _ in 0..6 {
+            t.record_failure("Bash", "segfault");
+        }
+        let warnings = t.get_warnings();
+        assert_eq!(warnings.len(), 2);
+        assert!(warnings.iter().any(|w| w.contains("degraded")));
+        assert!(warnings.iter().any(|w| w.contains("disabled")));
     }
 }

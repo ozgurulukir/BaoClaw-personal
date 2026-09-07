@@ -66,6 +66,11 @@ pub struct QueryEngineConfig {
     pub telemetry: Option<Arc<crate::engine::telemetry::collector::TelemetryCollector>>,
     /// Evolution engine for trajectory recording; None disables recording.
     pub evolution: Option<Arc<crate::engine::evolution::EvolutionEngine>>,
+    /// Shared tool-health tracker. When present, failure stats accumulate
+    /// across queries, Disabled tools are hard-blocked at dispatch, and the
+    /// dynamic reminder reflects degraded tools. None = a fresh per-query
+    /// tracker with no enforcement (legacy behavior).
+    pub tool_health: Option<Arc<crate::engine::tool_health::ToolHealthTracker>>,
 }
 
 /// Thinking mode configuration for the LLM.
@@ -1054,40 +1059,43 @@ impl QueryEngine {
         }
 
         // Build the config for the spawned loop
-        let loop_config = QueryLoopConfig {
-            api_client: Arc::clone(&self.config.api_client),
-            tools: self.config.tools.clone(),
-            model: self.config.model.clone(),
-            max_turns: self.config.max_turns,
-            cwd: self.config.cwd.clone(),
-            custom_system_prompt: self.config.custom_system_prompt.clone(),
-            append_system_prompt: self.config.append_system_prompt.clone(),
-            project_instructions: self.cached_project_instructions.clone(),
-            git_info: self.cached_git_info.clone(),
-            thinking_config: self.config.thinking_config.clone(),
-            abort_rx: self.abort_rx.clone(),
-            session_id: self.config.session_id.clone(),
-            fallback_models: self.config.fallback_models.clone(),
-            max_retries_per_model: self.config.max_retries_per_model,
-            token_counter: Arc::clone(&self.token_counter),
-            parent_turn_id: self.config.parent_turn_id,
-            agent_label: self.config.agent_label.clone(),
-            session_memory: self.config.session_memory.as_ref().map(Arc::clone),
-            compact_fail_count: self.compact_fail_count,
-            recent_messages_for_rules: self.messages.clone(),
-            file_cache: self.config.file_cache.as_ref().map(Arc::clone),
-            tool_result_store: self.config.tool_result_store.as_ref().map(Arc::clone),
-            initial_budget: Some(initial_budget),
-            cached_rules_raw: self.cached_rules_raw.clone(),
-            adaptive_compact: AdaptiveCompactTracker::new(),
-            tool_health: crate::engine::tool_health::ToolHealthTracker::new(),
-            hook_manager: self.hook_manager.clone(),
-            permission: self.config.permission.clone(),
-            context_window: self.config.context_window,
-            auto_compact_threshold_ratio: self.config.auto_compact_threshold_ratio,
-            telemetry: self.config.telemetry.clone(),
-            evolution: self.config.evolution.clone(),
-        };
+        let loop_config =
+            QueryLoopConfig {
+                api_client: Arc::clone(&self.config.api_client),
+                tools: self.config.tools.clone(),
+                model: self.config.model.clone(),
+                max_turns: self.config.max_turns,
+                cwd: self.config.cwd.clone(),
+                custom_system_prompt: self.config.custom_system_prompt.clone(),
+                append_system_prompt: self.config.append_system_prompt.clone(),
+                project_instructions: self.cached_project_instructions.clone(),
+                git_info: self.cached_git_info.clone(),
+                thinking_config: self.config.thinking_config.clone(),
+                abort_rx: self.abort_rx.clone(),
+                session_id: self.config.session_id.clone(),
+                fallback_models: self.config.fallback_models.clone(),
+                max_retries_per_model: self.config.max_retries_per_model,
+                token_counter: Arc::clone(&self.token_counter),
+                parent_turn_id: self.config.parent_turn_id,
+                agent_label: self.config.agent_label.clone(),
+                session_memory: self.config.session_memory.as_ref().map(Arc::clone),
+                compact_fail_count: self.compact_fail_count,
+                recent_messages_for_rules: self.messages.clone(),
+                file_cache: self.config.file_cache.as_ref().map(Arc::clone),
+                tool_result_store: self.config.tool_result_store.as_ref().map(Arc::clone),
+                initial_budget: Some(initial_budget),
+                cached_rules_raw: self.cached_rules_raw.clone(),
+                adaptive_compact: AdaptiveCompactTracker::new(),
+                tool_health: self.config.tool_health.clone().unwrap_or_else(|| {
+                    Arc::new(crate::engine::tool_health::ToolHealthTracker::new())
+                }),
+                hook_manager: self.hook_manager.clone(),
+                permission: self.config.permission.clone(),
+                context_window: self.config.context_window,
+                auto_compact_threshold_ratio: self.config.auto_compact_threshold_ratio,
+                telemetry: self.config.telemetry.clone(),
+                evolution: self.config.evolution.clone(),
+            };
 
         let messages_shared = Arc::new(tokio::sync::Mutex::new(self.messages.clone()));
         let messages_for_task = Arc::clone(&messages_shared);
@@ -1149,8 +1157,9 @@ pub struct QueryLoopConfig {
     pub cached_rules_raw: Vec<CachedRule>,
     /// Adaptive compact tracker — learns optimal keep_recent from history.
     pub adaptive_compact: AdaptiveCompactTracker,
-    /// Tool health tracker — learns success/failure rates.
-    pub tool_health: crate::engine::tool_health::ToolHealthTracker,
+    /// Tool health tracker — accumulates success/failure rates across the
+    /// daemon's queries and drives dispatch-time availability checks.
+    pub tool_health: Arc<crate::engine::tool_health::ToolHealthTracker>,
     /// Hook manager for triggering actions on events.
     pub hook_manager: Option<Arc<HookManager>>,
     /// Interactive permission gate + manager (cloned from the engine config).
@@ -1285,6 +1294,7 @@ mod tests {
             permission: None,
             telemetry: None,
             evolution: None,
+            tool_health: None,
         }
     }
 
@@ -1764,7 +1774,7 @@ mod tests {
             initial_budget: None,
             cached_rules_raw: vec![],
             adaptive_compact: AdaptiveCompactTracker::new(),
-            tool_health: crate::engine::tool_health::ToolHealthTracker::new(),
+            tool_health: Arc::new(crate::engine::tool_health::ToolHealthTracker::new()),
             hook_manager: None,
             permission: None,
             telemetry: None,
@@ -1818,7 +1828,7 @@ mod tests {
             initial_budget: None,
             cached_rules_raw: vec![],
             adaptive_compact: AdaptiveCompactTracker::new(),
-            tool_health: crate::engine::tool_health::ToolHealthTracker::new(),
+            tool_health: Arc::new(crate::engine::tool_health::ToolHealthTracker::new()),
             hook_manager: None,
             permission: None,
             telemetry: None,
@@ -1869,7 +1879,7 @@ mod tests {
             initial_budget: None,
             cached_rules_raw: vec![],
             adaptive_compact: AdaptiveCompactTracker::new(),
-            tool_health: crate::engine::tool_health::ToolHealthTracker::new(),
+            tool_health: Arc::new(crate::engine::tool_health::ToolHealthTracker::new()),
             hook_manager: None,
             permission: None,
             telemetry: None,
@@ -2011,7 +2021,7 @@ mod tests {
             initial_budget: None,
             cached_rules_raw: vec![],
             adaptive_compact: AdaptiveCompactTracker::new(),
-            tool_health: crate::engine::tool_health::ToolHealthTracker::new(),
+            tool_health: Arc::new(crate::engine::tool_health::ToolHealthTracker::new()),
             hook_manager: None,
             permission: None,
             telemetry: None,
@@ -2062,7 +2072,7 @@ mod tests {
             initial_budget: None,
             cached_rules_raw: vec![],
             adaptive_compact: AdaptiveCompactTracker::new(),
-            tool_health: crate::engine::tool_health::ToolHealthTracker::new(),
+            tool_health: Arc::new(crate::engine::tool_health::ToolHealthTracker::new()),
             hook_manager: None,
             permission: None,
             telemetry: None,
@@ -2266,7 +2276,7 @@ mod tests {
             initial_budget: None,
             cached_rules_raw: vec![],
             adaptive_compact: AdaptiveCompactTracker::new(),
-            tool_health: crate::engine::tool_health::ToolHealthTracker::new(),
+            tool_health: Arc::new(crate::engine::tool_health::ToolHealthTracker::new()),
             hook_manager: None,
             permission: None,
             telemetry: None,

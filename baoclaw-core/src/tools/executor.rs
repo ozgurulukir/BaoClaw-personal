@@ -520,7 +520,24 @@ async fn dispatch_tool(
     context: &ToolContext,
     progress: &dyn ProgressSender,
     permission: Option<&PermissionChannels>,
+    tool_health: Option<&std::sync::Arc<crate::engine::tool_health::ToolHealthTracker>>,
 ) -> ToolExecutionResult {
+    // Hard-block tools whose status is Disabled after repeated failures.
+    // Degraded tools still run — the system-reminder warns the model.
+    if let Some(th) = tool_health {
+        if !th.is_available(tool.name()) {
+            eprintln!("[tool-health] '{}' blocked (disabled)", tool.name());
+            return ToolExecutionResult {
+                tool_use_id: request.id.clone(),
+                tool_name: tool.name().to_string(),
+                output: Value::String(format!(
+                    "🚫 Tool '{}' is temporarily disabled after repeated failures. Use an alternative tool or try again later.",
+                    tool.name()
+                )),
+                is_error: true,
+            };
+        }
+    }
     match permission {
         Some(p) => execute_tool_with_permission(tool, request, context, p, progress).await,
         None => execute_tool(tool, request, context, progress).await,
@@ -535,6 +552,7 @@ pub async fn execute_tools(
     context: &ToolContext,
     progress: &dyn ProgressSender,
     permission: Option<&PermissionChannels>,
+    tool_health: Option<&std::sync::Arc<crate::engine::tool_health::ToolHealthTracker>>,
 ) -> Vec<ToolExecutionResult> {
     if requests.is_empty() {
         return vec![];
@@ -568,7 +586,16 @@ pub async fn execute_tools(
     if !concurrent.is_empty() {
         let futures: Vec<_> = concurrent
             .iter()
-            .map(|(_, req, tool)| dispatch_tool(tool.as_ref(), req, context, progress, permission))
+            .map(|(_, req, tool)| {
+                dispatch_tool(
+                    tool.as_ref(),
+                    req,
+                    context,
+                    progress,
+                    permission,
+                    tool_health,
+                )
+            })
             .collect();
         let concurrent_results = futures::future::join_all(futures).await;
         for ((idx, _, _), result) in concurrent.iter().zip(concurrent_results) {
@@ -578,7 +605,15 @@ pub async fn execute_tools(
 
     // Execute sequential tools one by one
     for (idx, req, tool) in &sequential {
-        let result = dispatch_tool(tool.as_ref(), req, context, progress, permission).await;
+        let result = dispatch_tool(
+            tool.as_ref(),
+            req,
+            context,
+            progress,
+            permission,
+            tool_health,
+        )
+        .await;
         results[*idx] = Some(result);
     }
 
@@ -984,7 +1019,7 @@ mod tests {
         let ctx = make_context();
         let progress = MockProgressSender;
 
-        let results = execute_tools(&tools, &requests, &ctx, &progress, None).await;
+        let results = execute_tools(&tools, &requests, &ctx, &progress, None, None).await;
         assert!(results.is_empty());
     }
 
@@ -995,7 +1030,7 @@ mod tests {
         let ctx = make_context();
         let progress = MockProgressSender;
 
-        let results = execute_tools(&tools, &requests, &ctx, &progress, None).await;
+        let results = execute_tools(&tools, &requests, &ctx, &progress, None, None).await;
         assert_eq!(results.len(), 1);
         assert!(results[0].is_error);
         assert!(results[0].output.as_str().unwrap().contains("not found"));
@@ -1016,7 +1051,7 @@ mod tests {
         let ctx = make_context();
         let progress = MockProgressSender;
 
-        let results = execute_tools(&tools, &requests, &ctx, &progress, None).await;
+        let results = execute_tools(&tools, &requests, &ctx, &progress, None, None).await;
 
         assert_eq!(results.len(), 3);
         assert_eq!(results[0].tool_use_id, "req-1");
@@ -1040,7 +1075,7 @@ mod tests {
         let ctx = make_context();
         let progress = MockProgressSender;
 
-        let results = execute_tools(&tools, &requests, &ctx, &progress, None).await;
+        let results = execute_tools(&tools, &requests, &ctx, &progress, None, None).await;
 
         assert_eq!(results.len(), 2);
         assert!(!results[0].is_error);
@@ -1284,6 +1319,38 @@ mod tests {
         );
     }
 
+    // ── Tool-health enforcement at dispatch ──
+
+    #[tokio::test]
+    async fn test_disabled_tool_is_blocked_at_dispatch() {
+        let tool = Arc::new(MockTool::new("BashTool"));
+        let ctx = make_context();
+        let progress = MockProgressSender;
+        let requests = vec![make_request("req-th-1", "BashTool")];
+        let tools: Vec<Arc<dyn Tool>> = vec![tool.clone()];
+
+        let tracker = Arc::new(crate::engine::tool_health::ToolHealthTracker::new());
+        for _ in 0..6 {
+            tracker.record_failure("BashTool", "boom");
+        }
+
+        let results = execute_tools(&tools, &requests, &ctx, &progress, None, Some(&tracker)).await;
+
+        assert_eq!(results.len(), 1);
+        assert!(results[0].is_error);
+        assert!(
+            results[0]
+                .output
+                .as_str()
+                .unwrap()
+                .contains("temporarily disabled"),
+            "unexpected output: {:?}",
+            results[0].output
+        );
+        // The tool itself was never invoked.
+        assert_eq!(tool.call_count.load(Ordering::SeqCst), 0);
+    }
+
     // ── Out-of-cwd Glob/Grep search grants ──
 
     #[test]
@@ -1452,7 +1519,7 @@ mod tests {
         let progress = MockProgressSender;
         let requests = vec![make_request("req-gate-7", "BashTool")];
 
-        let results = execute_tools(&tools, &requests, &ctx, &progress, None).await;
+        let results = execute_tools(&tools, &requests, &ctx, &progress, None, None).await;
 
         assert_eq!(results.len(), 1);
         assert!(results[0].is_error);

@@ -397,6 +397,7 @@ mod propagation_tests {
             permission: None,
             telemetry: None,
             evolution: None,
+            tool_health: None,
         };
 
         let ctx = tests::test_context_from_engine_config(&engine_config);
