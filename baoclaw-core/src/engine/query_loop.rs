@@ -279,14 +279,25 @@ pub async fn run_query_loop(
         {
             ApiCallOutcome::Stream(s) => s,
             ApiCallOutcome::Retry => continue, // retry the loop
-            ApiCallOutcome::Fatal => return,
+            ApiCallOutcome::Fatal(err) => {
+                // Record the failed query so evolution/rating sees it too.
+                record_query_trajectory(
+                    &config,
+                    &traj_prompt,
+                    std::mem::take(&mut traj_actions),
+                    crate::engine::evolution::TrajectoryOutcome::Error {
+                        code: err.code.clone(),
+                        message: err.message.clone(),
+                    },
+                    start_time.elapsed().as_millis() as u64,
+                )
+                .await;
+                return;
+            }
         };
 
         // Process SSE stream events, accumulating content blocks
-        let Some(IngestedTurn {
-            content_blocks: assistant_content_blocks,
-            stop_reason,
-        }) = ingest_stream_events(
+        let turn = match ingest_stream_events(
             stream,
             messages,
             &tx,
@@ -297,9 +308,40 @@ pub async fn run_query_loop(
             start_time,
         )
         .await
-        else {
-            return;
+        {
+            StreamIngest::Continue(turn) => turn,
+            StreamIngest::Aborted => {
+                // Parity with the loop-top abort: record before returning.
+                record_query_trajectory(
+                    &config,
+                    &traj_prompt,
+                    std::mem::take(&mut traj_actions),
+                    crate::engine::evolution::TrajectoryOutcome::Aborted,
+                    start_time.elapsed().as_millis() as u64,
+                )
+                .await;
+                return;
+            }
+            StreamIngest::Fatal(err) => {
+                // Record the failed query so evolution/rating sees it too.
+                record_query_trajectory(
+                    &config,
+                    &traj_prompt,
+                    std::mem::take(&mut traj_actions),
+                    crate::engine::evolution::TrajectoryOutcome::Error {
+                        code: err.code.clone(),
+                        message: err.message.clone(),
+                    },
+                    start_time.elapsed().as_millis() as u64,
+                )
+                .await;
+                return;
+            }
         };
+        let IngestedTurn {
+            content_blocks: assistant_content_blocks,
+            stop_reason,
+        } = turn;
 
         // Record the assistant turn in history, transcript, and cross-session index
         record_assistant_turn(
@@ -553,8 +595,9 @@ enum ApiCallOutcome {
     Stream(UnifiedStream),
     /// Transient failure handled by retrying the loop (backoff/fallback applied).
     Retry,
-    /// Fatal failure: an Error event was already sent to `tx`; the caller must return.
-    Fatal,
+    /// Fatal failure: an Error event was already sent to `tx`; the payload is
+    /// carried back so the loop can record a trajectory before returning.
+    Fatal(EngineError),
 }
 
 /// Build the API request for the current model and send it (with timeout),
@@ -633,14 +676,13 @@ async fn call_api_with_fallback(
                     messages.pop();
                 }
             }
-            let _ = tx
-                .send(EngineEvent::Error(EngineError {
-                    code: "timeout".to_string(),
-                    message: "API call timed out after 5 minutes".to_string(),
-                    details: None,
-                }))
-                .await;
-            return ApiCallOutcome::Fatal;
+            let err = EngineError {
+                code: "timeout".to_string(),
+                message: "API call timed out after 5 minutes".to_string(),
+                details: None,
+            };
+            let _ = tx.send(EngineEvent::Error(err.clone())).await;
+            return ApiCallOutcome::Fatal(err);
         }
     };
     let stream = match stream_result {
@@ -685,17 +727,16 @@ async fn call_api_with_fallback(
                             messages.pop();
                         }
                     }
-                    let _ = tx
-                        .send(EngineEvent::Error(EngineError {
-                            code: "all_models_exhausted".to_string(),
-                            message: error_msg,
-                            details: Some(serde_json::json!({
-                                "models_tried": models_tried,
-                                "total_retries": total_retries,
-                            })),
-                        }))
-                        .await;
-                    return ApiCallOutcome::Fatal;
+                    let err = EngineError {
+                        code: "all_models_exhausted".to_string(),
+                        message: error_msg,
+                        details: Some(serde_json::json!({
+                            "models_tried": models_tried,
+                            "total_retries": total_retries,
+                        })),
+                    };
+                    let _ = tx.send(EngineEvent::Error(err.clone())).await;
+                    return ApiCallOutcome::Fatal(err);
                 }
             }
         }
@@ -745,14 +786,13 @@ async fn call_api_with_fallback(
                             messages.pop();
                         }
                     }
-                    let _ = tx
-                        .send(EngineEvent::Error(EngineError {
-                            code: "api_server_error".to_string(),
-                            message: error_msg,
-                            details: None,
-                        }))
-                        .await;
-                    return ApiCallOutcome::Fatal;
+                    let err = EngineError {
+                        code: "api_server_error".to_string(),
+                        message: error_msg,
+                        details: None,
+                    };
+                    let _ = tx.send(EngineEvent::Error(err.clone())).await;
+                    return ApiCallOutcome::Fatal(err);
                 }
             }
         }
@@ -810,14 +850,13 @@ async fn call_api_with_fallback(
                     messages.pop();
                 }
             }
-            let _ = tx
-                .send(EngineEvent::Error(EngineError {
-                    code: "api_bad_request".to_string(),
-                    message: message.to_string(),
-                    details: None,
-                }))
-                .await;
-            return ApiCallOutcome::Fatal;
+            let err = EngineError {
+                code: "api_bad_request".to_string(),
+                message: message.to_string(),
+                details: None,
+            };
+            let _ = tx.send(EngineEvent::Error(err.clone())).await;
+            return ApiCallOutcome::Fatal(err);
         }
         Err(e) => {
             // Other API errors — remove the last user message to keep history clean
@@ -827,14 +866,13 @@ async fn call_api_with_fallback(
                     messages.pop();
                 }
             }
-            let _ = tx
-                .send(EngineEvent::Error(EngineError {
-                    code: "api_error".to_string(),
-                    message: format!("{}", e),
-                    details: None,
-                }))
-                .await;
-            return ApiCallOutcome::Fatal;
+            let err = EngineError {
+                code: "api_error".to_string(),
+                message: format!("{}", e),
+                details: None,
+            };
+            let _ = tx.send(EngineEvent::Error(err.clone())).await;
+            return ApiCallOutcome::Fatal(err);
         }
     };
 
@@ -847,9 +885,22 @@ struct IngestedTurn {
     stop_reason: Option<String>,
 }
 
+/// Outcome of consuming one SSE stream. `Continue` yields the ingested
+/// assistant turn; the other variants have already sent their terminal event
+/// (`Result{Aborted}` or `Error`) and the loop must stop — the payload is
+/// carried back so the loop can record a trajectory for the query.
+enum StreamIngest {
+    Continue(IngestedTurn),
+    /// Mid-stream abort: a `Result{Aborted}` event was already sent.
+    Aborted,
+    /// Fatal failure: an Error event was already sent to `tx`.
+    Fatal(EngineError),
+}
+
 /// Ingest the SSE stream for one assistant turn, accumulating content blocks,
-/// usage, and cost. Returns `None` on a fatal error (abort or stream error);
-/// the error/result event has already been sent to `tx`.
+/// usage, and cost. On `Aborted`/`Fatal` the terminal event (`Result{Aborted}`
+/// or `Error`) has already been sent to `tx`; the payload lets the caller
+/// record a trajectory before returning.
 #[allow(clippy::too_many_arguments)]
 async fn ingest_stream_events(
     mut stream: UnifiedStream,
@@ -860,7 +911,7 @@ async fn ingest_stream_events(
     cost_tracker: &mut CostTracker,
     turn_count: u32,
     start_time: std::time::Instant,
-) -> Option<IngestedTurn> {
+) -> StreamIngest {
     // Process SSE stream events, accumulating content blocks
     let mut assistant_content_blocks: Vec<ContentBlock> = Vec::new();
     let mut current_text = String::new();
@@ -887,7 +938,7 @@ async fn ingest_stream_events(
                 total_cost_usd: cost_tracker.total_cost(), usage: total_usage.clone(),
                 num_turns: turn_count, duration_ms: start_time.elapsed().as_millis() as u64,
             })).await;
-            return None;
+            return StreamIngest::Aborted;
         }
     } {
         match event_result {
@@ -1062,14 +1113,13 @@ async fn ingest_stream_events(
                     break;
                 }
                 ApiStreamEvent::Error { error } => {
-                    let _ = tx
-                        .send(EngineEvent::Error(EngineError {
-                            code: error.error_type,
-                            message: error.message,
-                            details: None,
-                        }))
-                        .await;
-                    return None;
+                    let err = EngineError {
+                        code: error.error_type,
+                        message: error.message,
+                        details: None,
+                    };
+                    let _ = tx.send(EngineEvent::Error(err.clone())).await;
+                    return StreamIngest::Fatal(err);
                 }
                 ApiStreamEvent::Ping => {}
             },
@@ -1083,19 +1133,18 @@ async fn ingest_stream_events(
                         }
                     }
                 }
-                let _ = tx
-                    .send(EngineEvent::Error(EngineError {
-                        code: "stream_error".to_string(),
-                        message: format!("{}", e),
-                        details: None,
-                    }))
-                    .await;
-                return None;
+                let err = EngineError {
+                    code: "stream_error".to_string(),
+                    message: format!("{}", e),
+                    details: None,
+                };
+                let _ = tx.send(EngineEvent::Error(err.clone())).await;
+                return StreamIngest::Fatal(err);
             }
         }
     }
 
-    Some(IngestedTurn {
+    StreamIngest::Continue(IngestedTurn {
         content_blocks: assistant_content_blocks,
         stop_reason,
     })

@@ -243,6 +243,19 @@ impl EvolutionEngine {
         *count = 0;
     }
 
+    /// Test-only constructor writing under an explicit base directory, so
+    /// tests never touch the real `~/.baoclaw`.
+    #[cfg(test)]
+    pub fn with_base_dir_for_test(base_dir: std::path::PathBuf) -> Self {
+        Self {
+            base_dir: Mutex::new(base_dir.clone()),
+            task_count: Mutex::new(0),
+            skills_dir: base_dir.join("skills"),
+            skill_stats: tokio::sync::Mutex::new(std::collections::HashMap::new()),
+            trajectories: tokio::sync::Mutex::new(Vec::new()),
+        }
+    }
+
     /// Record a completed interaction as a trajectory.
     /// Called after each query loop completes.
     pub async fn record_trajectory(&self, trajectory: Trajectory) {
@@ -1450,5 +1463,54 @@ mod training_export_tests {
         assert!(!is_safe_skill_name("../outside"));
         assert!(!is_safe_skill_name("skill.md"));
         assert!(!is_safe_skill_name(""));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Hermetic engine writing under a unique temp dir (never ~/.baoclaw).
+    fn test_engine() -> (EvolutionEngine, std::path::PathBuf) {
+        let base = std::env::temp_dir().join(format!("baoclaw-evo-test-{}", uuid::Uuid::new_v4()));
+        (EvolutionEngine::with_base_dir_for_test(base.clone()), base)
+    }
+
+    #[tokio::test]
+    async fn error_trajectory_is_recorded_and_rateable() {
+        let (engine, base) = test_engine();
+
+        engine
+            .record_trajectory(Trajectory {
+                id: uuid::Uuid::new_v4().to_string(),
+                timestamp: chrono::Utc::now().to_rfc3339(),
+                cwd: "/tmp".to_string(),
+                user_prompt: "run the flaky deploy".to_string(),
+                assistant_actions: vec![TrajectoryAction {
+                    tool_name: "Bash".to_string(),
+                    input_summary: "deploy.sh".to_string(),
+                    output_summary: "boom".to_string(),
+                    is_error: true,
+                }],
+                outcome: TrajectoryOutcome::Error {
+                    code: "api_error".to_string(),
+                    message: "boom".to_string(),
+                },
+                tool_count: 1,
+                duration_ms: 1234,
+                user_rating: None,
+            })
+            .await;
+
+        engine.rate_last_trajectory(TrajectoryRating::Bad).await;
+
+        let content = std::fs::read_to_string(base.join(TRAJECTORY_FILE)).unwrap();
+        let last = content.lines().last().unwrap();
+        let traj: Trajectory = serde_json::from_str(last).unwrap();
+        assert!(
+            matches!(traj.outcome, TrajectoryOutcome::Error { ref code, .. } if code == "api_error")
+        );
+        assert!(matches!(traj.user_rating, Some(TrajectoryRating::Bad)));
+        let _ = std::fs::remove_dir_all(base);
     }
 }
