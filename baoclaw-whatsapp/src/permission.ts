@@ -4,13 +4,15 @@
  * When the daemon needs user approval before executing a tool (e.g. file writes,
  * shell commands), this module:
  *   1. Formats a human-readable permission request message for WhatsApp.
- *   2. Registers the request in `SenderTracker` with a 60-second auto-expiry.
+ *   2. Registers the request in `SenderTracker` with an auto-expiry window
+ *      taken from the daemon's `ask_timeout_secs` (carried by each
+ *      permission_request event).
  *   3. Parses the user's WhatsApp reply (`yes`/`no`) and forwards the decision
  *      back to the daemon via `IpcClient.request('permissionResponse', …)`.
  *
  * Lifecycle of a single permission request:
  *   registerRequest()  →  [waiting for user]  →  handleResponse("yes"/"no")
- *                                                or 60 s timeout → onTimeout()
+ *                                                or timeout → onTimeout()
  */
 
 import { SenderTracker, type PermissionRequest } from "./senderTracker.js";
@@ -19,8 +21,13 @@ import { createLogger } from "baoclaw-ipc/logger";
 
 const logger = createLogger("whatsapp");
 
-/** Time (ms) before an unanswered permission request is automatically denied. */
-const PERMISSION_TIMEOUT_MS = 60_000; // 60 seconds
+/**
+ * Last-resort auto-expiry window (ms), matching the daemon's default
+ * `ask_timeout_secs`. Fresh prompts always carry the daemon's live value in
+ * the `permission_request` event; this constant only covers a malformed or
+ * pre-2.2 daemon event missing that field.
+ */
+const PERMISSION_TIMEOUT_MS = 300_000; // 300 seconds
 
 /**
  * Manages permission request / response flow on behalf of the WhatsApp Gateway.
@@ -64,23 +71,26 @@ export class PermissionManager {
    * @param toolUseId    Opaque ID from the daemon's `tool_use` event.
    * @param toolName     Human-readable tool name (e.g. `"bash"`).
    * @param description  Optional one-liner describing what the tool will do.
+   * @param timeoutSecs  The daemon's auto-deny window for this ask, rendered
+   *                     in the hint so the user sees the real schedule.
    * @returns A multi-line string ready to be sent via `sock.sendMessage`.
    *
    * @example
    * ```ts
-   * const text = pm.formatPermissionRequest('tu_123', 'bash', 'rm -rf /tmp/old');
+   * const text = pm.formatPermissionRequest('tu_123', 'bash', 'rm -rf /tmp/old', 300);
    * // 🔐 *Permission Request*
    * // Tool: bash
    * // Description: rm -rf /tmp/old
    * //
    * // Reply *yes* to allow or *no* to deny
-   * // (auto-denied after 60 seconds)
+   * // (auto-denied after 300 seconds)
    * ```
    */
   formatPermissionRequest(
     toolUseId: string,
     toolName: string,
     description?: string,
+    timeoutSecs: number = PERMISSION_TIMEOUT_MS / 1000,
   ): string {
     const desc = description?.trim() || "None";
     return [
@@ -89,7 +99,7 @@ export class PermissionManager {
       `Description: ${desc}`,
       "",
       "Reply *yes* to allow or *no* to deny",
-      "(auto-denied after 60 seconds)",
+      `(auto-denied after ${timeoutSecs} seconds)`,
     ].join("\n");
   }
 
@@ -103,10 +113,10 @@ export class PermissionManager {
    *     invoke `onTimeout(phone, oldToolUseId, "superseded")` so the caller
    *     can deny the stale request with the daemon.
    *  2. Create a `PermissionRequest` object with an expiry timestamp
-   *     (`Date.now() + 60_000`).
+   *     (`Date.now() + timeoutMs`).
    *  3. Store it via `SenderTracker.setPendingPermission`.
-   *  4. Start a 60-second timer that, on expiry, clears the pending permission
-   *     and invokes `onTimeout(phone, toolUseId, "timeout")`.
+   *  4. Start a timer that, on expiry, clears the pending permission and
+   *     invokes `onTimeout(phone, toolUseId, "timeout")`.
    *
    * @param phone       Sender phone (E.164).
    * @param toolUseId   Unique ID from the daemon.

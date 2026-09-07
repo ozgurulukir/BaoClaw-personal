@@ -51,6 +51,8 @@ export interface PendingPermission {
   toolName: string;
   /** Truncated JSON.stringify of the daemon event's `input`. */
   inputPreview: string;
+  /** Daemon's auto-deny window (seconds) for THIS ask, when the event carried it. */
+  askTimeoutSecs?: number;
 }
 
 export type ActionType =

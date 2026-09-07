@@ -362,22 +362,28 @@ class DaemonBridge {
         );
         const toolName = event.tool_name || "unknown";
         logger.info(`Permission request: ${toolName} (${event.tool_use_id})`);
+        // Mirror the daemon's exact auto-deny window for this ask (fallback
+        // = the daemon default, for malformed/old-daemon events).
+        const timeoutSecs = Math.max(
+          1,
+          (event as { ask_timeout_secs?: number }).ask_timeout_secs ?? 300,
+        );
         // Card-first (rich buttons); an older lark-cli that rejects
         // interactive content degrades to the plain-text prompt with the
         // same reply keywords.
         const promptSend: Promise<void> = cardActionSupport
           ? sendFeishuCard(
               chatId,
-              buildPermissionCard(toolName, preview),
+              buildPermissionCard(toolName, preview, timeoutSecs),
             ).catch(() =>
               sendFeishuMessage(
                 chatId,
-                formatPermissionRequest(toolName, preview),
+                formatPermissionRequest(toolName, preview, timeoutSecs),
               ),
             )
           : sendFeishuMessage(
               chatId,
-              formatPermissionRequest(toolName, preview),
+              formatPermissionRequest(toolName, preview, timeoutSecs),
             );
         promptSend.catch(() => {});
         this.permissionManager.registerRequest(
@@ -386,22 +392,23 @@ class DaemonBridge {
           toolName,
           (cid, toolUseId, reason) => {
             // Expiry/supersede must deny with the daemon so the parked turn
-            // resumes; notify the user only for a real expiry.
+            // resumes. The daemon's own auto-deny always fires first (its
+            // timer starts before ours), so `delivered` is usually false
+            // here — notify the user for a real expiry regardless.
             this.control
-              ?.request<{ delivered: boolean }>("permissionResponse", {
+              ?.request("permissionResponse", {
                 tool_use_id: toolUseId,
                 decision: "deny",
               })
-              .then((res) => {
-                if (res?.delivered === true && reason === "timeout") {
-                  sendFeishuMessage(
-                    cid,
-                    "⏰ Permission request timed out, auto-denied.",
-                  ).catch(() => {});
-                }
-              })
               .catch(() => {});
+            if (reason === "timeout") {
+              sendFeishuMessage(
+                cid,
+                "⏰ Permission request timed out, auto-denied.",
+              ).catch(() => {});
+            }
           },
+          timeoutSecs * 1000,
         );
         break;
       }

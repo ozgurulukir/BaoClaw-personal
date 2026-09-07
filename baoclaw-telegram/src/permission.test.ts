@@ -32,10 +32,10 @@ test("parsePermissionReply keyword matrix", () => {
 });
 
 test("formatPermissionRequest includes tool name and escaped preview", () => {
-  const text = formatPermissionRequest("Bash", '{"command":"echo <hi>"}');
+  const text = formatPermissionRequest("Bash", '{"command":"echo <hi>"}', 300);
   assert.match(text, /Bash/);
   assert.match(text, /&lt;hi&gt;/);
-  assert.match(text, /auto-denied after 60s/);
+  assert.match(text, /auto-denied after 300s/);
 });
 
 test("buildPermissionKeyboard carries decision-only callback_data", () => {

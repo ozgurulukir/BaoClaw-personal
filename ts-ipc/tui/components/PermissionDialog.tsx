@@ -23,7 +23,7 @@ interface PermissionDialogProps {
  */
 export const PermissionDialog: React.FC<PermissionDialogProps> = ({
   request,
-  autoDenySecs = 60,
+  autoDenySecs = 300,
   onDecide,
 }) => {
   useInput((inputChar, key) => {

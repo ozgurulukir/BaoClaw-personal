@@ -16,7 +16,6 @@ export interface WhatsAppConfig {
   groupPolicy: "allow" | "ignore";
   // New fields
   maxQueueSize: number;
-  permissionTimeoutMs: number;
   reconnectMaxMs: number;
   sharedSessionId: string;
   mediaEnabled: boolean;
@@ -32,7 +31,6 @@ export const DEFAULTS: WhatsAppConfig = {
   dmPolicy: "allow",
   groupPolicy: "ignore",
   maxQueueSize: 100,
-  permissionTimeoutMs: 60000,
   reconnectMaxMs: 300000,
   sharedSessionId: "whatsapp",
   mediaEnabled: true,
@@ -77,10 +75,6 @@ export function loadWhatsAppConfig(configPath?: string): WhatsAppConfig {
         typeof wa.maxQueueSize === "number" && wa.maxQueueSize > 0
           ? wa.maxQueueSize
           : DEFAULTS.maxQueueSize,
-      permissionTimeoutMs:
-        typeof wa.permissionTimeoutMs === "number" && wa.permissionTimeoutMs > 0
-          ? wa.permissionTimeoutMs
-          : DEFAULTS.permissionTimeoutMs,
       reconnectMaxMs:
         typeof wa.reconnectMaxMs === "number" && wa.reconnectMaxMs > 0
           ? wa.reconnectMaxMs

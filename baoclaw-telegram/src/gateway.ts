@@ -309,12 +309,20 @@ async function main() {
           tool_use_id: string;
           tool_name: string;
           input?: unknown;
+          ask_timeout_secs?: number;
         };
         const preview = JSON.stringify(pr.input ?? {}).slice(0, PREVIEW_CHARS);
+        // Mirror the daemon's exact auto-deny window for this ask (fallback
+        // = the daemon default, for malformed/old-daemon events).
+        const timeoutSecs = Math.max(1, pr.ask_timeout_secs ?? 300);
         try {
           const sent = await sendMessage(
             chatId,
-            formatPermissionRequest(pr.tool_name || "unknown", preview),
+            formatPermissionRequest(
+              pr.tool_name || "unknown",
+              preview,
+              timeoutSecs,
+            ),
             {
               parse_mode: "HTML",
               reply_markup: buildPermissionKeyboard(),
@@ -329,16 +337,16 @@ async function main() {
             },
             async (cid, toolUseId, reason) => {
               // Expiry/supersede must deny with the daemon so the parked turn
-              // resumes; notify the user only for a real expiry.
-              let delivered = false;
+              // resumes. The daemon's own auto-deny always fires first (its
+              // timer starts before ours), so `delivered` is usually false
+              // here — notify the user for a real expiry regardless.
               try {
-                const res = await control.request<{ delivered: boolean }>(
-                  "permissionResponse",
-                  { tool_use_id: toolUseId, decision: "deny" },
-                );
-                delivered = res?.delivered === true;
+                await control.request("permissionResponse", {
+                  tool_use_id: toolUseId,
+                  decision: "deny",
+                });
               } catch {}
-              if (delivered && reason === "timeout") {
+              if (reason === "timeout") {
                 try {
                   await sendMessage(
                     cid,
@@ -347,6 +355,7 @@ async function main() {
                 } catch {}
               }
             },
+            timeoutSecs * 1000,
           );
         } catch {}
         break;

@@ -4,8 +4,10 @@
  * Mirrors the WhatsApp gateway's flow (baoclaw-whatsapp/src/permission.ts),
  * adapted for Telegram's interactive surface:
  *   1. Formats an HTML prompt with inline buttons (Allow / Always / Deny).
- *   2. Registers the request per chat with a 60-second auto-expiry; on expiry
- *      or supersede the caller denies the request with the daemon.
+ *   2. Registers the request per chat with an auto-expiry window taken from
+ *      the daemon's `ask_timeout_secs` (carried by each permission_request
+ *      event); on expiry or supersede the caller denies the request with the
+ *      daemon.
  *   3. Parses a plain-text reply as a fallback decision path
  *      (y/yes/allow, a/always, n/no/deny).
  *
@@ -28,8 +30,13 @@ export interface PendingPermission {
   message_id?: number;
 }
 
-/** Time (ms) before an unanswered permission request is automatically denied. */
-const PERMISSION_TIMEOUT_MS = 60_000; // 60 seconds
+/**
+ * Last-resort auto-expiry window (ms), matching the daemon's default
+ * `ask_timeout_secs`. Fresh prompts always carry the daemon's live value in
+ * the `permission_request` event; this constant only covers a malformed or
+ * pre-2.2 daemon event missing that field.
+ */
+const PERMISSION_TIMEOUT_MS = 300_000; // 300 seconds
 
 /**
  * Parse a plain-text reply as a permission decision.
@@ -66,10 +73,14 @@ function escapeHtml(text: string): string {
 /**
  * Build the HTML permission prompt: tool name + truncated input preview +
  * keyword hints for the reply fallback.
+ *
+ * @param timeoutSecs The daemon's auto-deny window for this ask, rendered in
+ *                    the hint so the user sees the real schedule.
  */
 export function formatPermissionRequest(
   toolName: string,
   inputPreview: string,
+  timeoutSecs: number,
 ): string {
   const preview = inputPreview ? escapeHtml(inputPreview) : "—";
   return [
@@ -77,7 +88,7 @@ export function formatPermissionRequest(
     `Tool: <code>${escapeHtml(toolName)}</code>`,
     `Input: <code>${preview}</code>`,
     "",
-    "Reply <b>y</b> to allow / <b>a</b> to always allow / <b>n</b> to deny (auto-denied after 60s)",
+    `Reply <b>y</b> to allow / <b>a</b> to always allow / <b>n</b> to deny (auto-denied after ${timeoutSecs}s)`,
   ].join("\n");
 }
 

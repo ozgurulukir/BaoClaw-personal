@@ -197,6 +197,7 @@ export function subscribeToEvents(
             toolUseId,
             toolName: (p.tool_name as string) || "tool",
             inputPreview: JSON.stringify(p.input ?? {}).slice(0, 400),
+            askTimeoutSecs: (p.ask_timeout_secs as number) || undefined,
           },
         });
         break;

@@ -4,8 +4,10 @@
  * Mirrors the WhatsApp gateway's flow (baoclaw-whatsapp/src/permission.ts),
  * card-first with a plain-text keyword fallback for older lark-clis:
  *   1. Formats a human-readable permission prompt (tool + input preview).
- *   2. Registers the request per chat with a 60-second auto-expiry; on expiry
- *      or supersede the caller denies the request with the daemon.
+ *   2. Registers the request per chat with an auto-expiry window taken from
+ *      the daemon's `ask_timeout_secs` (carried by each permission_request
+ *      event); on expiry or supersede the caller denies the request with the
+ *      daemon.
  *   3. Parses the user's reply (yes / always / no) and forwards the decision
  *      back to the daemon via the CONTROL channel — the daemon's serial
  *      main-connection loop is parked while a turn is in flight, exactly when
@@ -21,8 +23,13 @@ export interface PermissionRequest {
   tool_name: string;
 }
 
-/** Time (ms) before an unanswered permission request is automatically denied. */
-const PERMISSION_TIMEOUT_MS = 60_000; // 60 seconds
+/**
+ * Last-resort auto-expiry window (ms), matching the daemon's default
+ * `ask_timeout_secs`. Fresh prompts always carry the daemon's live value in
+ * the `permission_request` event; this constant only covers a malformed or
+ * pre-2.2 daemon event missing that field.
+ */
+const PERMISSION_TIMEOUT_MS = 300_000; // 300 seconds
 
 /**
  * Parse a plain-text reply as a permission decision.
@@ -48,10 +55,16 @@ export function parsePermissionReply(text: string): PermissionDecision | null {
   }
 }
 
-/** Build the plain-text permission prompt (sent via lark-cli --text). */
+/**
+ * Build the plain-text permission prompt (sent via lark-cli --text).
+ *
+ * @param timeoutSecs The daemon's auto-deny window for this ask, rendered in
+ *                    the hint so the user sees the real schedule.
+ */
 export function formatPermissionRequest(
   toolName: string,
   inputPreview: string,
+  timeoutSecs: number,
 ): string {
   const preview = inputPreview || "—";
   return [
@@ -59,7 +72,7 @@ export function formatPermissionRequest(
     `Tool: ${toolName}`,
     `Input: ${preview}`,
     "",
-    `Reply yes to allow / always to always allow this tool / no to deny (auto-denied after ${PERMISSION_TIMEOUT_MS / 1000}s)`,
+    `Reply yes to allow / always to always allow this tool / no to deny (auto-denied after ${timeoutSecs}s)`,
   ].join("\n");
 }
 
@@ -72,6 +85,7 @@ export function formatPermissionRequest(
 export function buildPermissionCard(
   toolName: string,
   inputPreview: string,
+  timeoutSecs: number,
 ): Record<string, unknown> {
   const preview = inputPreview || "—";
   return {
@@ -116,7 +130,7 @@ export function buildPermissionCard(
         elements: [
           {
             tag: "plain_text",
-            content: `Auto-denied if no decision within ${PERMISSION_TIMEOUT_MS / 1000}s`,
+            content: `Auto-denied if no decision within ${timeoutSecs}s`,
           },
         ],
       },

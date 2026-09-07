@@ -241,13 +241,16 @@ pub async fn execute_tool_with_permission(
                 (ctx.ask_timeout_duration(), ctx.persist_grants)
             };
 
-            // Send PermissionRequest event to clients
+            // Send PermissionRequest event to clients — carrying the exact
+            // auto-deny window this ask is parked under, so gateway prompts
+            // can mirror the daemon's schedule instead of guessing.
             let _ = permission
                 .event_tx
                 .send(EngineEvent::PermissionRequest {
                     tool_name: tool_name.clone(),
                     input: request.input.clone(),
                     tool_use_id: tool_use_id.clone(),
+                    ask_timeout_secs: ask_timeout.as_secs().max(1),
                 })
                 .await;
 

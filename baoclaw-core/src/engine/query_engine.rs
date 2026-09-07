@@ -109,6 +109,9 @@ pub enum EngineEvent {
         tool_name: String,
         input: Value,
         tool_use_id: String,
+        /// The auto-deny window the daemon itself will enforce for THIS ask —
+        /// read live per prompt, so clients can mirror the same schedule.
+        ask_timeout_secs: u64,
     },
     #[serde(rename = "progress")]
     Progress { tool_use_id: String, data: Value },
@@ -1395,10 +1398,12 @@ mod tests {
             tool_name: "FileWrite".to_string(),
             input: json!({"path": "/tmp/test.txt"}),
             tool_use_id: "tu_2".to_string(),
+            ask_timeout_secs: 300,
         };
         let json = serde_json::to_value(&event).unwrap();
         assert_eq!(json["type"], "permission_request");
         assert_eq!(json["tool_name"], "FileWrite");
+        assert_eq!(json["ask_timeout_secs"], 300);
     }
 
     #[test]

@@ -116,17 +116,21 @@ export const App: React.FC<AppProps> = ({ client, model, control }) => {
   );
 
   // The queue head owns auto-allow and the local deny timer (mirrors the
-  // daemon's ask_timeout knob). Keyed on the head's id so each request gets
-  // a fresh timer and the timer is cancelled on any decision.
+  // daemon's ask_timeout knob — each event carries its own window; the
+  // permissions.info-seeded value is only the fallback). Keyed on the head's
+  // id so each request gets a fresh timer, cancelled on any decision.
   useEffect(() => {
     if (!head) return;
     if (state.autoAllow) {
       void decide(head, "allow");
       return;
     }
-    const timer = setTimeout(() => {
-      void decide(head, "deny");
-    }, askTimeoutSecs * 1000);
+    const timer = setTimeout(
+      () => {
+        void decide(head, "deny");
+      },
+      (head.askTimeoutSecs ?? askTimeoutSecs) * 1000,
+    );
     return () => clearTimeout(timer);
   }, [head, state.autoAllow, decide, askTimeoutSecs]);
 
@@ -339,7 +343,9 @@ export const App: React.FC<AppProps> = ({ client, model, control }) => {
       {/* Permission prompt — modal, queue head first */}
       <PermissionDialog
         request={dialogOpen ? head : null}
-        autoDenySecs={askTimeoutSecs}
+        autoDenySecs={
+          dialogOpen ? (head?.askTimeoutSecs ?? askTimeoutSecs) : askTimeoutSecs
+        }
         onDecide={(decision) => {
           if (head) void decide(head, decision);
         }}

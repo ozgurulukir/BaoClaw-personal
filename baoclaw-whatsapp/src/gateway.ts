@@ -575,8 +575,13 @@ export class WhatsAppGateway {
             tool_name: string;
             input?: unknown;
             description?: string;
+            ask_timeout_secs?: number;
           };
           if (jid) {
+            // Mirror the daemon's exact auto-deny window for this ask
+            // (fallback = the daemon default, for malformed/old-daemon
+            // events).
+            const timeoutSecs = Math.max(1, pr.ask_timeout_secs ?? 300);
             // The daemon event carries the raw tool `input`, not a
             // description — render a truncated preview so the user isn't
             // approving blind.
@@ -587,6 +592,7 @@ export class WhatsAppGateway {
               pr.tool_use_id,
               pr.tool_name,
               desc,
+              timeoutSecs,
             );
             try {
               await sock.sendMessage(jid, { text });
@@ -598,8 +604,10 @@ export class WhatsAppGateway {
               pr.description || "",
               async (phone, toolUseId, reason) => {
                 // Timeout/supersede must deny with the daemon too — otherwise
-                // the gate stays parked until its own 300 s auto-deny and the
-                // turn hangs. User notification only for a real expiry.
+                // the gate stays parked until its own auto-deny and the
+                // turn hangs. The daemon's own auto-deny always fires first
+                // (its timer starts before ours), so notify the user for a
+                // real expiry regardless of whether the deny lands.
                 try {
                   await this.control!.request("permissionResponse", {
                     tool_use_id: toolUseId,
@@ -617,6 +625,7 @@ export class WhatsAppGateway {
                   }
                 }
               },
+              timeoutSecs * 1000,
             );
           }
           break;

@@ -45,13 +45,13 @@ test("parsePermissionReply keyword matrix", () => {
 });
 
 test("formatPermissionRequest lists all three reply keywords", () => {
-  const text = formatPermissionRequest("Bash", '{"command":"ls"}');
+  const text = formatPermissionRequest("Bash", '{"command":"ls"}', 300);
   assert.match(text, /Permission Request/);
   assert.match(text, /Bash/);
   assert.match(text, /yes/);
   assert.match(text, /always/);
   assert.match(text, /no/);
-  assert.match(text, /60s/);
+  assert.match(text, /300s/);
 });
 
 test("handleResponse forwards allow with control channel and clears pending", async () => {
@@ -151,7 +151,7 @@ test("cleanup cancels pending timers so no expiry fires", async () => {
 });
 
 test("buildPermissionCard carries three decision-only buttons", () => {
-  const card = buildPermissionCard("Bash", '{"command":"ls"}') as {
+  const card = buildPermissionCard("Bash", '{"command":"ls"}', 300) as {
     header: { title: { content: string } };
     elements: Array<any>;
   };
@@ -163,6 +163,9 @@ test("buildPermissionCard carries three decision-only buttons", () => {
     "always",
     "deny",
   ]);
+  const note = card.elements.find((e) => e.tag === "note");
+  const noteText = JSON.stringify(note);
+  assert.match(noteText, /within 300s/);
 });
 
 test("parseCardAction reads value objects and raw strings", () => {
