@@ -97,7 +97,7 @@ export class PermissionManager {
    * // Tool: bash
    * // Description: rm -rf /tmp/old
    * //
-   * // Reply *yes* to allow or *no* to deny
+   * // Reply *yes* to allow, *always* to always allow this tool, or *no* to deny
    * // (auto-denied after 300 seconds)
    * ```
    */
@@ -113,7 +113,7 @@ export class PermissionManager {
       `Tool: ${toolName}`,
       `Description: ${desc}`,
       "",
-      "Reply *yes* to allow or *no* to deny",
+      "Reply *yes* to allow, *always* to always allow this tool, or *no* to deny",
       `(auto-denied after ${timeoutSecs} seconds)`,
     ].join("\n");
   }
@@ -219,7 +219,9 @@ export class PermissionManager {
     text: string,
     client: Pick<IpcClient, "request">,
   ): Promise<
-    { decision: "allow" | "deny"; delivered: boolean } | "late" | null
+    | { decision: "allow" | "allow_always" | "deny"; delivered: boolean }
+    | "late"
+    | null
   > {
     // 1. Check for a pending request.
     const pending = this.senderTracker.getPendingPermission(phone);
@@ -228,6 +230,8 @@ export class PermissionManager {
       const isKeyword =
         normalized === "yes" ||
         normalized === "allow" ||
+        normalized === "a" ||
+        normalized === "always" ||
         normalized === "no" ||
         normalized === "deny";
       return isKeyword && this.isRecentlyResolved(phone) ? "late" : null;
@@ -235,10 +239,12 @@ export class PermissionManager {
 
     // 2. Parse the reply.
     const normalized = text.trim().toLowerCase();
-    let decision: "allow" | "deny" | null = null;
+    let decision: "allow" | "allow_always" | "deny" | null = null;
 
     if (normalized === "yes" || normalized === "allow") {
       decision = "allow";
+    } else if (normalized === "a" || normalized === "always") {
+      decision = "allow_always";
     } else if (normalized === "no" || normalized === "deny") {
       decision = "deny";
     }
@@ -248,12 +254,14 @@ export class PermissionManager {
       return null;
     }
 
-    // 4. Forward the decision to the daemon.
+    // 4. Forward the decision to the daemon. "always" records a whole-tool
+    // allow rule (rule = tool name), mirroring the other gateways.
     let delivered = false;
     try {
       const res = await client.request("permissionResponse", {
         tool_use_id: pending.tool_use_id,
         decision,
+        ...(decision === "allow_always" ? { rule: pending.tool_name } : {}),
       });
       delivered = (res as { delivered?: boolean })?.delivered === true;
     } catch (err) {

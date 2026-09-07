@@ -110,6 +110,24 @@ test("handleResponse forwards allow/deny via permissionResponse and clears state
   pm.cleanup();
 });
 
+test("handleResponse forwards allow_always with the tool-name rule", async () => {
+  const { pm, tracker } = makeManager();
+  const client = fakeClient();
+
+  pm.registerRequest("+15550000001", "tu_3", "bash", "", () => {}, 60_000);
+  const always = await pm.handleResponse(
+    "+15550000001",
+    "always",
+    client as any,
+  );
+  assert.deepEqual(always, { decision: "allow_always", delivered: true });
+  assert.equal(client.calls[0].params.decision, "allow_always");
+  // Whole-tool rule, mirroring the other gateways.
+  assert.equal(client.calls[0].params.rule, "bash");
+  assert.equal(tracker.getPendingPermission("+15550000001"), null);
+  pm.cleanup();
+});
+
 test("handleResponse reports delivered=false when the daemon moved on", async () => {
   const { pm, tracker } = makeManager();
   const client = {
