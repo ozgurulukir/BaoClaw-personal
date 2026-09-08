@@ -700,45 +700,6 @@ $("btn-copy-diff")?.addEventListener("click", () => {
   }
 });
 
-function initModelPicker(models, primary) {
-  const modelPicker = $("model-picker");
-  if (!modelPicker) return;
-  modelPicker.innerHTML = "";
-  const profileList =
-    Array.isArray(models) && models.length
-      ? models
-      : [
-          { id: "glm52", label: "GLM-5.2 (Anthropic API)" },
-          { id: "deepseek", label: "DeepSeek V3 / R1" },
-          { id: "claude-sonnet", label: "Claude 3.7 Sonnet" },
-          { id: "gpt-4o", label: "GPT-4o" },
-          { id: "auto", label: "Auto Router" },
-        ];
-
-  profileList.forEach((p) => {
-    const opt = document.createElement("option");
-    opt.value = p.id || p.name || p;
-    opt.textContent = p.label || p.name || p.id || p;
-    if (opt.value === primary) opt.selected = true;
-    modelPicker.appendChild(opt);
-  });
-
-  modelPicker.onchange = () => {
-    const selected = modelPicker.value;
-    const w = getActiveWs();
-    if (w?.readyState === 1) {
-      w.send(
-        JSON.stringify({
-          action: "rpc",
-          method: "model.setProfile",
-          params: { profile: selected },
-        }),
-      );
-      setStatus("Profile: " + selected, "connected");
-    }
-  };
-}
-
 function connectTab(cwd) {
   const tab = tabs.get(cwd);
   if (!tab) return;
@@ -1279,14 +1240,12 @@ function handleTabMessage(tab, msg) {
       if (isActive()) {
         updateSessionInfo(tab, cwd);
         setStatus("Connected", "connected");
-        initModelPicker(
-          msg.data.models || msg.data.model_profiles,
-          msg.data.primary_profile,
-        );
       }
       loadProjects();
       if (tab.ws?.readyState === 1) {
-        tab.ws.send(JSON.stringify({ action: "rpc", method: "sessionTokens" }));
+        tab.ws.send(
+          JSON.stringify({ action: "rpc", method: "session.tokens" }),
+        );
         if (s.msgCount > 0)
           tab.ws.send(
             JSON.stringify({
@@ -1459,7 +1418,7 @@ function handleTabMessage(tab, msg) {
       break;
     }
     case "rpcResult": {
-      if (msg.method === "sessionTokens" && isActive()) {
+      if (msg.method === "session.tokens" && isActive()) {
         s.contextTokens = msg.data.current_tokens || 0;
         updateSessionInfo(tab, cwd);
       } else if (msg.method === "projectsList" && isActive())

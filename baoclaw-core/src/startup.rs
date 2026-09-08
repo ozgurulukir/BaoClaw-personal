@@ -260,6 +260,9 @@ pub(super) fn load_config_and_api_client() -> (BaoclawConfig, Arc<UnifiedClient>
     // Load BaoClaw config from ~/.baoclaw/config.json
     let mut baoclaw_config = config::load_config();
     config::apply_env_override(&mut baoclaw_config);
+    // The executor reads the tool-output cap through this process-wide
+    // accessor (it has no config handle at the truncation sites).
+    config::init_tool_output_threshold(baoclaw_config.tool_output_threshold_chars);
 
     // === P1-1: Model profiles support ===
     // Resolve the primary profile (auto-migrated from old format by normalize_profiles).
@@ -521,9 +524,12 @@ pub(super) fn build_engine_tools(
     )
 }
 
-/// Load skill prompt, long-term memory, and the user profile; combine them
-/// into the append_system_prompt fragment. Returns (combined prompt, memory
-/// store, profile manager).
+/// Load skill prompt and the user profile; combine them into the
+/// append_system_prompt fragment. Long-term memory is deliberately NOT part
+/// of this frozen string — the engine rebuilds the memory fragment per query
+/// (QueryEngineConfig.memory_store) so mid-session MemoryTool writes reach
+/// the model without a restart. Returns (combined prompt, memory store,
+/// profile manager).
 pub(super) async fn load_prompts_and_memory(
     cwd_str: &str,
 ) -> (
@@ -539,15 +545,8 @@ pub(super) async fn load_prompts_and_memory(
         eprintln!("Loaded skills into system prompt ({} chars)", sp.len());
     }
 
-    // Load long-term memory
+    // Load long-term memory (injected live per query — see QueryEngineConfig)
     let memory_store = Arc::new(engine::memory::MemoryStore::load());
-    let memory_prompt = memory_store.build_prompt_fragment().await;
-    if let Some(ref mp) = memory_prompt {
-        eprintln!(
-            "Loaded long-term memory into system prompt ({} chars)",
-            mp.len()
-        );
-    }
 
     // Load the persistent user profile (~/.baoclaw/USER.md)
     let profile_manager = Arc::new(engine::user_profile::UserProfileManager::new());
@@ -559,14 +558,12 @@ pub(super) async fn load_prompts_and_memory(
         );
     }
 
-    // Combine skill + memory + profile into append_system_prompt
+    // Combine skill + profile into append_system_prompt (memory rides in
+    // live per query)
     let combined_append_prompt = {
         let mut parts = Vec::new();
         if let Some(sp) = skill_prompt {
             parts.push(sp);
-        }
-        if let Some(mp) = memory_prompt {
-            parts.push(mp);
         }
         if let Some(pp) = profile_prompt {
             parts.push(pp);
@@ -799,6 +796,7 @@ pub(super) async fn start_cron_scheduler(shared: &SharedState) {
         let cron_tool_result_store = shared.tool_result_store.as_ref().map(Arc::clone);
         let cron_hook_manager = Arc::clone(&shared.hook_manager);
         let cron_tool_health = Arc::clone(&shared.tool_health);
+        let cron_memory_store = Arc::clone(&shared.memory_store);
 
         let run_fn: Arc<
             dyn Fn(String, Option<String>) -> tokio::task::JoinHandle<String> + Send + Sync,
@@ -813,6 +811,7 @@ pub(super) async fn start_cron_scheduler(shared: &SharedState) {
             let tool_result_store = cron_tool_result_store.as_ref().map(Arc::clone);
             let hook_manager = Arc::clone(&cron_hook_manager);
             let tool_health = Arc::clone(&cron_tool_health);
+            let memory_store = Arc::clone(&cron_memory_store);
 
             let job_session_id = format!("cron-{}", &uuid::Uuid::new_v4().to_string()[..8]);
 
@@ -851,6 +850,7 @@ pub(super) async fn start_cron_scheduler(shared: &SharedState) {
                     permission: None,
                     telemetry: None,
                     evolution: None,
+                    memory_store: Some(memory_store),
                 });
 
                 let mut rx = engine.submit_message(prompt).await;

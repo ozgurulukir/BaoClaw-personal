@@ -103,6 +103,24 @@ pub fn default_tool_output_threshold_chars() -> usize {
     200_000
 }
 
+static TOOL_OUTPUT_THRESHOLD: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+
+/// Initialize the process-wide tool-output threshold from the loaded config.
+/// Called once at daemon startup; later calls are no-ops (first value wins).
+pub fn init_tool_output_threshold(chars: usize) {
+    let _ = TOOL_OUTPUT_THRESHOLD.set(chars);
+}
+
+/// The effective global cap on a single tool output, in characters. The
+/// executor applies the smaller of this and the tool's own per-tool limit,
+/// so a tighter tool limit always wins. Falls back to the default until
+/// startup initializes it (tests, early call paths).
+pub fn tool_output_threshold() -> usize {
+    *TOOL_OUTPUT_THRESHOLD
+        .get()
+        .unwrap_or(&default_tool_output_threshold_chars())
+}
+
 impl Default for BaoclawConfig {
     fn default() -> Self {
         Self {
@@ -235,6 +253,9 @@ pub fn sync_profiles_to_legacy(config: &mut BaoclawConfig) {
             config.api_type = primary_profile.api_type.clone();
             config.context_window = primary_profile.context_window;
             config.auto_compact_threshold_ratio = primary_profile.auto_compact_threshold_ratio;
+            // The retry chain reads only the top-level field — sync it too,
+            // otherwise the per-profile value is parsed but never consumed.
+            config.max_retries_per_model = primary_profile.max_retries_per_model;
         }
     }
 

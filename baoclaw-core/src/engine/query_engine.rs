@@ -66,6 +66,11 @@ pub struct QueryEngineConfig {
     pub telemetry: Option<Arc<crate::engine::telemetry::collector::TelemetryCollector>>,
     /// Evolution engine for trajectory recording; None disables recording.
     pub evolution: Option<Arc<crate::engine::evolution::EvolutionEngine>>,
+    /// Long-term memory store. When present, the memory prompt fragment is
+    /// rebuilt per query instead of being frozen into the startup prompt, so
+    /// memories saved mid-session (MemoryTool) reach the model without a
+    /// daemon restart. None = no memory injection.
+    pub memory_store: Option<Arc<crate::engine::memory::MemoryStore>>,
     /// Shared tool-health tracker. When present, failure stats accumulate
     /// across queries, Disabled tools are hard-blocked at dispatch, and the
     /// dynamic reminder reflects degraded tools. None = a fresh per-query
@@ -1065,43 +1070,70 @@ impl QueryEngine {
         }
 
         // Build the config for the spawned loop
-        let loop_config =
-            QueryLoopConfig {
-                api_client: Arc::clone(&self.config.api_client),
-                tools: self.config.tools.clone(),
-                model: self.config.model.clone(),
-                max_turns: self.config.max_turns,
-                cwd: self.config.cwd.clone(),
-                custom_system_prompt: self.config.custom_system_prompt.clone(),
-                append_system_prompt: self.config.append_system_prompt.clone(),
-                project_instructions: self.cached_project_instructions.clone(),
-                git_info: self.cached_git_info.clone(),
-                thinking_config: self.config.thinking_config.clone(),
-                abort_rx: self.abort_rx.clone(),
-                session_id: self.config.session_id.clone(),
-                fallback_models: self.config.fallback_models.clone(),
-                max_retries_per_model: self.config.max_retries_per_model,
-                token_counter: Arc::clone(&self.token_counter),
-                parent_turn_id: self.config.parent_turn_id,
-                agent_label: self.config.agent_label.clone(),
-                session_memory: self.config.session_memory.as_ref().map(Arc::clone),
-                compact_fail_count: self.compact_fail_count,
-                recent_messages_for_rules: self.messages.clone(),
-                file_cache: self.config.file_cache.as_ref().map(Arc::clone),
-                tool_result_store: self.config.tool_result_store.as_ref().map(Arc::clone),
-                initial_budget: Some(initial_budget),
-                cached_rules_raw: self.cached_rules_raw.clone(),
-                adaptive_compact: AdaptiveCompactTracker::new(),
-                tool_health: self.config.tool_health.clone().unwrap_or_else(|| {
-                    Arc::new(crate::engine::tool_health::ToolHealthTracker::new())
-                }),
-                hook_manager: self.hook_manager.clone(),
-                permission: self.config.permission.clone(),
-                context_window: self.config.context_window,
-                auto_compact_threshold_ratio: self.config.auto_compact_threshold_ratio,
-                telemetry: self.config.telemetry.clone(),
-                evolution: self.config.evolution.clone(),
-            };
+        let loop_config = QueryLoopConfig {
+            api_client: Arc::clone(&self.config.api_client),
+            tools: self.config.tools.clone(),
+            model: self.config.model.clone(),
+            max_turns: self.config.max_turns,
+            cwd: self.config.cwd.clone(),
+            custom_system_prompt: self.config.custom_system_prompt.clone(),
+            // Live fragments join the cached prefix once per query: fresh
+            // long-term memories (MemoryTool writes mid-session) and
+            // pending evolution nudges (session review / self-eval /
+            // skill candidates — the nudges are consumed here, which is
+            // the true "next session" boundary in a long-lived daemon).
+            // Both change rarely, so the prompt cache stays stable
+            // between changes.
+            append_system_prompt: {
+                let mut prompt = self.config.append_system_prompt.clone();
+                if let Some(store) = &self.config.memory_store {
+                    if let Some(frag) = store.build_prompt_fragment().await {
+                        prompt = match prompt {
+                            Some(base) => Some(format!("{base}\n\n{frag}")),
+                            None => Some(frag),
+                        };
+                    }
+                }
+                if let Some(evolution) = &self.config.evolution {
+                    if let Some(frag) = evolution.build_prompt_fragment(&self.config.cwd).await {
+                        prompt = match prompt {
+                            Some(base) => Some(format!("{base}\n\n{frag}")),
+                            None => Some(frag),
+                        };
+                    }
+                }
+                prompt
+            },
+            project_instructions: self.cached_project_instructions.clone(),
+            git_info: self.cached_git_info.clone(),
+            thinking_config: self.config.thinking_config.clone(),
+            abort_rx: self.abort_rx.clone(),
+            session_id: self.config.session_id.clone(),
+            fallback_models: self.config.fallback_models.clone(),
+            max_retries_per_model: self.config.max_retries_per_model,
+            token_counter: Arc::clone(&self.token_counter),
+            parent_turn_id: self.config.parent_turn_id,
+            agent_label: self.config.agent_label.clone(),
+            session_memory: self.config.session_memory.as_ref().map(Arc::clone),
+            compact_fail_count: self.compact_fail_count,
+            recent_messages_for_rules: self.messages.clone(),
+            file_cache: self.config.file_cache.as_ref().map(Arc::clone),
+            tool_result_store: self.config.tool_result_store.as_ref().map(Arc::clone),
+            initial_budget: Some(initial_budget),
+            cached_rules_raw: self.cached_rules_raw.clone(),
+            adaptive_compact: AdaptiveCompactTracker::new(),
+            tool_health: self
+                .config
+                .tool_health
+                .clone()
+                .unwrap_or_else(|| Arc::new(crate::engine::tool_health::ToolHealthTracker::new())),
+            hook_manager: self.hook_manager.clone(),
+            permission: self.config.permission.clone(),
+            context_window: self.config.context_window,
+            auto_compact_threshold_ratio: self.config.auto_compact_threshold_ratio,
+            telemetry: self.config.telemetry.clone(),
+            evolution: self.config.evolution.clone(),
+        };
 
         let messages_shared = Arc::new(tokio::sync::Mutex::new(self.messages.clone()));
         let messages_for_task = Arc::clone(&messages_shared);
@@ -1300,6 +1332,7 @@ mod tests {
             permission: None,
             telemetry: None,
             evolution: None,
+            memory_store: None,
             tool_health: None,
         }
     }

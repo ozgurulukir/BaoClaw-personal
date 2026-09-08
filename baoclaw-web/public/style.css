@@ -1216,26 +1216,6 @@ body {
   background: rgba(255, 0, 0, 0.05) !important;
 }
 
-/* ── Model profile picker ── */
-#model-picker {
-  width: 100%;
-  padding: 6px 8px;
-  background: var(--bg-tool);
-  color: var(--text);
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  font-family: inherit;
-  font-size: 12px;
-  cursor: pointer;
-}
-#model-picker:focus {
-  outline: 1px solid var(--accent);
-}
-#model-picker option {
-  background: var(--bg-secondary);
-  color: var(--text);
-}
-
 /* ── Split view & Diff Preview Panel ── */
 #content-split {
   display: flex;

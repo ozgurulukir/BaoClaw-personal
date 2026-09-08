@@ -397,6 +397,7 @@ mod propagation_tests {
             permission: None,
             telemetry: None,
             evolution: None,
+            memory_store: None,
             tool_health: None,
         };
 

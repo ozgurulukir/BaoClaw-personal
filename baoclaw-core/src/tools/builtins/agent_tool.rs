@@ -151,6 +151,7 @@ impl Tool for AgentTool {
             permission: None,
             telemetry: None,
             evolution: None,
+            memory_store: None,
             tool_health: Some(std::sync::Arc::clone(&self.tool_health)),
         };
 

@@ -133,7 +133,7 @@ pub async fn run_query_loop(
         openai_base_url: None,
         context_window: config.context_window,
         auto_compact_threshold_ratio: config.auto_compact_threshold_ratio,
-        tool_output_threshold_chars: crate::config::default_tool_output_threshold_chars(),
+        tool_output_threshold_chars: crate::config::tool_output_threshold(),
         model_profiles: std::collections::HashMap::new(),
         primary_profile: None,
         fallback_profiles: Vec::new(),
@@ -1571,6 +1571,28 @@ async fn execute_tool_turn(
             }
         } else {
             config.tool_health.record_success(&res.tool_name);
+        }
+    }
+
+    // Feed skill-outcome stats to the evolution engine: every named Skill
+    // load is one data point for the improvement cycle (success = the skill
+    // file was found and loaded). Best-effort; never blocks the turn.
+    if let Some(evolution) = config.evolution.as_ref() {
+        for res in &tool_results {
+            if res.tool_name != "Skill" {
+                continue;
+            }
+            let skill_name = tool_uses
+                .iter()
+                .find(|tu| tu.id == res.tool_use_id)
+                .and_then(|tu| tu.input.get("skill").and_then(|v| v.as_str()))
+                .unwrap_or("");
+            if skill_name.is_empty() || skill_name == "__list__" {
+                continue;
+            }
+            evolution
+                .record_skill_outcome(skill_name, !res.is_error)
+                .await;
         }
     }
 

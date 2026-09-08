@@ -231,8 +231,8 @@ impl EvolutionEngine {
         Self {
             base_dir: Mutex::new(base_dir),
             task_count: Mutex::new(0),
-            skills_dir,
-            skill_stats: tokio::sync::Mutex::new(std::collections::HashMap::new()),
+            skills_dir: skills_dir.clone(),
+            skill_stats: tokio::sync::Mutex::new(load_skill_stats(&skills_dir)),
             trajectories: tokio::sync::Mutex::new(Vec::new()),
         }
     }
@@ -247,11 +247,12 @@ impl EvolutionEngine {
     /// tests never touch the real `~/.baoclaw`.
     #[cfg(test)]
     pub fn with_base_dir_for_test(base_dir: std::path::PathBuf) -> Self {
+        let skills_dir = base_dir.join("skills");
         Self {
             base_dir: Mutex::new(base_dir.clone()),
             task_count: Mutex::new(0),
-            skills_dir: base_dir.join("skills"),
-            skill_stats: tokio::sync::Mutex::new(std::collections::HashMap::new()),
+            skills_dir: skills_dir.clone(),
+            skill_stats: tokio::sync::Mutex::new(load_skill_stats(&skills_dir)),
             trajectories: tokio::sync::Mutex::new(Vec::new()),
         }
     }
@@ -610,11 +611,12 @@ impl EvolutionEngine {
             ));
         }
 
-        // List pending skill candidates
+        // List pending skill candidates (capped — this text joins the
+        // system prompt, so a long-lived candidates dir must not flood it)
         let candidates = self.list_candidates().await;
         if !candidates.is_empty() {
             parts.push("# Pending Skill Candidates\n\nThe following skill candidates were auto-extracted from successful interactions. Consider promoting the useful ones:\n".to_string());
-            for c in &candidates {
+            for c in candidates.iter().take(10) {
                 parts.push(format!(
                     "- **{}**: {}\n  Trigger: {}\n",
                     c.name,
@@ -921,6 +923,19 @@ impl EvolutionEngine {
                     success_rate * 100.0,
                 ));
             }
+        }
+
+        // Factor 2b: zero-success clamp — a skill loaded ≥3 times that has
+        // NEVER loaded cleanly is broken, not merely unlucky. Without this
+        // clamp the Relevance(×0.6) and Success(×0.5) penalties cannot push
+        // the score below the Retire threshold (<0.2), making auto-retire
+        // unreachable from mechanical data alone.
+        if stats.times_loaded >= 3 && stats.times_succeeded == 0 {
+            score *= 0.3;
+            diagnostics.push(format!(
+                "Never succeeded in {} loads — likely broken",
+                stats.times_loaded
+            ));
         }
 
         // Factor 3: User rating (if available)
@@ -1340,12 +1355,20 @@ impl EvolutionEngine {
     }
 
     /// Record a skill invocation outcome (success or failure).
+    ///
+    /// "Success" is mechanical: the skill file was found and loaded. Every
+    /// named load counts toward `times_loaded` (the improvement cycle's
+    /// data-sufficiency gate needs ≥3), a successful load also counts as
+    /// "relevant" (best mechanical proxy — actual task impact is
+    /// unobservable here), and a failed load counts only as a failure.
     pub async fn record_skill_outcome(&self, skill_name: &str, success: bool) {
         let mut stats = self.skill_stats.lock().await;
         let entry = stats
             .entry(skill_name.to_string())
             .or_insert_with(|| SkillStats::new(skill_name));
+        entry.times_loaded += 1;
         if success {
+            entry.times_relevant += 1;
             entry.times_succeeded += 1;
         } else {
             entry.times_failed += 1;
@@ -1360,10 +1383,19 @@ impl EvolutionEngine {
         let stats = self.skill_stats.lock().await;
         let json = serde_json::to_string_pretty(&*stats)
             .map_err(|e| format!("Failed to serialize stats: {}", e))?;
-        let stats_path = self.skills_dir.join("skill_stats.json");
+        let stats_path = self.skills_dir.join(SKILL_STATS_FILE);
         std::fs::write(&stats_path, json).map_err(|e| format!("Failed to write stats: {}", e))?;
         Ok(())
     }
+}
+
+/// Load persisted skill stats (best effort): a missing or corrupt file
+/// yields an empty map, never an error — stats are advisory data.
+fn load_skill_stats(skills_dir: &Path) -> std::collections::HashMap<String, SkillStats> {
+    std::fs::read_to_string(skills_dir.join(SKILL_STATS_FILE))
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default()
 }
 
 fn redact_training_text(text: &str) -> String {
@@ -1511,6 +1543,95 @@ mod tests {
             matches!(traj.outcome, TrajectoryOutcome::Error { ref code, .. } if code == "api_error")
         );
         assert!(matches!(traj.user_rating, Some(TrajectoryRating::Bad)));
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[tokio::test]
+    async fn skill_outcomes_feed_stats_and_persist_across_engines() {
+        let (engine, base) = test_engine();
+        std::fs::create_dir_all(base.join("skills")).unwrap();
+        engine.record_skill_outcome("deploy", true).await;
+        engine.record_skill_outcome("deploy", true).await;
+        engine.record_skill_outcome("deploy", false).await;
+
+        let stats_path = base.join("skills").join(SKILL_STATS_FILE);
+        let saved: std::collections::HashMap<String, SkillStats> =
+            serde_json::from_str(&std::fs::read_to_string(&stats_path).unwrap()).unwrap();
+        let deploy = saved.get("deploy").unwrap();
+        assert_eq!(deploy.times_loaded, 3);
+        assert_eq!(deploy.times_relevant, 2);
+        assert_eq!(deploy.times_succeeded, 2);
+        assert_eq!(deploy.times_failed, 1);
+
+        // A fresh engine over the same dir resumes the accumulated stats.
+        let engine2 = EvolutionEngine::with_base_dir_for_test(base.clone());
+        let resumed = engine2.get_or_create_stats("deploy").await;
+        assert_eq!(resumed.times_loaded, 3);
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[tokio::test]
+    async fn corrupt_skill_stats_falls_back_to_empty() {
+        let (engine, base) = test_engine();
+        std::fs::create_dir_all(base.join("skills")).unwrap();
+        std::fs::write(base.join("skills").join(SKILL_STATS_FILE), "not json{").unwrap();
+        let stats = engine.get_or_create_stats("any").await;
+        assert_eq!(stats.times_loaded, 0);
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[tokio::test]
+    async fn improvement_cycle_retires_consistently_failing_skill() {
+        let (engine, base) = test_engine();
+        std::fs::create_dir_all(base.join("skills")).unwrap();
+        let skill_path = base.join("skills").join("flaky.md");
+        std::fs::write(&skill_path, "# flaky skill").unwrap();
+        for _ in 0..3 {
+            engine.record_skill_outcome("flaky", false).await;
+        }
+
+        let report = engine.run_improvement_cycle().await;
+        assert_eq!(report.skills_evaluated, 1);
+        assert_eq!(report.skills_retired, 1);
+
+        let stats = engine.get_or_create_stats("flaky").await;
+        assert!(stats.retired);
+        let content = std::fs::read_to_string(&skill_path).unwrap();
+        assert!(content.contains("RETIRED"));
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[tokio::test]
+    async fn prompt_fragment_consumes_pending_review_once() {
+        let (engine, base) = test_engine();
+        std::fs::create_dir_all(&base).unwrap();
+        let review_path = base.join(PENDING_REVIEW_FILE);
+        std::fs::write(
+            &review_path,
+            serde_json::json!({
+                "session_id": "s1",
+                "turn_count": 4,
+                "user_topics": ["deploy pipeline"],
+                "tools_used": ["Bash"],
+                "errors_count": 1,
+                "skills_used": []
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let fragment = engine
+            .build_prompt_fragment(std::path::Path::new("/tmp"))
+            .await;
+        let fragment = fragment.expect("review must produce a fragment");
+        assert!(fragment.contains("Last Session Review"));
+        assert!(fragment.contains("deploy pipeline"));
+        // Consumed: the file is gone and a second read yields no review.
+        assert!(!review_path.exists());
+        let second = engine
+            .build_prompt_fragment(std::path::Path::new("/tmp"))
+            .await;
+        assert!(second.is_none());
         let _ = std::fs::remove_dir_all(base);
     }
 }

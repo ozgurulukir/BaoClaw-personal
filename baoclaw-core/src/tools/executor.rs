@@ -123,7 +123,9 @@ pub async fn execute_tool(
     let call_result = call_tool_with_abort(tool, request, context, progress).await;
     match call_result {
         Ok(result) => {
-            let max_size = tool.max_result_size_chars();
+            let max_size = tool
+                .max_result_size_chars()
+                .min(crate::config::tool_output_threshold());
             let output = maybe_persist_or_truncate(result.data, max_size, context, &tool_use_id);
             ToolExecutionResult {
                 tool_use_id,
@@ -525,7 +527,9 @@ async fn call_tool_and_wrap(
     let call_result = call_tool_with_abort(tool, request, context, progress).await;
     match call_result {
         Ok(result) => {
-            let max_size = tool.max_result_size_chars();
+            let max_size = tool
+                .max_result_size_chars()
+                .min(crate::config::tool_output_threshold());
             let output = maybe_persist_or_truncate(result.data, max_size, context, &tool_use_id);
             ToolExecutionResult {
                 tool_use_id,
