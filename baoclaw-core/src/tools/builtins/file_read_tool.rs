@@ -11,11 +11,29 @@ const MAX_FILE_BYTES: u64 = 10 * 1024 * 1024;
 /// FileReadTool - reads file content with optional line range
 pub struct FileReadTool {
     additional_dirs: Vec<PathBuf>,
+    /// Live out-of-cwd read grants (config seed + interactive approvals);
+    /// consulted on every call so grants apply without a restart. The read
+    /// twin of FileWrite/FileEdit's granted-dirs sharing.
+    granted_dirs: Option<crate::permissions::GrantedSearchDirs>,
 }
 
 impl FileReadTool {
     pub fn new(additional_dirs: Vec<PathBuf>) -> Self {
-        Self { additional_dirs }
+        Self {
+            additional_dirs,
+            granted_dirs: None,
+        }
+    }
+
+    /// Builder: share the daemon-wide granted-search-dirs list (the same
+    /// list Glob/Grep consume) so interactive out-of-cwd read grants apply
+    /// to later calls without a restart.
+    pub fn with_granted_dirs(
+        mut self,
+        granted_dirs: crate::permissions::GrantedSearchDirs,
+    ) -> Self {
+        self.granted_dirs = Some(granted_dirs);
+        self
     }
 }
 
@@ -88,9 +106,14 @@ impl Tool for FileReadTool {
             .and_then(|v| v.as_str())
             .ok_or_else(|| ToolError::ExecutionFailed("Missing 'file_path' field".to_string()))?;
 
-        let resolved =
-            resolve_and_validate_path(file_path_str, &context.cwd, &self.additional_dirs)
-                .map_err(ToolError::ExecutionFailed)?;
+        let mut extra_dirs = self.additional_dirs.clone();
+        if let Some(granted) = &self.granted_dirs {
+            if let Ok(dirs) = granted.read() {
+                extra_dirs.extend(dirs.iter().cloned());
+            }
+        }
+        let resolved = resolve_and_validate_path(file_path_str, &context.cwd, &extra_dirs)
+            .map_err(ToolError::ExecutionFailed)?;
         reject_oversized_file(&resolved)?;
 
         let offset = input.get("offset").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
@@ -240,6 +263,56 @@ mod tests {
         assert!(!result.is_error);
         assert_eq!(result.data["content"], "line1\nline2\nline3");
         assert_eq!(result.data["total_lines"], 3);
+    }
+
+    #[tokio::test]
+    async fn test_read_accepts_granted_dir() {
+        let cwd = TempDir::new().unwrap();
+        let granted_root = TempDir::new().unwrap();
+        let granted: crate::permissions::GrantedSearchDirs =
+            Arc::new(std::sync::RwLock::new(vec![granted_root
+                .path()
+                .to_path_buf()]));
+        let tool = FileReadTool::new(vec![]).with_granted_dirs(granted);
+        let ctx = make_context(cwd.path());
+        let progress = NoopProgress;
+
+        let target = granted_root.path().join("granted.txt");
+        std::fs::write(&target, "granted read").unwrap();
+        let result = tool
+            .call(
+                json!({"file_path": target.to_str().unwrap()}),
+                &ctx,
+                &progress,
+            )
+            .await
+            .unwrap();
+
+        assert!(!result.is_error);
+    }
+
+    #[tokio::test]
+    async fn test_read_rejects_out_of_cwd_without_grant() {
+        let cwd = TempDir::new().unwrap();
+        let outside = TempDir::new().unwrap();
+        let tool = FileReadTool::new(vec![]);
+        let ctx = make_context(cwd.path());
+        let progress = NoopProgress;
+
+        let target = outside.path().join("denied.txt");
+        std::fs::write(&target, "nope").unwrap();
+        let err = tool
+            .call(
+                json!({"file_path": target.to_str().unwrap()}),
+                &ctx,
+                &progress,
+            )
+            .await
+            .unwrap_err();
+
+        assert!(err
+            .to_string()
+            .contains("outside the allowed working directories"));
     }
 
     #[tokio::test]

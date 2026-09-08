@@ -383,11 +383,6 @@ pub(super) fn build_engine_tools(
     permissions::GrantedSearchDirs,
     permissions::GrantedWriteDirs,
 ) {
-    // Allow tools to access ~/.baoclaw/ in addition to project cwd
-    let home_dir = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
-    let baoclaw_home = std::path::PathBuf::from(&home_dir).join(".baoclaw");
-    let additional_dirs = vec![baoclaw_home.clone()];
-
     // Shared allow-list of extra directories Glob/Grep may search (config
     // seed + interactive "Always allow" grants). Seeded after the permission
     // context loads; the Arc is shared with the executor via SharedState so
@@ -408,7 +403,7 @@ pub(super) fn build_engine_tools(
     };
     let core_tools: Vec<Arc<dyn tools::Tool>> = vec![
         Arc::new(bash_tool),
-        Arc::new(FileReadTool::new(additional_dirs.clone())),
+        Arc::new(FileReadTool::new(vec![]).with_granted_dirs(Arc::clone(&granted_search_dirs))),
         Arc::new(FileWriteTool::new(vec![]).with_granted_dirs(Arc::clone(&granted_write_dirs))),
         Arc::new(FileEditTool::new(vec![]).with_granted_dirs(Arc::clone(&granted_write_dirs))),
         Arc::new(tools::builtins::GlobTool::with_granted_dirs(Arc::clone(
@@ -421,7 +416,7 @@ pub(super) fn build_engine_tools(
         Arc::new(WebSearchTool::new()),
         Arc::new(ImageGenTool::new()),
         Arc::new(ImageEditTool::new()),
-        Arc::new(NotebookEditTool::new()),
+        Arc::new(NotebookEditTool::new().with_granted_dirs(Arc::clone(&granted_write_dirs))),
         Arc::new(TodoWriteTool::new()),
         Arc::new(MemoryTool::new()),
         Arc::new(ProjectNoteTool::new()),

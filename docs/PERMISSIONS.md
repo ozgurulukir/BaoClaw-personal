@@ -481,8 +481,15 @@ field on the `permission_request` event; every gateway renders it, e.g.
   (`GrantedWriteDirs`), so a read grant can never widen the write boundary,
   and the tools re-run the full validation (including the symlink-escape
   check) at call time. Headless contexts stay cwd + config dirs only.
-- `FileRead`/`NotebookEdit` are not part of this flow yet: they keep their
-  static boundaries (out-of-cwd reads still fail without a prompt).
+- `NotebookEdit` is wired into the same write flow (`notebook_path` input,
+  grants from `GrantedWriteDirs`).
+- `FileRead` is wired into the read flow: an out-of-boundary read prompts
+  like a Glob/Grep search — **Allow** grants the file for the call,
+  **Always allow** grants the file's parent directory into
+  `additional_search_dirs`. Known gap: in `Plan` mode FileRead matches the
+  read-only name heuristic and takes the direct path, so out-of-cwd reads
+  still fail silently there (pre-existing; by design of Plan-mode
+  read-only auto-allow).
 
 ### The permissions field in ~/.baoclaw/config.json
 

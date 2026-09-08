@@ -78,8 +78,10 @@ impl TaskManager {
         // Store the task
         self.tasks.write().await.insert(task_id.clone(), task);
 
-        // Create abort channel for this task
-        let (abort_tx, _abort_rx) = watch::channel(false);
+        // Create abort channel for this task — the receiver stays in the
+        // spawned task and REALLY stops the engine (mirrors the team
+        // executor's per-agent abort wiring).
+        let (abort_tx, abort_rx) = watch::channel(false);
         self.abort_handles
             .write()
             .await
@@ -128,25 +130,46 @@ impl TaskManager {
             let mut engine = QueryEngine::new(config);
             let mut rx = engine.submit_message(prompt).await;
 
+            // stop_task fires the external channel; mirror the interactive
+            // abort semantics by translating it into engine.abort() and
+            // letting the loop deliver its own Result(Aborted) event. A stop
+            // that raced in during submit_message is caught by the first
+            // wait_for_abort (it returns immediately when already true) —
+            // the engine's internal reset cannot clear our channel.
+            let mut aborting = false;
+
             let mut final_text = String::new();
             let mut error_msg: Option<String> = None;
 
-            while let Some(event) = rx.recv().await {
-                match event {
-                    EngineEvent::AssistantChunk { content, .. } => {
-                        final_text.push_str(&content);
-                    }
-                    EngineEvent::Result(result) => {
-                        if let Some(text) = result.text {
-                            final_text = text;
+            loop {
+                if aborting {
+                    engine.abort();
+                }
+                tokio::select! {
+                    event = rx.recv() => {
+                        let Some(event) = event else {
+                            break; // channel closed — engine finished without a terminal event
+                        };
+                        match event {
+                            EngineEvent::AssistantChunk { content, .. } => {
+                                final_text.push_str(&content);
+                            }
+                            EngineEvent::Result(result) => {
+                                if let Some(text) = result.text {
+                                    final_text = text;
+                                }
+                                break;
+                            }
+                            EngineEvent::Error(err) => {
+                                error_msg = Some(err.message);
+                                break;
+                            }
+                            _ => {}
                         }
-                        break;
                     }
-                    EngineEvent::Error(err) => {
-                        error_msg = Some(err.message);
-                        break;
+                    _ = crate::engine::wait_for_abort(abort_rx.clone()), if !aborting => {
+                        aborting = true;
                     }
-                    _ => {}
                 }
             }
 
@@ -184,6 +207,13 @@ impl TaskManager {
     }
 
     /// Stop a running task by sending an abort signal.
+    ///
+    /// The spawned engine observes the signal and shuts itself down (its
+    /// loop emits the aborted `Result`), so this returns as soon as the
+    /// signal is delivered — `false` means the task was not running anymore
+    /// (already finished, or the id is unknown). Status is flipped to
+    /// `Aborted` here so an immediate `taskStatus` reflects the stop even
+    /// before the engine's finalizer runs.
     pub async fn stop_task(&self, task_id: &str) -> bool {
         // Send abort signal
         let sent = if let Some(tx) = self.abort_handles.read().await.get(task_id) {
@@ -328,6 +358,35 @@ mod tests {
 
         let stopped = manager.stop_task(&task_id).await;
         assert!(stopped);
+
+        // The spawned engine observes the signal: after the stop, the task
+        // finalizes (never Running again) and the abort handle is removed,
+        // so a second stop reports false.
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let task = manager.get_task_status(&task_id).await.unwrap();
+            if task.completed_at.is_some() {
+                assert!(matches!(task.status, BgTaskStatus::Aborted));
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "task never finalized after stop"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        // The abort handle is removed just after finalization; poll until
+        // the second stop reports false (nothing left to signal).
+        loop {
+            if !manager.stop_task(&task_id).await {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "abort handle never removed after finalization"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
 
         let task = manager.get_task_status(&task_id).await.unwrap();
         assert_eq!(task.status, BgTaskStatus::Aborted);

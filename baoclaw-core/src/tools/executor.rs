@@ -332,8 +332,18 @@ pub async fn execute_tool_with_permission(
                         // Directory-scoped "Always allow": record the granted
                         // dir (live + persisted) instead of the client's
                         // whole-tool rule, so only this directory opens up.
-                        push_granted_dir(&permission.bridge.granted_dirs, dir.clone());
-                        let dir_str = dir.to_string_lossy().to_string();
+                        // For FileRead the target is a FILE, so grant its
+                        // parent directory — sibling reads in the same
+                        // location must not re-prompt.
+                        let grant_dir = if tool_name == "FileRead" {
+                            dir.parent()
+                                .map(|p| p.to_path_buf())
+                                .unwrap_or_else(|| dir.clone())
+                        } else {
+                            dir.clone()
+                        };
+                        push_granted_dir(&permission.bridge.granted_dirs, grant_dir.clone());
+                        let dir_str = grant_dir.to_string_lossy().to_string();
                         {
                             let manager = permission.bridge.manager.write().await;
                             manager.update_context(|c| {
@@ -397,19 +407,24 @@ pub async fn execute_tool_with_permission(
     }
 }
 
-/// If `input` asks the Glob/Grep tools to operate outside the project cwd,
-/// return the lexically-resolved target (directory or file) that a grant
-/// would cover. `None` = not an out-of-cwd search (no prompt needed for
-/// boundary reasons).
+/// If `input` asks the Glob/Grep tools to operate outside the project cwd
+/// (or FileRead to read outside it), return the lexically-resolved target
+/// (directory or file) that a grant would cover. `None` = not an out-of-cwd
+/// search/read (no prompt needed for boundary reasons).
 fn out_of_cwd_search_target(
     tool_name: &str,
     input: &Value,
     cwd: &std::path::Path,
 ) -> Option<std::path::PathBuf> {
-    if tool_name != "GlobTool" && tool_name != "GrepTool" {
+    if tool_name != "GlobTool" && tool_name != "GrepTool" && tool_name != "FileRead" {
         return None;
     }
-    let path = input.get("path")?.as_str()?.trim();
+    // Glob/Grep take a search `path`; FileRead takes a `file_path`.
+    let path = if tool_name == "FileRead" {
+        input.get("file_path")?.as_str()?.trim()
+    } else {
+        input.get("path")?.as_str()?.trim()
+    };
     if path.is_empty() {
         return None;
     }
@@ -427,21 +442,25 @@ fn out_of_cwd_search_target(
     }
 }
 
-/// If `input` asks the FileWrite/FileEdit tools to write outside the project
-/// cwd, return the lexically-resolved target that a grant would cover.
-/// `None` = not an out-of-cwd write (no boundary reason to prompt). The
-/// write twin of [`out_of_cwd_search_target`]; pre-approved dirs (config
-/// knob / prior Always grants) are filtered by the caller's `dir_granted`
-/// check, exactly like the search flow.
+/// If `input` asks the FileWrite/FileEdit/NotebookEdit tools to write
+/// outside the project cwd, return the lexically-resolved target that a
+/// grant would cover. `None` = not an out-of-cwd write (no boundary reason
+/// to prompt). The write twin of [`out_of_cwd_search_target`]; pre-approved
+/// dirs (config knob / prior Always grants) are filtered by the caller's
+/// `dir_granted` check, exactly like the search flow.
 fn out_of_cwd_write_target(
     tool_name: &str,
     input: &Value,
     cwd: &std::path::Path,
 ) -> Option<std::path::PathBuf> {
-    if tool_name != "FileWrite" && tool_name != "FileEdit" {
+    if tool_name != "FileWrite" && tool_name != "FileEdit" && tool_name != "NotebookEditTool" {
         return None;
     }
-    let path = input.get("file_path")?.as_str()?.trim();
+    let path = if tool_name == "NotebookEditTool" {
+        input.get("notebook_path")?.as_str()?.trim()
+    } else {
+        input.get("file_path")?.as_str()?.trim()
+    };
     if path.is_empty() {
         return None;
     }
@@ -1641,6 +1660,234 @@ mod tests {
         assert!(event_rx.try_recv().is_err());
         assert!(!result.is_error);
         assert_eq!(tool.call_count.load(Ordering::SeqCst), 1);
+    }
+
+    // ── Out-of-cwd read grants (FileRead joins the search flow) ──
+
+    #[tokio::test]
+    async fn test_out_of_cwd_file_read_prompts_and_allow_once_executes() {
+        let tool = MockTool::new("FileRead").with_read_only(true);
+        let ctx = make_context(); // cwd = /tmp
+        let progress = MockProgressSender;
+        let mut request = make_request("req-read-1", "FileRead");
+        request.input = json!({"file_path": "/etc/baoclaw-read-smoke.txt"});
+
+        let (channels, mut event_rx) =
+            make_channels(manager_ctx_with_timeout(5), PermissionGate::new());
+
+        let gate = channels.bridge.gate.clone();
+        let responder = tokio::spawn(async move {
+            let event = tokio::time::timeout(Duration::from_secs(2), event_rx.recv())
+                .await
+                .expect("timed out waiting for PermissionRequest")
+                .expect("event channel closed");
+            match event {
+                EngineEvent::PermissionRequest {
+                    tool_use_id,
+                    target_path,
+                    ..
+                } => {
+                    assert_eq!(target_path.as_deref(), Some("/etc/baoclaw-read-smoke.txt"));
+                    gate.respond(&tool_use_id, PermissionDecision::Allow);
+                }
+                other => panic!("unexpected event: {other:?}"),
+            }
+        });
+
+        let result =
+            execute_tool_with_permission(&tool, &request, &ctx, &channels, &progress).await;
+        responder.await.unwrap();
+
+        assert!(!result.is_error);
+        assert_eq!(tool.call_count.load(Ordering::SeqCst), 1);
+        // The one-shot grant is popped after the call.
+        assert!(channels.bridge.granted_dirs.read().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_out_of_cwd_file_read_granted_runs_without_prompt() {
+        let tool = MockTool::new("FileRead").with_read_only(true);
+        let ctx = make_context();
+        let progress = MockProgressSender;
+        let mut request = make_request("req-read-2", "FileRead");
+        request.input = json!({"file_path": "/etc/notes.txt"});
+
+        let (channels, mut event_rx) =
+            make_channels(manager_ctx_with_timeout(5), PermissionGate::new());
+        channels
+            .bridge
+            .granted_dirs
+            .write()
+            .unwrap()
+            .push(PathBuf::from("/etc"));
+
+        let result =
+            execute_tool_with_permission(&tool, &request, &ctx, &channels, &progress).await;
+
+        // Pre-approved directory: no prompt, tool just runs.
+        assert!(event_rx.try_recv().is_err());
+        assert!(!result.is_error);
+        assert_eq!(tool.call_count.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn test_file_read_in_cwd_auto_proceeds_without_prompt() {
+        let tool = MockTool::new("FileRead").with_read_only(true);
+        let ctx = make_context();
+        let progress = MockProgressSender;
+        let mut request = make_request("req-read-3", "FileRead");
+        request.input = json!({"file_path": "/tmp/in-cwd.txt"});
+
+        let (channels, mut event_rx) =
+            make_channels(manager_ctx_with_timeout(5), PermissionGate::new());
+
+        let result =
+            execute_tool_with_permission(&tool, &request, &ctx, &channels, &progress).await;
+
+        // In-boundary read: no prompt (the read-only auto-proceed path).
+        assert!(event_rx.try_recv().is_err());
+        assert!(!result.is_error);
+        assert_eq!(tool.call_count.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn test_out_of_cwd_notebook_edit_prompts_and_allow_once_executes() {
+        let tool = MockTool::new("NotebookEditTool");
+        let ctx = make_context();
+        let progress = MockProgressSender;
+        let mut request = make_request("req-nb-1", "NotebookEditTool");
+        request.input = json!({
+            "notebook_path": "/etc/baoclaw-smoke.ipynb",
+            "operation": "replace_cell",
+            "cell_index": 0,
+            "source": ["x"]
+        });
+
+        let (channels, mut event_rx) =
+            make_channels(manager_ctx_with_timeout(5), PermissionGate::new());
+
+        let gate = channels.bridge.gate.clone();
+        let responder = tokio::spawn(async move {
+            let event = tokio::time::timeout(Duration::from_secs(2), event_rx.recv())
+                .await
+                .expect("timed out waiting for PermissionRequest")
+                .expect("event channel closed");
+            match event {
+                EngineEvent::PermissionRequest {
+                    tool_use_id,
+                    target_path,
+                    ..
+                } => {
+                    assert_eq!(target_path.as_deref(), Some("/etc/baoclaw-smoke.ipynb"));
+                    gate.respond(&tool_use_id, PermissionDecision::Allow);
+                }
+                other => panic!("unexpected event: {other:?}"),
+            }
+        });
+
+        let result =
+            execute_tool_with_permission(&tool, &request, &ctx, &channels, &progress).await;
+        responder.await.unwrap();
+
+        assert!(!result.is_error);
+        assert_eq!(tool.call_count.load(Ordering::SeqCst), 1);
+        assert!(channels
+            .bridge
+            .granted_write_dirs
+            .read()
+            .unwrap()
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_out_of_cwd_notebook_edit_allow_always_records_parent_dir() {
+        let tool = MockTool::new("NotebookEditTool");
+        let ctx = make_context();
+        let progress = MockProgressSender;
+        let mut request = make_request("req-nb-2", "NotebookEditTool");
+        request.input = json!({
+            "notebook_path": "/etc/conf/demo.ipynb",
+            "operation": "insert_cell",
+            "cell_index": 0,
+            "cell_type": "code",
+            "source": ["x"]
+        });
+
+        let (channels, mut event_rx) =
+            make_channels(manager_ctx_with_timeout(5), PermissionGate::new());
+
+        let gate = channels.bridge.gate.clone();
+        let responder = tokio::spawn(async move {
+            let event = tokio::time::timeout(Duration::from_secs(2), event_rx.recv())
+                .await
+                .expect("timed out waiting for PermissionRequest")
+                .expect("event channel closed");
+            if let EngineEvent::PermissionRequest { tool_use_id, .. } = event {
+                gate.respond(&tool_use_id, PermissionDecision::AllowAlways { rule: None });
+            }
+        });
+
+        let result =
+            execute_tool_with_permission(&tool, &request, &ctx, &channels, &progress).await;
+        responder.await.unwrap();
+
+        assert!(!result.is_error);
+        // The target's PARENT dir is granted (not the whole tool)...
+        assert!(channels
+            .bridge
+            .granted_write_dirs
+            .read()
+            .unwrap()
+            .contains(&PathBuf::from("/etc/conf")));
+        let ctx_now = channels.bridge.manager.read().await.get_context();
+        assert!(ctx_now
+            .additional_write_dirs
+            .iter()
+            .any(|d| d == "/etc/conf"));
+        // Directory scoping means NO whole-tool rule is recorded.
+        assert!(ctx_now.always_allow_rules.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_out_of_cwd_notebook_edit_deny_blocks_tool() {
+        let tool = MockTool::new("NotebookEditTool");
+        let ctx = make_context();
+        let progress = MockProgressSender;
+        let mut request = make_request("req-nb-3", "NotebookEditTool");
+        request.input = json!({
+            "notebook_path": "/etc/baoclaw-denied.ipynb",
+            "operation": "insert_cell",
+            "cell_index": 0,
+            "cell_type": "code",
+            "source": ["x"]
+        });
+
+        let (channels, mut event_rx) =
+            make_channels(manager_ctx_with_timeout(5), PermissionGate::new());
+
+        let gate = channels.bridge.gate.clone();
+        let responder = tokio::spawn(async move {
+            let event = tokio::time::timeout(Duration::from_secs(2), event_rx.recv())
+                .await
+                .expect("timed out waiting for PermissionRequest")
+                .expect("event channel closed");
+            if let EngineEvent::PermissionRequest { tool_use_id, .. } = event {
+                gate.respond(&tool_use_id, PermissionDecision::Deny);
+            }
+        });
+
+        let result =
+            execute_tool_with_permission(&tool, &request, &ctx, &channels, &progress).await;
+        responder.await.unwrap();
+
+        assert!(result.is_error);
+        assert_eq!(tool.call_count.load(Ordering::SeqCst), 0);
+        assert!(channels
+            .bridge
+            .granted_write_dirs
+            .read()
+            .unwrap()
+            .is_empty());
     }
 
     #[tokio::test]

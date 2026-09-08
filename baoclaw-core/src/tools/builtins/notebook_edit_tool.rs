@@ -1,5 +1,6 @@
 use async_trait::async_trait;
 use serde_json::{json, Value};
+use std::path::PathBuf;
 
 use super::path_utils::resolve_and_validate_path;
 use crate::tools::trait_def::*;
@@ -7,7 +8,11 @@ use crate::tools::trait_def::*;
 const MAX_NOTEBOOK_BYTES: u64 = 10 * 1024 * 1024;
 
 /// Jupyter Notebook editing tool — operates on .ipynb JSON structure
-pub struct NotebookEditTool;
+pub struct NotebookEditTool {
+    /// Live out-of-cwd write grants (config seed + interactive approvals);
+    /// consulted on every call so grants apply without a restart.
+    granted_dirs: Option<crate::permissions::GrantedWriteDirs>,
+}
 
 impl Default for NotebookEditTool {
     fn default() -> Self {
@@ -17,7 +22,15 @@ impl Default for NotebookEditTool {
 
 impl NotebookEditTool {
     pub fn new() -> Self {
-        Self
+        Self { granted_dirs: None }
+    }
+
+    /// Builder: share the daemon-wide granted-write-dirs list (the write
+    /// list FileWrite/FileEdit consume) so interactive out-of-cwd write
+    /// grants apply to later calls without a restart.
+    pub fn with_granted_dirs(mut self, granted_dirs: crate::permissions::GrantedWriteDirs) -> Self {
+        self.granted_dirs = Some(granted_dirs);
+        self
     }
 }
 
@@ -73,7 +86,13 @@ impl Tool for NotebookEditTool {
             .and_then(|v| v.as_str())
             .ok_or_else(|| ToolError::ExecutionFailed("Missing 'notebook_path'".to_string()))?;
 
-        let resolved = resolve_and_validate_path(notebook_path_str, &context.cwd, &[])
+        let mut extra_dirs: Vec<PathBuf> = Vec::new();
+        if let Some(granted) = &self.granted_dirs {
+            if let Ok(dirs) = granted.read() {
+                extra_dirs.extend(dirs.iter().cloned());
+            }
+        }
+        let resolved = resolve_and_validate_path(notebook_path_str, &context.cwd, &extra_dirs)
             .map_err(ToolError::ExecutionFailed)?;
         let size = tokio::fs::metadata(&resolved)
             .await
@@ -260,6 +279,8 @@ fn edit_notebook_move(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
+    use tempfile::TempDir;
 
     fn sample_notebook() -> Value {
         json!({
@@ -400,5 +421,77 @@ mod tests {
         let mut nb = json!({"metadata": {}});
         let result = edit_notebook_insert(&mut nb, 0, "code", json!([]));
         assert!(result.is_err());
+    }
+
+    struct NoopProgress;
+    #[async_trait]
+    impl ProgressSender for NoopProgress {
+        async fn send_progress(&self, _id: &str, _data: Value) {}
+    }
+
+    fn make_tool_context(cwd: &std::path::Path) -> ToolContext {
+        let (_tx, rx) = tokio::sync::watch::channel(false);
+        ToolContext {
+            cwd: cwd.to_path_buf(),
+            model: "test".to_string(),
+            abort_signal: Arc::new(rx),
+            file_cache: None,
+            tool_result_store: None,
+            context_window: 200_000,
+            auto_compact_threshold_ratio: 0.7,
+        }
+    }
+
+    fn boundary_input(path: &std::path::Path) -> Value {
+        json!({
+            "notebook_path": path.to_str().unwrap(),
+            "operation": "insert_cell",
+            "cell_index": 0,
+            "cell_type": "code",
+            "source": ["print(\"hi\")"]
+        })
+    }
+
+    #[tokio::test]
+    async fn test_edit_rejects_out_of_cwd_without_grant() {
+        let cwd = TempDir::new().unwrap();
+        let outside = TempDir::new().unwrap();
+        let tool = NotebookEditTool::new();
+        let ctx = make_tool_context(cwd.path());
+        let progress = NoopProgress;
+
+        let target = outside.path().join("denied.ipynb");
+        let err = tool
+            .call(boundary_input(&target), &ctx, &progress)
+            .await
+            .unwrap_err();
+
+        assert!(err
+            .to_string()
+            .contains("outside the allowed working directories"));
+    }
+
+    #[tokio::test]
+    async fn test_edit_accepts_granted_dir() {
+        let cwd = TempDir::new().unwrap();
+        let granted_root = TempDir::new().unwrap();
+        let granted: crate::permissions::GrantedWriteDirs =
+            Arc::new(std::sync::RwLock::new(vec![granted_root
+                .path()
+                .to_path_buf()]));
+        let tool = NotebookEditTool::new().with_granted_dirs(granted);
+        let ctx = make_tool_context(cwd.path());
+        let progress = NoopProgress;
+
+        let target = granted_root.path().join("granted.ipynb");
+        // Boundary must pass; the notebook content itself is missing, so the
+        // error proves we got PAST the path check.
+        let err = tool
+            .call(boundary_input(&target), &ctx, &progress)
+            .await
+            .unwrap_err();
+        assert!(!err
+            .to_string()
+            .contains("outside the allowed working directories"));
     }
 }
