@@ -125,14 +125,11 @@ pub struct TeamExecutor {
     default_cwd: PathBuf,
     /// Default model.
     default_model: String,
-    /// Shared tool-health tracker (failure stats accumulate daemon-wide).
-    tool_health: crate::engine::tool_health::ToolHealthHandle,
+    /// Shared engine resources for sub-agent engines (prompt, fallback
+    /// chain, telemetry, evolution, memory, caches, tool health).
+    kit: crate::engine::kit::HeadlessEngineKit,
     /// Default policy for team execution.
     default_policy: crate::engine::team::policy::TeamPolicy,
-    /// Model context window (tokens) — propagated from engine config.
-    context_window: u64,
-    /// Auto-compact threshold ratio — propagated from engine config.
-    auto_compact_threshold_ratio: f64,
 }
 
 impl TeamExecutor {
@@ -142,53 +139,18 @@ impl TeamExecutor {
         tools: Vec<Arc<dyn Tool>>,
         default_cwd: PathBuf,
         default_model: String,
-        tool_health: crate::engine::tool_health::ToolHealthHandle,
+        kit: crate::engine::kit::HeadlessEngineKit,
     ) -> Self {
         Self {
             api_client,
             tools,
             teams: Arc::new(RwLock::new(HashMap::new())),
             abort_handles: Arc::new(RwLock::new(HashMap::new())),
-            tool_health,
             default_cwd,
             default_model,
+            kit,
             default_policy: crate::engine::team::policy::TeamPolicy::default(),
-            context_window: 1_000_000,         // Default context window
-            auto_compact_threshold_ratio: 0.7, // Default auto-compact threshold ratio
         }
-    }
-
-    /// Set the context window for sub-agent engines.
-    pub fn with_context_window(mut self, context_window: u64) -> Self {
-        self.context_window = context_window;
-        self
-    }
-
-    /// Set the auto-compact threshold ratio for sub-agent engines.
-    pub fn with_auto_compact_threshold_ratio(mut self, ratio: f64) -> Self {
-        self.auto_compact_threshold_ratio = ratio;
-        self
-    }
-
-    /// Set both context window and auto-compact threshold ratio for sub-agents.
-    pub fn with_context_config(
-        mut self,
-        context_window: u64,
-        auto_compact_threshold_ratio: f64,
-    ) -> Self {
-        self.context_window = context_window;
-        self.auto_compact_threshold_ratio = auto_compact_threshold_ratio;
-        self
-    }
-
-    /// Get the configured context window.
-    pub fn context_window(&self) -> u64 {
-        self.context_window
-    }
-
-    /// Get the configured auto-compact threshold ratio.
-    pub fn auto_compact_threshold_ratio(&self) -> f64 {
-        self.auto_compact_threshold_ratio
     }
 
     /// Create a TeamExecutor with a custom default policy.
@@ -198,7 +160,7 @@ impl TeamExecutor {
         default_cwd: PathBuf,
         default_model: String,
         default_policy: crate::engine::team::policy::TeamPolicy,
-        tool_health: crate::engine::tool_health::ToolHealthHandle,
+        kit: crate::engine::kit::HeadlessEngineKit,
     ) -> Self {
         Self {
             api_client,
@@ -208,9 +170,7 @@ impl TeamExecutor {
             default_cwd,
             default_model,
             default_policy,
-            tool_health,
-            context_window: 1_000_000,         // Default context window
-            auto_compact_threshold_ratio: 0.7, // Default auto-compact threshold ratio
+            kit,
         }
     }
 
@@ -422,9 +382,7 @@ impl TeamExecutor {
             let agent_id_clone = agent_id.clone();
             let agent_policy =
                 crate::engine::team::policy::AgentPolicy::from_team_policy(&team_policy, 1);
-            let ctx_window = self.context_window;
-            let compact_ratio = self.auto_compact_threshold_ratio;
-            let tool_health_clone = std::sync::Arc::clone(&self.tool_health);
+            let kit = self.kit.clone();
 
             join_set.spawn(async move {
                 let result = Self::execute_single_agent(
@@ -436,9 +394,7 @@ impl TeamExecutor {
                     abort_rx_clone,
                     Some(agent_policy),
                     agent_id_clone.clone(),
-                    ctx_window,
-                    compact_ratio,
-                    Some(tool_health_clone),
+                    kit,
                 )
                 .await;
 
@@ -568,9 +524,7 @@ impl TeamExecutor {
                 abort_rx.clone(),
                 Some(agent_policy),
                 agent.id.clone(),
-                self.context_window,
-                self.auto_compact_threshold_ratio,
-                Some(std::sync::Arc::clone(&self.tool_health)),
+                self.kit.clone(),
             )
             .await;
 
@@ -747,9 +701,7 @@ impl TeamExecutor {
                 let agent_policy =
                     crate::engine::team::policy::AgentPolicy::from_team_policy(&team_policy, 1);
                 let agent_id_for_result = agent_id.clone();
-                let ctx_window = self.context_window;
-                let compact_ratio = self.auto_compact_threshold_ratio;
-                let tool_health_clone = std::sync::Arc::clone(&self.tool_health);
+                let kit = self.kit.clone();
 
                 join_set.spawn(async move {
                     let result = Self::execute_single_agent(
@@ -761,9 +713,7 @@ impl TeamExecutor {
                         watch::channel(false).1, // No abort for individual agent
                         Some(agent_policy),
                         agent_id_for_result.clone(),
-                        ctx_window,
-                        compact_ratio,
-                        Some(tool_health_clone),
+                        kit,
                     )
                     .await;
 
@@ -912,9 +862,7 @@ impl TeamExecutor {
         mut abort_rx: watch::Receiver<bool>,
         agent_policy: Option<crate::engine::team::policy::AgentPolicy>,
         agent_id: String,
-        context_window: u64,
-        auto_compact_threshold_ratio: f64,
-        tool_health: Option<crate::engine::tool_health::ToolHealthHandle>,
+        kit: crate::engine::kit::HeadlessEngineKit,
     ) -> Result<crate::engine::team::policy::AgentResult, TeamError> {
         use crate::engine::team::policy::{AgentResult, AgentUsage};
 
@@ -941,7 +889,7 @@ impl TeamExecutor {
         };
 
         let config = QueryEngineConfig {
-            tool_health,
+            tool_health: Some(std::sync::Arc::clone(&kit.tool_health)),
             cwd,
             tools: filtered_tools,
             api_client,
@@ -954,21 +902,21 @@ impl TeamExecutor {
                 "You are a sub-agent. Complete the given task efficiently and report results."
                     .to_string(),
             ),
-            append_system_prompt: None,
+            append_system_prompt: kit.append_system_prompt.clone(),
             session_id: None,
-            fallback_models: vec![],
-            max_retries_per_model: 2,
-            context_window,
-            auto_compact_threshold_ratio,
+            fallback_models: kit.fallback_models.clone(),
+            max_retries_per_model: kit.max_retries_per_model,
+            context_window: kit.context_window,
+            auto_compact_threshold_ratio: kit.auto_compact_threshold_ratio,
             parent_turn_id: None,
             agent_label: Some("sub-agent".to_string()),
             session_memory: None,
-            file_cache: None,
-            tool_result_store: None,
+            file_cache: kit.file_cache.clone(),
+            tool_result_store: kit.tool_result_store.clone(),
             permission: None,
-            telemetry: None,
-            evolution: None,
-            memory_store: None,
+            telemetry: kit.telemetry.clone(),
+            evolution: kit.evolution.clone(),
+            memory_store: kit.memory_store.clone(),
         };
 
         let mut engine = QueryEngine::new(config);
@@ -1178,7 +1126,7 @@ mod tests {
             tools,
             PathBuf::from("/tmp"),
             "claude-sonnet-4-20250514".to_string(),
-            std::sync::Arc::new(crate::engine::tool_health::ToolHealthTracker::new()),
+            crate::engine::kit::HeadlessEngineKit::for_test(),
         )
     }
 
@@ -1424,33 +1372,5 @@ mod tests {
         // Team is pending, not running, so abort should return false
         let aborted = executor.abort_team(&team_id).await;
         assert!(!aborted);
-    }
-
-    #[test]
-    fn test_team_executor_config_propagation() {
-        let executor = make_executor()
-            .with_context_window(200_000)
-            .with_auto_compact_threshold_ratio(0.85);
-
-        assert_eq!(executor.context_window(), 200_000);
-        assert!((executor.auto_compact_threshold_ratio() - 0.85).abs() < f64::EPSILON);
-    }
-
-    #[test]
-    fn test_team_executor_context_config_builder() {
-        let executor = make_executor();
-        assert_eq!(executor.context_window(), 1_000_000);
-        assert_eq!(executor.auto_compact_threshold_ratio(), 0.7);
-
-        let custom = executor
-            .with_context_window(128_000)
-            .with_auto_compact_threshold_ratio(0.8);
-
-        assert_eq!(custom.context_window(), 128_000);
-        assert_eq!(custom.auto_compact_threshold_ratio(), 0.8);
-
-        let configured = custom.with_context_config(500_000, 0.65);
-        assert_eq!(configured.context_window(), 500_000);
-        assert_eq!(configured.auto_compact_threshold_ratio(), 0.65);
     }
 }

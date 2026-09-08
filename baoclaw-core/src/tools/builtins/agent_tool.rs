@@ -14,9 +14,10 @@ pub struct AgentTool {
     api_client: Arc<UnifiedClient>,
     available_tools: Vec<Arc<dyn Tool>>,
     default_max_turns: u32,
-    /// Daemon-wide tool-health tracker shared with sub-agent engines, so
-    /// failure accumulation and Disabled blocking cover sub-agents too.
-    tool_health: crate::engine::tool_health::ToolHealthHandle,
+    /// Shared engine resources for sub-agent engines (prompt, fallback
+    /// chain, telemetry, evolution, memory, caches, tool health) — full
+    /// interactive parity minus the interactive permission bridge.
+    kit: crate::engine::kit::HeadlessEngineKit,
 }
 
 impl AgentTool {
@@ -24,13 +25,13 @@ impl AgentTool {
     pub fn new_with_full_tools(
         api_client: Arc<UnifiedClient>,
         available_tools: Vec<Arc<dyn Tool>>,
-        tool_health: crate::engine::tool_health::ToolHealthHandle,
+        kit: crate::engine::kit::HeadlessEngineKit,
     ) -> Self {
         Self {
             api_client,
             available_tools,
             default_max_turns: 10,
-            tool_health,
+            kit,
         }
     }
 }
@@ -124,10 +125,10 @@ impl Tool for AgentTool {
                  Complete the given task thoroughly. Be concise but thorough."
                     .to_string(),
             ),
-            append_system_prompt: None,
+            append_system_prompt: self.kit.append_system_prompt.clone(),
             session_id: None, // Sub-agent does not persist
-            fallback_models: vec![],
-            max_retries_per_model: 2,
+            fallback_models: self.kit.fallback_models.clone(),
+            max_retries_per_model: self.kit.max_retries_per_model,
             context_window: context.context_window,
             auto_compact_threshold_ratio: context.auto_compact_threshold_ratio,
             // Propagate parent turn id so CLI can render nested boxes
@@ -144,14 +145,14 @@ impl Tool for AgentTool {
                     preview
                 }
             }),
-            session_memory: None,    // Sub-agents do not use session memory
-            file_cache: None,        // Sub-agents share parent's context
-            tool_result_store: None, // Sub-agents don't persist tool results
+            session_memory: None, // Sub-agents do not use session memory
+            file_cache: context.file_cache.clone(),
+            tool_result_store: context.tool_result_store.clone(),
             permission: None,
-            telemetry: None,
-            evolution: None,
-            memory_store: None,
-            tool_health: Some(std::sync::Arc::clone(&self.tool_health)),
+            telemetry: self.kit.telemetry.clone(),
+            evolution: self.kit.evolution.clone(),
+            memory_store: self.kit.memory_store.clone(),
+            tool_health: Some(std::sync::Arc::clone(&self.kit.tool_health)),
         };
 
         let mut sub_engine = QueryEngine::new(sub_engine_config);
@@ -226,7 +227,7 @@ mod tests {
         let tool = AgentTool::new_with_full_tools(
             make_api_client(),
             vec![],
-            std::sync::Arc::new(crate::engine::tool_health::ToolHealthTracker::default()),
+            crate::engine::kit::HeadlessEngineKit::for_test(),
         );
         assert_eq!(tool.name(), "AgentTool");
     }
@@ -236,7 +237,7 @@ mod tests {
         let tool = AgentTool::new_with_full_tools(
             make_api_client(),
             vec![],
-            std::sync::Arc::new(crate::engine::tool_health::ToolHealthTracker::default()),
+            crate::engine::kit::HeadlessEngineKit::for_test(),
         );
         assert_eq!(tool.aliases(), vec!["Agent"]);
     }
@@ -246,7 +247,7 @@ mod tests {
         let tool = AgentTool::new_with_full_tools(
             make_api_client(),
             vec![],
-            std::sync::Arc::new(crate::engine::tool_health::ToolHealthTracker::default()),
+            crate::engine::kit::HeadlessEngineKit::for_test(),
         );
         assert!(!tool.is_read_only(&json!({})));
     }
@@ -256,7 +257,7 @@ mod tests {
         let tool = AgentTool::new_with_full_tools(
             make_api_client(),
             vec![],
-            std::sync::Arc::new(crate::engine::tool_health::ToolHealthTracker::default()),
+            crate::engine::kit::HeadlessEngineKit::for_test(),
         );
         assert!(tool.is_concurrency_safe(&json!({})));
     }
@@ -266,7 +267,7 @@ mod tests {
         let tool = AgentTool::new_with_full_tools(
             make_api_client(),
             vec![],
-            std::sync::Arc::new(crate::engine::tool_health::ToolHealthTracker::default()),
+            crate::engine::kit::HeadlessEngineKit::for_test(),
         );
         let schema = tool.input_schema();
         assert_eq!(schema.schema_type, "object");
@@ -283,7 +284,7 @@ mod tests {
         let tool = AgentTool::new_with_full_tools(
             make_api_client(),
             vec![],
-            std::sync::Arc::new(crate::engine::tool_health::ToolHealthTracker::default()),
+            crate::engine::kit::HeadlessEngineKit::for_test(),
         );
         assert_eq!(tool.default_max_turns, 10);
     }
@@ -293,7 +294,7 @@ mod tests {
         let tool = AgentTool::new_with_full_tools(
             make_api_client(),
             vec![],
-            std::sync::Arc::new(crate::engine::tool_health::ToolHealthTracker::default()),
+            crate::engine::kit::HeadlessEngineKit::for_test(),
         );
         let (_tx, rx) = tokio::sync::watch::channel(false);
         let ctx = ToolContext {
@@ -314,7 +315,7 @@ mod tests {
         let tool = AgentTool::new_with_full_tools(
             make_api_client(),
             vec![],
-            std::sync::Arc::new(crate::engine::tool_health::ToolHealthTracker::default()),
+            crate::engine::kit::HeadlessEngineKit::for_test(),
         );
         let (_tx, rx) = tokio::sync::watch::channel(false);
         let ctx = ToolContext {
@@ -335,7 +336,7 @@ mod tests {
         let tool = AgentTool::new_with_full_tools(
             make_api_client(),
             vec![],
-            std::sync::Arc::new(crate::engine::tool_health::ToolHealthTracker::default()),
+            crate::engine::kit::HeadlessEngineKit::for_test(),
         );
         let (_tx, rx) = tokio::sync::watch::channel(false);
         let ctx = ToolContext {
@@ -358,7 +359,7 @@ mod tests {
         let tool = AgentTool::new_with_full_tools(
             make_api_client(),
             vec![],
-            std::sync::Arc::new(crate::engine::tool_health::ToolHealthTracker::default()),
+            crate::engine::kit::HeadlessEngineKit::for_test(),
         );
         let prompt = tool.prompt();
         assert!(prompt.contains("sub-agent"));

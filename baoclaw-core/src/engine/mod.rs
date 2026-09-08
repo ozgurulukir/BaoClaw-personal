@@ -10,6 +10,7 @@ pub mod cron;
 
 pub mod evolution;
 pub mod git_info;
+pub mod kit;
 pub mod memory;
 pub mod projects;
 pub mod query_engine;

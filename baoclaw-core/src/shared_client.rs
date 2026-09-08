@@ -2013,10 +2013,8 @@ async fn scm_team_spawn(
         shared.engine_tools.clone(),
         work_cwd.clone(),
         shared.state_manager.get().model.clone(),
-        Arc::clone(&shared.tool_health),
-    )
-    .with_context_window(shared.baoclaw_config.context_window)
-    .with_auto_compact_threshold_ratio(shared.baoclaw_config.auto_compact_threshold_ratio);
+        shared.headless_kit.clone(),
+    );
 
     match executor.create_team(task.clone(), config).await {
         Ok(mut team) => {
@@ -2199,10 +2197,8 @@ async fn scm_team_execute(
                 shared.engine_tools.clone(),
                 work_cwd.clone(),
                 shared.state_manager.get().model.clone(),
-                Arc::clone(&shared.tool_health),
-            )
-            .with_context_window(shared.baoclaw_config.context_window)
-            .with_auto_compact_threshold_ratio(shared.baoclaw_config.auto_compact_threshold_ratio);
+                shared.headless_kit.clone(),
+            );
 
             // Execute the team
             let result = executor.execute(team).await;

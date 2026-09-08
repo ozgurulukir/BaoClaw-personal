@@ -74,6 +74,9 @@ struct SharedState {
     file_cache: Arc<tokio::sync::Mutex<engine::file_cache::FileCache>>,
     /// Tool result store for persisting large outputs to disk.
     tool_result_store: Option<Arc<engine::tool_result_store::ToolResultStore>>,
+    /// Shared resources threaded into every headless engine (cron, tasks,
+    /// teams, sub-agents) — full interactive parity minus permissions.
+    headless_kit: engine::kit::HeadlessEngineKit,
     /// Team executor for managing sub-agent teams.
     team_executor: Arc<engine::team::TeamManager>,
 }
@@ -281,9 +284,7 @@ fn build_shared_engine(
             crate::engine::session_memory::SessionMemory::load(&session_id),
         )),
         file_cache: Some(Arc::clone(&shared.file_cache)),
-        tool_result_store: Some(Arc::new(
-            engine::tool_result_store::ToolResultStore::for_session(&session_id),
-        )),
+        tool_result_store: shared.tool_result_store.clone(),
         permission: Some(PermissionBridge {
             manager: Arc::clone(&shared.permission_manager),
             gate: shared.permission_gate.clone(),
@@ -1088,10 +1089,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Load config, resolve model profile, build and pre-warm the API client
     let (baoclaw_config, api_client) = startup::load_config_and_api_client();
 
-    // Build engine tools (core tools + AgentTool + ToolSearchTool)
-    let (evolution_engine, engine_tools, granted_search_dirs, granted_write_dirs, tool_health) =
-        startup::build_engine_tools(&opts.cwd_str, &opts.sandbox_config, &api_client);
-
     // Load skill prompt + long-term memory, combine into append_system_prompt
     let (combined_append_prompt, memory_store, user_profile) =
         startup::load_prompts_and_memory(&opts.cwd_str).await;
@@ -1099,12 +1096,56 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Reuse existing project session or create a new one
     let session_id = startup::resolve_session_id(&opts.cwd_str);
 
+    // Daemon-wide singletons shared by the kit, the tools and SharedState
+    let tool_health = engine::tool_health::ToolHealthHandle::default();
+    let evolution_engine = Arc::new(engine::evolution::EvolutionEngine::new(
+        std::path::Path::new(&opts.cwd_str),
+    ));
+    let telemetry_collector = match engine::telemetry::collector::TelemetryCollector::new() {
+        Ok(c) => Some(Arc::new(c)),
+        Err(e) => {
+            eprintln!("Telemetry disabled (DB open failed): {}", e);
+            None
+        }
+    };
+    let file_cache = Arc::new(tokio::sync::Mutex::new(
+        engine::file_cache::FileCache::default_capacity(),
+    ));
+    let tool_result_store = Some(Arc::new(
+        engine::tool_result_store::ToolResultStore::for_session(&session_id),
+    ));
+
+    // Headless engine kit: cron jobs, background tasks, team agents and
+    // sub-agents run with full interactive parity minus the permission
+    // bridge (they must never hang on a prompt).
+    let headless_kit = engine::kit::HeadlessEngineKit {
+        append_system_prompt: combined_append_prompt.clone(),
+        fallback_models: baoclaw_config.fallback_models.clone(),
+        max_retries_per_model: baoclaw_config.max_retries_per_model,
+        context_window: baoclaw_config.context_window,
+        auto_compact_threshold_ratio: baoclaw_config.auto_compact_threshold_ratio,
+        telemetry: telemetry_collector.clone(),
+        evolution: Some(Arc::clone(&evolution_engine)),
+        memory_store: Some(Arc::clone(&memory_store)),
+        file_cache: Some(Arc::clone(&file_cache)),
+        tool_result_store: tool_result_store.clone(),
+        tool_health: Arc::clone(&tool_health),
+    };
+
+    // Build engine tools (core tools + AgentTool + ToolSearchTool)
+    let (engine_tools, granted_search_dirs, granted_write_dirs) = startup::build_engine_tools(
+        &opts.cwd_str,
+        &opts.sandbox_config,
+        &api_client,
+        &evolution_engine,
+        &headless_kit,
+    );
+
     // Write metadata file for discovery by CLI
     write_meta(&socket_path, &opts.cwd_str, &session_id);
 
     // Assemble the daemon SharedState
     let (shared, should_exit) = startup::assemble_shared_state(
-        &opts.cwd_str,
         opts.is_daemon,
         baoclaw_config,
         api_client,
@@ -1116,6 +1157,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         memory_store,
         user_profile,
         combined_append_prompt,
+        telemetry_collector,
+        file_cache,
+        tool_result_store,
+        headless_kit,
         opts.cli_thinking_config,
         opts.cli_resume_session_id,
         session_id,

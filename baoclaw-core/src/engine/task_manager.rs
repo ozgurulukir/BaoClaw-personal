@@ -33,12 +33,10 @@ pub struct TaskManager {
     abort_handles: Arc<RwLock<HashMap<String, watch::Sender<bool>>>>,
     api_client: Arc<UnifiedClient>,
     tools: Vec<Arc<dyn Tool>>,
-    /// Model context window (tokens) — propagated from engine config.
-    context_window: u64,
-    /// Auto-compact threshold ratio — propagated from engine config.
-    auto_compact_threshold_ratio: f64,
-    /// Shared tool-health tracker (failure stats accumulate daemon-wide).
-    tool_health: crate::engine::tool_health::ToolHealthHandle,
+    /// Shared engine resources (prompt, fallback chain, telemetry,
+    /// evolution, memory, caches, tool health) — same capabilities as the
+    /// interactive engine.
+    kit: crate::engine::kit::HeadlessEngineKit,
 }
 
 impl TaskManager {
@@ -46,36 +44,15 @@ impl TaskManager {
     pub fn new(
         api_client: Arc<UnifiedClient>,
         tools: Vec<Arc<dyn Tool>>,
-        context_window: u64,
-        auto_compact_threshold_ratio: f64,
-        tool_health: crate::engine::tool_health::ToolHealthHandle,
+        kit: crate::engine::kit::HeadlessEngineKit,
     ) -> Self {
         Self {
             tasks: Arc::new(RwLock::new(HashMap::new())),
             abort_handles: Arc::new(RwLock::new(HashMap::new())),
             api_client,
             tools,
-            tool_health,
-            context_window,
-            auto_compact_threshold_ratio,
+            kit,
         }
-    }
-
-    /// Create a new TaskManager with engine config values propagated.
-    pub fn new_with_config(
-        api_client: Arc<UnifiedClient>,
-        tools: Vec<Arc<dyn Tool>>,
-        context_window: u64,
-        auto_compact_threshold_ratio: f64,
-        tool_health: crate::engine::tool_health::ToolHealthHandle,
-    ) -> Self {
-        Self::new(
-            api_client,
-            tools,
-            context_window,
-            auto_compact_threshold_ratio,
-            tool_health,
-        )
     }
 
     /// Create and spawn a background task. Returns the task ID.
@@ -114,13 +91,11 @@ impl TaskManager {
         let api_client = Arc::clone(&self.api_client);
         let tools = self.tools.clone();
         let tid = task_id.clone();
-        let ctx_window = self.context_window;
-        let compact_ratio = self.auto_compact_threshold_ratio;
-        let tool_health = std::sync::Arc::clone(&self.tool_health);
+        let kit = self.kit.clone();
 
         tokio::spawn(async move {
             let config = QueryEngineConfig {
-                tool_health: Some(tool_health),
+                tool_health: Some(Arc::clone(&kit.tool_health)),
                 cwd,
                 tools,
                 api_client,
@@ -133,21 +108,21 @@ impl TaskManager {
                     "You are a background task agent. Complete the given task efficiently."
                         .to_string(),
                 ),
-                append_system_prompt: None,
+                append_system_prompt: kit.append_system_prompt.clone(),
                 session_id: None,
-                fallback_models: vec![],
-                max_retries_per_model: 2,
-                context_window: ctx_window,
-                auto_compact_threshold_ratio: compact_ratio,
+                fallback_models: kit.fallback_models.clone(),
+                max_retries_per_model: kit.max_retries_per_model,
+                context_window: kit.context_window,
+                auto_compact_threshold_ratio: kit.auto_compact_threshold_ratio,
                 parent_turn_id: None,
                 agent_label: None,
                 session_memory: None,
-                file_cache: None,
-                tool_result_store: None,
+                file_cache: kit.file_cache.clone(),
+                tool_result_store: kit.tool_result_store.clone(),
                 permission: None,
-                telemetry: None,
-                evolution: None,
-                memory_store: None,
+                telemetry: kit.telemetry.clone(),
+                evolution: kit.evolution.clone(),
+                memory_store: kit.memory_store.clone(),
             };
 
             let mut engine = QueryEngine::new(config);
@@ -251,9 +226,7 @@ mod tests {
         let manager = TaskManager::new(
             api_client,
             tools,
-            200_000,
-            0.7,
-            std::sync::Arc::new(crate::engine::tool_health::ToolHealthTracker::new()),
+            crate::engine::kit::HeadlessEngineKit::for_test(),
         );
 
         let task_id = manager
@@ -276,9 +249,7 @@ mod tests {
         let manager = TaskManager::new(
             api_client,
             tools,
-            200_000,
-            0.7,
-            std::sync::Arc::new(crate::engine::tool_health::ToolHealthTracker::new()),
+            crate::engine::kit::HeadlessEngineKit::for_test(),
         );
 
         let task_id = manager
@@ -303,9 +274,7 @@ mod tests {
         let manager = TaskManager::new(
             api_client,
             tools,
-            200_000,
-            0.7,
-            std::sync::Arc::new(crate::engine::tool_health::ToolHealthTracker::new()),
+            crate::engine::kit::HeadlessEngineKit::for_test(),
         );
 
         let task_id = manager
@@ -331,9 +300,7 @@ mod tests {
         let manager = TaskManager::new(
             api_client,
             tools,
-            200_000,
-            0.7,
-            std::sync::Arc::new(crate::engine::tool_health::ToolHealthTracker::new()),
+            crate::engine::kit::HeadlessEngineKit::for_test(),
         );
 
         let task = manager.get_task_status("nonexistent").await;
@@ -347,9 +314,7 @@ mod tests {
         let manager = TaskManager::new(
             api_client,
             tools,
-            200_000,
-            0.7,
-            std::sync::Arc::new(crate::engine::tool_health::ToolHealthTracker::new()),
+            crate::engine::kit::HeadlessEngineKit::for_test(),
         );
 
         let task_id = manager
@@ -376,9 +341,7 @@ mod tests {
         let manager = TaskManager::new(
             api_client,
             tools,
-            200_000,
-            0.7,
-            std::sync::Arc::new(crate::engine::tool_health::ToolHealthTracker::new()),
+            crate::engine::kit::HeadlessEngineKit::for_test(),
         );
 
         let stopped = manager.stop_task("nonexistent").await;
@@ -392,9 +355,7 @@ mod tests {
         let manager = TaskManager::new(
             api_client,
             tools,
-            200_000,
-            0.7,
-            std::sync::Arc::new(crate::engine::tool_health::ToolHealthTracker::new()),
+            crate::engine::kit::HeadlessEngineKit::for_test(),
         );
 
         let tasks = manager.list_tasks().await;

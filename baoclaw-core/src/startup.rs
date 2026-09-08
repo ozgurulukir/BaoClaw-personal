@@ -371,22 +371,18 @@ pub(super) fn load_config_and_api_client() -> (BaoclawConfig, Arc<UnifiedClient>
 }
 
 /// Build the daemon engine tool list (core tools, AgentTool with the full set,
-/// ToolSearchTool last) plus the evolution engine.
+/// ToolSearchTool last).
 pub(super) fn build_engine_tools(
     cwd_str: &str,
     sandbox_config: &Option<Arc<engine::sandbox::SandboxConfig>>,
     api_client: &Arc<UnifiedClient>,
+    evolution_engine: &Arc<engine::evolution::EvolutionEngine>,
+    kit: &engine::kit::HeadlessEngineKit,
 ) -> (
-    Arc<engine::evolution::EvolutionEngine>,
     Vec<Arc<dyn tools::Tool>>,
     permissions::GrantedSearchDirs,
     permissions::GrantedWriteDirs,
-    engine::tool_health::ToolHealthHandle,
 ) {
-    // Daemon-wide tool-health tracker: failure stats accumulate across every
-    // engine (interactive, sub-agent, cron, tasks, teams).
-    let tool_health = engine::tool_health::ToolHealthHandle::default();
-
     // Allow tools to access ~/.baoclaw/ in addition to project cwd
     let home_dir = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
     let baoclaw_home = std::path::PathBuf::from(&home_dir).join(".baoclaw");
@@ -403,11 +399,6 @@ pub(super) fn build_engine_tools(
     // never widen the write boundary; seeded (with ~/.baoclaw parity) after
     // the permission context loads.
     let granted_write_dirs = permissions::GrantedWriteDirs::default();
-
-    // Create evolution engine for self-improvement
-    let evolution_engine = Arc::new(engine::evolution::EvolutionEngine::new(
-        std::path::Path::new(cwd_str),
-    ));
 
     // Build the core tool list (everything except AgentTool itself, which is added after)
     // BashTool is optionally sandboxed based on --sandbox CLI flag
@@ -436,16 +427,13 @@ pub(super) fn build_engine_tools(
         Arc::new(ProjectNoteTool::new()),
         Arc::new(tools::builtins::SkillTool::new(PathBuf::from(cwd_str))),
         Arc::new(tools::builtins::EvolveTool::new(Arc::clone(
-            &evolution_engine,
+            evolution_engine,
         ))),
     ];
 
     // AgentTool gets the full core tool set so sub-agents can write, edit, run bash, etc.
-    let agent_tool = AgentTool::new_with_full_tools(
-        Arc::clone(api_client),
-        core_tools.clone(),
-        Arc::clone(&tool_health),
-    );
+    let agent_tool =
+        AgentTool::new_with_full_tools(Arc::clone(api_client), core_tools.clone(), kit.clone());
 
     let mut engine_tools: Vec<Arc<dyn tools::Tool>> = core_tools;
     engine_tools.push(Arc::new(agent_tool));
@@ -459,13 +447,7 @@ pub(super) fn build_engine_tools(
         all
     };
 
-    (
-        evolution_engine,
-        engine_tools,
-        granted_search_dirs,
-        granted_write_dirs,
-        tool_health,
-    )
+    (engine_tools, granted_search_dirs, granted_write_dirs)
 }
 
 /// Load skill prompt and the user profile; combine them into the
@@ -564,7 +546,6 @@ pub(super) fn resolve_session_id(cwd_str: &str) -> String {
 /// gate/manager, task manager, team executor, memory archive/cleanup, and all
 /// shared engine resources.
 pub(super) async fn assemble_shared_state(
-    _cwd_str: &str,
     is_daemon: bool,
     baoclaw_config: BaoclawConfig,
     api_client: Arc<UnifiedClient>,
@@ -576,6 +557,10 @@ pub(super) async fn assemble_shared_state(
     memory_store: Arc<engine::memory::MemoryStore>,
     user_profile: Arc<engine::user_profile::UserProfileManager>,
     combined_append_prompt: Option<String>,
+    telemetry: Option<Arc<engine::telemetry::collector::TelemetryCollector>>,
+    file_cache: Arc<tokio::sync::Mutex<engine::file_cache::FileCache>>,
+    tool_result_store: Option<Arc<engine::tool_result_store::ToolResultStore>>,
+    headless_kit: engine::kit::HeadlessEngineKit,
     cli_thinking_config: ThinkingConfig,
     cli_resume_session_id: Option<String>,
     session_id: String,
@@ -652,13 +637,14 @@ pub(super) async fn assemble_shared_state(
         }
     }
 
+    // Kit assembly: the headless bundle is built by the caller (main) so
+    // AgentTool can already carry it; here it just flows into SharedState.
+
     // Create TaskManager for background task execution
     let task_manager = Arc::new(TaskManager::new(
         Arc::clone(&api_client),
         engine_tools.clone(),
-        baoclaw_config.context_window,
-        baoclaw_config.auto_compact_threshold_ratio,
-        Arc::clone(&tool_health),
+        headless_kit.clone(),
     ));
 
     // Team state store — execution builds a fresh TeamExecutor per RPC from
@@ -693,26 +679,15 @@ pub(super) async fn assemble_shared_state(
         skill_prompt: combined_append_prompt,
         memory_store,
         user_profile,
-        telemetry: {
-            match engine::telemetry::collector::TelemetryCollector::new() {
-                Ok(c) => Some(Arc::new(c)),
-                Err(e) => {
-                    eprintln!("Telemetry disabled (DB open failed): {}", e);
-                    None
-                }
-            }
-        },
+        telemetry,
         memory_archive,
         memory_cleanup,
         evolution_engine,
         cron_manager: Arc::new(engine::cron::CronManager::new()),
         project_registry: Arc::new(engine::projects::ProjectRegistry::new()),
-        file_cache: Arc::new(tokio::sync::Mutex::new(
-            engine::file_cache::FileCache::default_capacity(),
-        )),
-        tool_result_store: Some(Arc::new(
-            engine::tool_result_store::ToolResultStore::for_session(&session_id),
-        )),
+        file_cache,
+        tool_result_store,
+        headless_kit,
         team_executor,
     };
 
@@ -727,28 +702,21 @@ pub(super) async fn start_cron_scheduler(shared: &SharedState) {
         let cron_manager = Arc::clone(&shared.cron_manager);
         let cron_tools = shared.engine_tools.clone();
         let cron_api_client = Arc::clone(&shared.api_client);
-        let cron_baoclaw_config = shared.baoclaw_config.clone();
+        let cron_model = shared.baoclaw_config.model.clone();
         let cron_thinking_config = shared.cli_thinking_config.clone();
-        let cron_append_prompt = shared.skill_prompt.clone();
+        let cron_headless_kit = shared.headless_kit.clone();
         let cron_session_id = shared.session_id.clone();
-        let cron_file_cache = Arc::clone(&shared.file_cache);
-        let cron_tool_result_store = shared.tool_result_store.as_ref().map(Arc::clone);
-        let cron_tool_health = Arc::clone(&shared.tool_health);
-        let cron_memory_store = Arc::clone(&shared.memory_store);
 
         let run_fn: Arc<
             dyn Fn(String, Option<String>) -> tokio::task::JoinHandle<String> + Send + Sync,
         > = Arc::new(move |prompt: String, cwd: Option<String>| {
             let tools = cron_tools.clone();
             let api_client = Arc::clone(&cron_api_client);
-            let baoclaw_config = cron_baoclaw_config.clone();
+            let model = cron_model.clone();
             let thinking_config = cron_thinking_config.clone();
-            let append_prompt = cron_append_prompt.clone();
+            let append_prompt = cron_headless_kit.append_system_prompt.clone();
             let _session_id = cron_session_id.clone();
-            let file_cache = Arc::clone(&cron_file_cache);
-            let tool_result_store = cron_tool_result_store.as_ref().map(Arc::clone);
-            let tool_health = Arc::clone(&cron_tool_health);
-            let memory_store = Arc::clone(&cron_memory_store);
+            let headless_kit = cron_headless_kit.clone();
 
             let job_session_id = format!("cron-{}", &uuid::Uuid::new_v4().to_string()[..8]);
 
@@ -763,8 +731,8 @@ pub(super) async fn start_cron_scheduler(shared: &SharedState) {
                     cwd: cwd_path,
                     tools,
                     api_client,
-                    model: baoclaw_config.model.clone(),
-                    tool_health: Some(tool_health),
+                    model,
+                    tool_health: Some(Arc::clone(&headless_kit.tool_health)),
                     thinking_config,
                     max_turns: Some(10),
                     max_budget_usd: Some(0.5),
@@ -772,21 +740,21 @@ pub(super) async fn start_cron_scheduler(shared: &SharedState) {
                     custom_system_prompt: None,
                     append_system_prompt: append_prompt,
                     session_id: Some(job_session_id),
-                    fallback_models: baoclaw_config.fallback_models.clone(),
-                    max_retries_per_model: baoclaw_config.max_retries_per_model,
-                    context_window: baoclaw_config.context_window,
-                    auto_compact_threshold_ratio: baoclaw_config.auto_compact_threshold_ratio,
+                    fallback_models: headless_kit.fallback_models.clone(),
+                    max_retries_per_model: headless_kit.max_retries_per_model,
+                    context_window: headless_kit.context_window,
+                    auto_compact_threshold_ratio: headless_kit.auto_compact_threshold_ratio,
                     parent_turn_id: None,
                     agent_label: Some("cron".to_string()),
                     session_memory: None,
-                    file_cache: Some(file_cache),
-                    tool_result_store,
+                    file_cache: headless_kit.file_cache.clone(),
+                    tool_result_store: headless_kit.tool_result_store.clone(),
                     // Headless cron jobs must never hang on an interactive
                     // permission prompt — mutating tools fail closed instead.
                     permission: None,
-                    telemetry: None,
-                    evolution: None,
-                    memory_store: Some(memory_store),
+                    telemetry: headless_kit.telemetry.clone(),
+                    evolution: headless_kit.evolution.clone(),
+                    memory_store: headless_kit.memory_store.clone(),
                 });
 
                 let mut rx = engine.submit_message(prompt).await;
