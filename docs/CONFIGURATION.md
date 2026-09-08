@@ -75,21 +75,30 @@ own API key, base URL, and context window:
 }
 ```
 
-| Field                                                | Type     | Default  | Description                                                               |
-| ---------------------------------------------------- | -------- | -------- | ------------------------------------------------------------------------- |
-| `model_profiles.<name>`                              | object   | `{}`     | Named profile: `model`, `api_type`, `api_key?`, `base_url?`               |
-| `model_profiles.<name>.context_window`               | number   | `200000` | Context window in tokens                                                  |
-| `model_profiles.<name>.auto_compact_threshold_ratio` | number   | `0.7`    | Auto-compact at this fraction of the window                               |
-| `model_profiles.<name>.max_retries_per_model`        | number   | `2`      | Retries before falling back                                               |
-| `primary_profile`                                    | string   | —        | Profile used by default                                                   |
-| `fallback_profiles`                                  | string[] | `[]`     | Profiles to try when the primary fails                                    |
-| `context_window`                                     | number   | `200000` | Top-level default (flat format)                                           |
-| `auto_compact_threshold_ratio`                       | number   | `0.7`    | Top-level default (flat format)                                           |
-| `tool_output_threshold_chars`                        | number   | `200000` | Tool output above this size is persisted to disk                          |
-| `permissions`                                        | object   | —        | Tool permission rules and knobs — see [PERMISSIONS.md](PERMISSIONS.md)    |
-| `telegram.token`                                     | string   | —        | Telegram bot token from @BotFather                                        |
-| `telegram.allowedChatIds`                            | number[] | `[]`     | Allowed chat IDs (required; empty = reject all and refuse startup)        |
-| `feishu.allowedChatIds`                              | string[] | `[]`     | Allowed Feishu chat IDs (required; empty = reject all and refuse startup) |
+| Field                                                                     | Type          | Default  | Description                                                                                                                                           |
+| ------------------------------------------------------------------------- | ------------- | -------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `model_profiles.<name>`                                                   | object        | `{}`     | Named profile: `model`, `api_type`, `api_key?`, `base_url?`                                                                                           |
+| `model_profiles.<name>.context_window`                                    | number        | `200000` | Context window in tokens                                                                                                                              |
+| `model_profiles.<name>.auto_compact_threshold_ratio`                      | number        | `0.7`    | Auto-compact at this fraction of the window                                                                                                           |
+| `model_profiles.<name>.max_retries_per_model`                             | number        | `2`      | Retries before falling back                                                                                                                           |
+| `primary_profile`                                                         | string        | —        | Profile used by default                                                                                                                               |
+| `fallback_profiles`                                                       | string[]      | `[]`     | Profiles to try when the primary fails                                                                                                                |
+| `context_window`                                                          | number        | `200000` | Top-level default (flat format)                                                                                                                       |
+| `auto_compact_threshold_ratio`                                            | number        | `0.7`    | Top-level default (flat format)                                                                                                                       |
+| `tool_output_threshold_chars`                                             | number        | `200000` | Global cap on a single tool output (chars). The executor applies the smaller of this and the tool's own limit; oversized output is persisted to disk  |
+| `permissions`                                                             | object        | —        | Tool permission rules and knobs — see [PERMISSIONS.md](PERMISSIONS.md)                                                                                |
+| `telegram.token`                                                          | string        | —        | Telegram bot token from @BotFather                                                                                                                    |
+| `telegram.allowedChatIds`                                                 | number[]      | `[]`     | Allowed chat IDs (required; empty = reject all and refuse startup)                                                                                    |
+| `feishu.allowedChatIds`                                                   | string[]      | `[]`     | Allowed Feishu chat IDs (required; empty = reject all and refuse startup)                                                                             |
+| `whatsapp.enabled`                                                        | boolean       | `false`  | Start the WhatsApp gateway                                                                                                                            |
+| `whatsapp.phoneNumber`                                                    | string        | —        | Bot's own phone number (E.164)                                                                                                                        |
+| `whatsapp.allowFrom`                                                      | string[]      | `[]`     | Allowed sender numbers, E.164 (empty = reject all)                                                                                                    |
+| `whatsapp.dmPolicy` / `whatsapp.groupPolicy`                              | string        | —        | `allow` / `deny` per conversation type                                                                                                                |
+| `whatsapp.maxQueueSize`                                                   | number        | —        | Per-chat message queue bound                                                                                                                          |
+| `whatsapp.mediaEnabled` / `whatsapp.mediaMaxSizeMb`                       | bool / number | —        | Inbound media handling                                                                                                                                |
+| `whatsapp.reconnectMaxMs` / `whatsapp.proxy` / `whatsapp.sharedSessionId` | —             | —        | Reconnect backoff cap, proxy URL, daemon session tag                                                                                                  |
+| `web.token`                                                               | string        | random   | Web UI auth token (`BAOCLAW_WEB_TOKEN` env overrides)                                                                                                 |
+| `memory.*`                                                                | object        | —        | Long-term memory decay: `decay_rate`, `recall_boost`, `confirm_boost`, `reject_penalty`, `archive_threshold`, `max_entries`, `cleanup_interval_hours` |
 
 The legacy **flat format** still works and is auto-migrated to a `"primary"`
 profile (plus `fallback_N` profiles) on load:
@@ -104,7 +113,12 @@ profile (plus `fallback_N` profiles) on load:
 }
 ```
 
-Per-profile `api_key` is only expressible in the profiles format.
+Per-profile `api_key` is only expressible in the profiles format. The
+per-profile `max_retries_per_model` is synced into the top-level field the
+fallback chain reads; the top-level `tool_output_threshold_chars` caps every
+tool result unless a tool declares a tighter limit.
+
+`~/.baoclaw/warmup.json` (auto-created) stores context-warmup tuning.
 
 WhatsApp session credentials are stored under `~/.baoclaw/whatsapp-auth/`.
 The directory is restricted to the owner (`0700`) and credential files to the
@@ -115,8 +129,18 @@ Environment variables:
 - `ANTHROPIC_API_KEY` — API key, used when the active profile has no `api_key`
 - `ANTHROPIC_MODEL` — overrides the active model name
 - `ANTHROPIC_BASE_URL` — used as the base URL when `base_url` / `openai_base_url` is not set in config
+- `ANTHROPIC_API_PATH` — overrides the Anthropic messages path
+- `OPENAI_API_KEY` / `OPENAI_BASE_URL` — credentials for `api_type: "openai"` profiles without a profile key
 - `BRAVE_SEARCH_API_KEY` — for WebSearch tool
+- `IMAGE_GEN_MODEL` — image generation model override
+- `BAOCLAW_SANDBOX_IMAGE` — Docker image for `--sandbox docker`
+- `BAOCLAW_HTTP1_ONLY` — force HTTP/1.1 for the Anthropic endpoint
 - `BAOCLAW_FEISHU_BOT_OPEN_ID` — Feishu gateway: bot identity used to ignore message echoes (per-deployment override)
+- `TELEGRAM_BOT_TOKEN` — fallback for `telegram.token`
+- `BAOCLAW_TELEGRAM_CWD` — Telegram gateway: project directory override
+- `BAOCLAW_WEB_TOKEN` / `BAOCLAW_WEB_HOST` / `BAOCLAW_WEB_PORT` — Web gateway auth token, bind host and port
+- `BAOCLAW_HOME` — Web gateway: `~/.baoclaw` location override
+- `XDG_RUNTIME_DIR` — daemon socket location on Linux
 
 ### `<project>/.baoclaw/BAOCLAW.md` — Project Instructions
 
