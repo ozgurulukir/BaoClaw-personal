@@ -679,23 +679,37 @@ pub async fn execute_tools(
 
     let mut results: Vec<Option<ToolExecutionResult>> = vec![None; total];
 
-    // Execute concurrent-safe tools in parallel
+    // Execute concurrent-safe tools in parallel, bounded by the configured
+    // parallel-tool cap so a wide batch cannot stampede the system.
     if !concurrent.is_empty() {
+        let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(
+            crate::config::max_parallel_tools(),
+        ));
         let futures: Vec<_> = concurrent
             .iter()
-            .map(|(_, req, tool)| {
-                dispatch_tool(
-                    tool.as_ref(),
-                    req,
-                    context,
-                    progress,
-                    permission,
-                    tool_health,
-                )
+            .map(|(idx, req, tool)| {
+                let permit = std::sync::Arc::clone(&semaphore).acquire_owned();
+                async move {
+                    // The semaphore is never closed, so acquiring always
+                    // succeeds; on the impossible error path run unbounded.
+                    let _permit = permit.await.ok();
+                    (
+                        idx,
+                        dispatch_tool(
+                            tool.as_ref(),
+                            req,
+                            context,
+                            progress,
+                            permission,
+                            tool_health,
+                        )
+                        .await,
+                    )
+                }
             })
             .collect();
         let concurrent_results = futures::future::join_all(futures).await;
-        for ((idx, _, _), result) in concurrent.iter().zip(concurrent_results) {
+        for (idx, result) in concurrent_results {
             results[*idx] = Some(result);
         }
     }
@@ -1189,7 +1203,6 @@ mod tests {
             always_allow_rules: std::collections::HashMap::new(),
             always_deny_rules: std::collections::HashMap::new(),
             always_ask_rules: std::collections::HashMap::new(),
-            is_bypass_permissions_mode_available: false,
             auto_allow_channels: std::collections::HashMap::new(),
             ask_timeout_secs: 300,
             // Must stay false: a true value would let unit tests write mock

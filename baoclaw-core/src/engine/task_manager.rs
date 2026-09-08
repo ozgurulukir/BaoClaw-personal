@@ -104,7 +104,7 @@ impl TaskManager {
                 model,
                 thinking_config: ThinkingConfig::Disabled,
                 max_turns: Some(20),
-                max_budget_usd: None,
+                max_budget_usd: kit.max_budget_usd,
                 verbose: false,
                 custom_system_prompt: Some(
                     "You are a background task agent. Complete the given task efficiently."
@@ -116,6 +116,8 @@ impl TaskManager {
                 max_retries_per_model: kit.max_retries_per_model,
                 context_window: kit.context_window,
                 auto_compact_threshold_ratio: kit.auto_compact_threshold_ratio,
+                max_tokens: kit.max_tokens,
+                max_tokens_budget: None,
                 parent_turn_id: None,
                 agent_label: None,
                 session_memory: None,

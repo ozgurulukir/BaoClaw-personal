@@ -44,8 +44,8 @@
 //! let executor = TeamExecutor::new(api_client, tools, cwd, model);
 //!
 //! // Create a team for parallel execution with policy
-//! let policy = TeamPolicy::safe_tools()
-//!     .with_total_budget(2.0)
+//! let policy = TeamPolicy::default()
+//!     .with_max_cost_per_agent(0.5)
 //!     .with_max_turns_per_agent(10);
 //!
 //! let mut team = executor.create_team("Analyze codebase".to_string(), TeamConfig {

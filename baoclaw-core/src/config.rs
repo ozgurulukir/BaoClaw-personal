@@ -27,6 +27,21 @@ fn default_compact_threshold() -> f64 {
     0.7
 }
 
+/// Default per-request output token cap sent to the model API.
+fn default_max_tokens() -> u32 {
+    16_384
+}
+
+/// Default hard ceiling for a single Bash invocation, in milliseconds.
+fn default_bash_max_timeout_ms() -> u64 {
+    300_000
+}
+
+/// Default cap on how many concurrency-safe tools run in parallel.
+fn default_max_parallel_tools() -> usize {
+    8
+}
+
 // ─── ModelProfile ───────────────────────────────────────────────────────────
 
 /// A model configuration profile with its own API credentials and window.
@@ -78,6 +93,28 @@ pub struct BaoclawConfig {
     /// Maximum chars before tool output is persisted to disk (default 200_000).
     #[serde(default = "default_tool_output_threshold_chars")]
     pub tool_output_threshold_chars: usize,
+    /// Hard cap on agent turns per query. None (default) = unbounded — the
+    /// loop runs until the model stops issuing tool calls. Headless engines
+    /// set their own tighter limits regardless of this knob.
+    #[serde(default)]
+    pub max_turns: Option<u32>,
+    /// Per-query cost ceiling in USD. When the accumulated cost of the
+    /// current query reaches it, the model gets one grace call to produce
+    /// its final answer and is then stopped with a `budget_exceeded` error.
+    /// None (default) = no cost limit.
+    #[serde(default)]
+    pub max_budget_usd: Option<f64>,
+    /// Output token cap sent with every model request (default 16_384).
+    #[serde(default = "default_max_tokens")]
+    pub max_tokens: u32,
+    /// Hard ceiling for a single Bash invocation in milliseconds; a tool-call
+    /// `timeout` above it is clamped down (default 300_000).
+    #[serde(default = "default_bash_max_timeout_ms")]
+    pub bash_max_timeout_ms: u64,
+    /// Maximum number of concurrency-safe tools executed in parallel per
+    /// turn; excess requests queue on a semaphore (default 8).
+    #[serde(default = "default_max_parallel_tools")]
+    pub max_parallel_tools: usize,
 
     // === New: Named model profiles (P1-1) ===
     /// Named model profiles (new format). Each profile has its own api_type,
@@ -121,6 +158,41 @@ pub fn tool_output_threshold() -> usize {
         .unwrap_or(&default_tool_output_threshold_chars())
 }
 
+static BASH_MAX_TIMEOUT_MS: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+
+/// Initialize the process-wide Bash timeout ceiling from the loaded config.
+/// Called once at daemon startup; later calls are no-ops (first value wins).
+pub fn init_bash_max_timeout_ms(ms: u64) {
+    let _ = BASH_MAX_TIMEOUT_MS.set(ms);
+}
+
+/// The effective hard ceiling for a single Bash invocation, in milliseconds.
+/// The Bash tool clamps the per-call `timeout` input to this value, so a
+/// longer test suite or build can be allowed via config without code changes.
+pub fn bash_max_timeout_ms() -> u64 {
+    *BASH_MAX_TIMEOUT_MS
+        .get()
+        .unwrap_or(&default_bash_max_timeout_ms())
+}
+
+static MAX_PARALLEL_TOOLS: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+
+/// Initialize the process-wide parallel-tool cap from the loaded config.
+/// Called once at daemon startup; later calls are no-ops (first value wins).
+pub fn init_max_parallel_tools(n: usize) {
+    let _ = MAX_PARALLEL_TOOLS.set(n);
+}
+
+/// The effective cap on how many concurrency-safe tools run in parallel per
+/// turn. Falls back to the default until startup initializes it. A configured
+/// 0 is clamped to 1 — a zero-permit semaphore would deadlock every tool call.
+pub fn max_parallel_tools() -> usize {
+    (*MAX_PARALLEL_TOOLS
+        .get()
+        .unwrap_or(&default_max_parallel_tools()))
+    .max(1)
+}
+
 impl Default for BaoclawConfig {
     fn default() -> Self {
         Self {
@@ -132,6 +204,11 @@ impl Default for BaoclawConfig {
             context_window: default_context_window(),
             auto_compact_threshold_ratio: default_compact_threshold(),
             tool_output_threshold_chars: default_tool_output_threshold_chars(),
+            max_turns: None,
+            max_budget_usd: None,
+            max_tokens: default_max_tokens(),
+            bash_max_timeout_ms: default_bash_max_timeout_ms(),
+            max_parallel_tools: default_max_parallel_tools(),
             model_profiles: HashMap::new(),
             primary_profile: None,
             fallback_profiles: Vec::new(),
@@ -457,6 +534,11 @@ mod tests {
             ],
             max_retries_per_model: 3,
             api_type: "anthropic".to_string(),
+            max_turns: Some(25),
+            max_budget_usd: Some(2.5),
+            max_tokens: 8192,
+            bash_max_timeout_ms: 450_000,
+            max_parallel_tools: 4,
             openai_base_url: None,
             context_window: 200_000,
             auto_compact_threshold_ratio: 0.7,

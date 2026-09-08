@@ -117,7 +117,7 @@ impl Tool for AgentTool {
             model,
             thinking_config: ThinkingConfig::Disabled,
             max_turns: Some(max_turns),
-            max_budget_usd: None,
+            max_budget_usd: self.kit.max_budget_usd,
             verbose: false,
             custom_system_prompt: Some(
                 "You are a sub-agent with full tool access. You can read and write files, \
@@ -131,6 +131,8 @@ impl Tool for AgentTool {
             max_retries_per_model: self.kit.max_retries_per_model,
             context_window: context.context_window,
             auto_compact_threshold_ratio: context.auto_compact_threshold_ratio,
+            max_tokens: self.kit.max_tokens,
+            max_tokens_budget: None,
             // Propagate parent turn id so CLI can render nested boxes
             parent_turn_id: input
                 .get("_parent_turn_id")

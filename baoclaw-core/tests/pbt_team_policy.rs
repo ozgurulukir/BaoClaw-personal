@@ -1,20 +1,19 @@
 //! Property-based tests for team policy and sub-agent execution.
 //!
 //! These tests validate:
-//! - Tool permission inheritance and restriction
-//! - Budget control and enforcement
-//! - Result collection correctness
+//! - Tool permission restriction (whitelist / blacklist, via the per-agent
+//!   policy the executor actually consults)
+//! - Policy-to-agent limit propagation (turns, cost, tokens, timeout)
+//! - Policy serialization round-trips
 //!
 //! **Validates: Requirements FR-2.4 资源限制**
 //! - Each Agent's tool permission inheritance
-//! - Total cost/Token budget
 
 use proptest::prelude::*;
 use std::collections::HashSet;
 
 // Import from the crate
-use baoclaw_core::engine::team::policy::{AgentPolicy, DepthTools};
-use baoclaw_core::engine::team::TeamPolicy;
+use baoclaw_core::engine::team::policy::{AgentPolicy, TeamPolicy};
 
 /// Strategy for generating valid tool names
 fn tool_name_strategy() -> impl Strategy<Value = String> {
@@ -33,11 +32,6 @@ fn tool_name_strategy() -> impl Strategy<Value = String> {
 /// Strategy for generating a set of tool names
 fn tool_set_strategy() -> impl Strategy<Value = HashSet<String>> {
     proptest::collection::hash_set(tool_name_strategy(), 0..8)
-}
-
-/// Strategy for generating depth values
-fn depth_strategy() -> impl Strategy<Value = u32> {
-    0u32..5
 }
 
 /// Strategy for generating cost values
@@ -59,14 +53,13 @@ proptest! {
     #[test]
     fn prop_tool_whitelist_consistency(
         whitelist in tool_set_strategy(),
-        tool in tool_name_strategy(),
-        depth in depth_strategy()
+        tool in tool_name_strategy()
     ) {
         let policy = TeamPolicy::default()
-            .with_tool_whitelist(whitelist.iter().cloned().collect())
-            .with_max_depth(10); // Allow deeper nesting
+            .with_tool_whitelist(whitelist.iter().cloned().collect());
+        let agent_policy = AgentPolicy::from_team_policy(&policy);
 
-        let is_allowed = policy.is_tool_allowed(&tool, depth);
+        let is_allowed = agent_policy.is_tool_allowed(&tool);
         let is_in_whitelist = whitelist.contains(&tool);
 
         // If whitelist is empty, all tools are allowed
@@ -85,14 +78,13 @@ proptest! {
     #[test]
     fn prop_tool_blacklist_consistency(
         blacklist in tool_set_strategy(),
-        tool in tool_name_strategy(),
-        depth in depth_strategy()
+        tool in tool_name_strategy()
     ) {
         let policy = TeamPolicy::default()
-            .with_tool_blacklist(blacklist.iter().cloned().collect())
-            .with_max_depth(10); // Allow deeper nesting
+            .with_tool_blacklist(blacklist.iter().cloned().collect());
+        let agent_policy = AgentPolicy::from_team_policy(&policy);
 
-        let is_allowed = policy.is_tool_allowed(&tool, depth);
+        let is_allowed = agent_policy.is_tool_allowed(&tool);
         let is_in_blacklist = blacklist.contains(&tool);
 
         // Blacklisted tools are always denied
@@ -111,15 +103,14 @@ proptest! {
     fn prop_blacklist_precedence(
         whitelist in tool_set_strategy(),
         blacklist in tool_set_strategy(),
-        tool in tool_name_strategy(),
-        depth in depth_strategy()
+        tool in tool_name_strategy()
     ) {
         let policy = TeamPolicy::default()
             .with_tool_whitelist(whitelist.iter().cloned().collect())
-            .with_tool_blacklist(blacklist.iter().cloned().collect())
-            .with_max_depth(10); // Allow deeper nesting
+            .with_tool_blacklist(blacklist.iter().cloned().collect());
+        let agent_policy = AgentPolicy::from_team_policy(&policy);
 
-        let is_allowed = policy.is_tool_allowed(&tool, depth);
+        let is_allowed = agent_policy.is_tool_allowed(&tool);
         let is_in_blacklist = blacklist.contains(&tool);
 
         // Blacklisted tools are always denied, even if in whitelist
@@ -128,132 +119,53 @@ proptest! {
         }
     }
 
-    /// Test max depth restriction
+    /// Test agent policy limit propagation
     ///
-    /// **Validates: FR-2.4 资源限制 - 最大并行数限制**
+    /// **Validates: FR-2.4 Agent 的限制继承**
     #[test]
-    fn prop_max_depth_restriction(
-        max_depth in depth_strategy(),
-        query_depth in depth_strategy()
-    ) {
-        let policy = TeamPolicy::default().with_max_depth(max_depth);
-
-        let is_allowed = policy.is_depth_allowed(query_depth);
-
-        // Depth should only be allowed if within max_depth
-        prop_assert_eq!(is_allowed, query_depth <= max_depth);
-    }
-
-    /// Test budget exceeded detection
-    ///
-    /// **Validates: FR-2.4 资源限制 - 总成本/Token 预算**
-    #[test]
-    fn prop_budget_exceeded_detection(
+    fn prop_agent_policy_limit_propagation(
+        max_turns in 1u32..20u32,
         max_cost in cost_strategy(),
-        current_cost in cost_strategy()
-    ) {
-        // Avoid division by zero
-        let max_cost = max_cost.max(0.01);
-
-        let policy = TeamPolicy::default().with_total_budget(max_cost);
-
-        let is_exceeded = policy.is_budget_exceeded(current_cost, 0);
-
-        // Budget is exceeded when current >= max
-        prop_assert_eq!(is_exceeded, current_cost >= max_cost);
-    }
-
-    /// Test token budget exceeded detection
-    ///
-    /// **Validates: FR-2.4 资源限制 - Token 预算**
-    #[test]
-    fn prop_token_budget_exceeded_detection(
-        max_tokens in tokens_strategy(),
-        current_tokens in tokens_strategy()
-    ) {
-        let policy = TeamPolicy {
-            total_budget_tokens: Some(max_tokens),
-            ..TeamPolicy::default()
-        };
-
-        let is_exceeded = policy.is_budget_exceeded(0.0, current_tokens);
-
-        // Token budget is exceeded when current >= max
-        prop_assert_eq!(is_exceeded, current_tokens >= max_tokens);
-    }
-
-    /// Test agent policy depth inheritance
-    ///
-    /// **Validates: FR-2.4 Agent 的工具权限继承**
-    #[test]
-    fn prop_agent_policy_depth_inheritance(
-        depth in depth_strategy()
+        max_tokens in tokens_strategy()
     ) {
         let team_policy = TeamPolicy::default()
-            .with_max_turns_per_agent(10)
-            .with_max_cost_per_agent(1.0);
+            .with_max_turns_per_agent(max_turns)
+            .with_max_cost_per_agent(max_cost)
+            .with_max_tokens_per_agent(max_tokens);
 
-        let agent_policy = AgentPolicy::from_team_policy(&team_policy, depth);
+        let agent_policy = AgentPolicy::from_team_policy(&team_policy);
 
-        // Agent policy should inherit from team policy
-        prop_assert_eq!(agent_policy.depth, depth);
+        // Agent policy should inherit the team policy limits verbatim
         prop_assert_eq!(agent_policy.max_turns, team_policy.max_turns_per_agent);
         prop_assert_eq!(agent_policy.max_cost_usd, team_policy.max_cost_per_agent);
+        prop_assert_eq!(agent_policy.max_tokens, team_policy.max_tokens_per_agent);
+        prop_assert_eq!(agent_policy.timeout_secs, team_policy.agent_timeout_secs);
     }
 
-    /// Test policy description contains key information
+    /// Test policy JSON round-trip keeps the enforced limits
+    ///
+    /// **Validates: RPC teamSpawn policy parsing**
     #[test]
-    fn prop_policy_description_informative(
+    fn prop_policy_serialization_round_trip(
+        whitelist in tool_set_strategy(),
         max_cost in cost_strategy(),
-        max_turns in 1u32..20u32
+        max_tokens in tokens_strategy()
     ) {
         let policy = TeamPolicy::default()
-            .with_total_budget(max_cost)
-            .with_max_turns_per_agent(max_turns);
+            .with_tool_whitelist(whitelist.iter().cloned().collect())
+            .with_max_cost_per_agent(max_cost)
+            .with_max_tokens_per_agent(max_tokens);
 
-        let description = policy.describe();
+        let json = serde_json::to_string(&policy).unwrap();
+        let deserialized: TeamPolicy = serde_json::from_str(&json).unwrap();
 
-        // Description should contain key policy parameters
-        prop_assert!(description.contains("max_depth"));
-        let turns_str = format!("max_turns={}", max_turns);
-        prop_assert!(description.contains(&turns_str));
+        prop_assert_eq!(deserialized.tool_whitelist, policy.tool_whitelist);
+        // serde_json's default (non float_roundtrip) parser can be off by an
+        // ulp on f64, so compare costs with a tolerance.
+        prop_assert!(
+            (deserialized.max_cost_per_agent.unwrap() - policy.max_cost_per_agent.unwrap()).abs()
+                < 1e-9
+        );
+        prop_assert_eq!(deserialized.max_tokens_per_agent, policy.max_tokens_per_agent);
     }
-
-    /// Test depth-specific tool restrictions
-    ///
-    /// **Validates: FR-2.4 每个 Agent 的工具权限继承**
-    #[test]
-    fn prop_depth_tool_restrictions(
-        depth in depth_strategy(),
-        allowed_tools in tool_set_strategy(),
-        denied_tools in tool_set_strategy()
-    ) {
-        let mut policy = TeamPolicy::default();
-
-        // Only add restriction for valid depth
-        if depth <= 3 {
-            policy.depth_tool_restrictions.insert(
-                depth,
-                DepthTools {
-                    depth,
-                    allowed_tools: allowed_tools.clone(),
-                    denied_tools: denied_tools.clone(),
-                    max_turns: None,
-                    max_cost_usd: None,
-                },
-            );
-
-            // Check that depth-specific restrictions are applied
-            for tool in &allowed_tools {
-                if !denied_tools.contains(tool) {
-                    prop_assert!(policy.is_tool_allowed(tool, depth));
-                }
-            }
-
-            for tool in &denied_tools {
-                prop_assert!(!policy.is_tool_allowed(tool, depth));
-            }
-        }
-    }
-
 }

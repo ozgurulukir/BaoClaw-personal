@@ -10,7 +10,6 @@
 //! must be idempotent: once migrated, a second round-trip is a fixed point.
 
 use proptest::prelude::*;
-use std::collections::HashMap;
 
 use baoclaw_core::config::{
     load_config_from, normalize_profiles, save_config_to, sync_profiles_to_legacy, BaoclawConfig,
@@ -43,7 +42,7 @@ fn config_strategy() -> impl Strategy<Value = BaoclawConfig> {
             context_window: 200_000,
             auto_compact_threshold_ratio: 0.7,
             tool_output_threshold_chars: 200_000,
-            extra: HashMap::new(),
+            ..Default::default()
         },
     )
 }

@@ -1,8 +1,8 @@
-//! Team execution policy — tool permissions, budget control, and result collection.
+//! Team execution policy — tool permissions, per-agent limits, and result collection.
 //!
 //! This module provides fine-grained control over sub-agent execution:
-//! - Tool permission inheritance and restriction
-//! - Per-agent and total team budget limits
+//! - Tool permission restriction (whitelist / blacklist)
+//! - Per-agent turn, cost, token and wall-clock limits
 //! - Structured result collection with metadata
 //!
 //! # Example
@@ -12,24 +12,26 @@
 //!
 //! let policy = TeamPolicy::default()
 //!     .with_tool_whitelist(vec!["FileRead", "Grep", "Glob"])
-//!     .with_max_cost_per_agent(0.5)
-//!     .with_total_budget(2.0);
+//!     .with_max_cost_per_agent(0.5);
 //!
-//! // Check if a tool is allowed for a sub-agent
-//! assert!(policy.is_tool_allowed("FileRead", 1));
-//! assert!(!policy.is_tool_allowed("WebSearch", 1));
+//! // The per-agent policy enforces the limits in the query loop.
+//! let agent_policy = AgentPolicy::from_team_policy(&policy);
+//! assert!(agent_policy.is_tool_allowed("FileRead"));
+//! assert!(!agent_policy.is_tool_allowed("WebSearch"));
 //! ```
 
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 
 /// Policy governing team execution.
+///
+/// Only limits the engine can actually enforce are modelled: tools
+/// (whitelist/blacklist), per-agent turns, per-agent cost/tokens (checked in
+/// the query loop) and a per-agent wall-clock timeout. Nesting depth and
+/// team-wide budgets were removed rather than left decorative — no code path
+/// can produce nested teams or per-team cost aggregation today.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TeamPolicy {
-    /// Maximum nesting depth for sub-agents (0 = no sub-agents allowed).
-    #[serde(default = "default_max_depth")]
-    pub max_depth: u32,
-
     /// Tools that sub-agents are allowed to use.
     /// Empty means all tools are allowed (inherit from parent).
     #[serde(default, skip_serializing_if = "HashSet::is_empty")]
@@ -52,42 +54,9 @@ pub struct TeamPolicy {
     #[serde(default = "default_max_turns")]
     pub max_turns_per_agent: u32,
 
-    /// Maximum total cost for the entire team.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub total_budget_usd: Option<f64>,
-
-    /// Maximum total tokens for the entire team.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub total_budget_tokens: Option<u64>,
-
     /// Maximum execution time per agent in seconds.
     #[serde(default = "default_timeout_secs")]
     pub agent_timeout_secs: u64,
-
-    /// Maximum execution time for the entire team in seconds.
-    #[serde(default = "default_team_timeout_secs")]
-    pub team_timeout_secs: u64,
-
-    /// Action to take when budget is exceeded.
-    #[serde(default)]
-    pub budget_exceeded_action: BudgetExceededAction,
-
-    /// Per-depth tool restrictions.
-    /// Allows different tool sets at different nesting levels.
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    pub depth_tool_restrictions: HashMap<u32, DepthTools>,
-
-    /// Whether sub-agents can spawn their own sub-agents.
-    #[serde(default)]
-    pub allow_nested_teams: bool,
-
-    /// Whether to inherit tool permissions from parent agent.
-    #[serde(default = "default_true")]
-    pub inherit_parent_permissions: bool,
-}
-
-fn default_max_depth() -> u32 {
-    3
 }
 
 fn default_max_turns() -> u32 {
@@ -98,86 +67,20 @@ fn default_timeout_secs() -> u64 {
     300 // 5 minutes
 }
 
-fn default_team_timeout_secs() -> u64 {
-    600 // 10 minutes
-}
-
-fn default_true() -> bool {
-    true
-}
-
-/// Tool restrictions at a specific nesting depth.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct DepthTools {
-    /// Depth level this applies to.
-    pub depth: u32,
-
-    /// Tools allowed at this depth.
-    #[serde(default, skip_serializing_if = "HashSet::is_empty")]
-    pub allowed_tools: HashSet<String>,
-
-    /// Tools denied at this depth.
-    #[serde(default, skip_serializing_if = "HashSet::is_empty")]
-    pub denied_tools: HashSet<String>,
-
-    /// Maximum turns at this depth.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub max_turns: Option<u32>,
-
-    /// Maximum cost at this depth in USD.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub max_cost_usd: Option<f64>,
-}
-
-/// Action to take when budget is exceeded.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-#[derive(Default)]
-pub enum BudgetExceededAction {
-    /// Terminate the agent/team immediately.
-    #[default]
-    Terminate,
-    /// Escalate to parent agent for handling.
-    Escalate,
-    /// Log a warning but continue execution.
-    WarnAndContinue,
-    /// Pause and wait for user confirmation.
-    AskUser,
-}
-
 impl Default for TeamPolicy {
     fn default() -> Self {
         Self {
-            max_depth: default_max_depth(),
             tool_whitelist: HashSet::new(),
             tool_blacklist: HashSet::new(),
             max_cost_per_agent: Some(1.0),
             max_tokens_per_agent: Some(50_000),
             max_turns_per_agent: default_max_turns(),
-            total_budget_usd: Some(5.0),
-            total_budget_tokens: Some(500_000),
             agent_timeout_secs: default_timeout_secs(),
-            team_timeout_secs: default_team_timeout_secs(),
-            budget_exceeded_action: BudgetExceededAction::default(),
-            depth_tool_restrictions: HashMap::new(),
-            allow_nested_teams: false,
-            inherit_parent_permissions: true,
         }
     }
 }
 
 impl TeamPolicy {
-    /// Create a new policy with default values.
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Set the maximum nesting depth.
-    pub fn with_max_depth(mut self, depth: u32) -> Self {
-        self.max_depth = depth;
-        self
-    }
-
     /// Set the tool whitelist.
     pub fn with_tool_whitelist(mut self, tools: Vec<String>) -> Self {
         self.tool_whitelist = tools.into_iter().collect();
@@ -207,210 +110,11 @@ impl TeamPolicy {
         self.max_turns_per_agent = turns;
         self
     }
-
-    /// Set the total budget for the team.
-    pub fn with_total_budget(mut self, budget: f64) -> Self {
-        self.total_budget_usd = Some(budget);
-        self
-    }
-
-    /// Set whether nested teams are allowed.
-    pub fn with_nested_teams(mut self, allowed: bool) -> Self {
-        self.allow_nested_teams = allowed;
-        self
-    }
-
-    /// Check if a tool is allowed for a sub-agent at the given depth.
-    pub fn is_tool_allowed(&self, tool_name: &str, depth: u32) -> bool {
-        // First check if depth exceeds max
-        if depth > self.max_depth {
-            return false;
-        }
-
-        // Check depth-specific restrictions first
-        if let Some(depth_tools) = self.depth_tool_restrictions.get(&depth) {
-            // Check denied tools at this depth
-            if depth_tools.denied_tools.contains(tool_name) {
-                return false;
-            }
-
-            // If allowed_tools is non-empty, only those are permitted
-            if !depth_tools.allowed_tools.is_empty() {
-                return depth_tools.allowed_tools.contains(tool_name);
-            }
-        }
-
-        // Check global blacklist
-        if self.tool_blacklist.contains(tool_name) {
-            return false;
-        }
-
-        // Check global whitelist
-        if !self.tool_whitelist.is_empty() {
-            return self.tool_whitelist.contains(tool_name);
-        }
-
-        // Empty whitelist means all tools are allowed (except those in blacklist)
-        true
-    }
-
-    /// Filter a list of tools to only those allowed at the given depth.
-    pub fn filter_tools(&self, tools: &[String], depth: u32) -> Vec<String> {
-        tools
-            .iter()
-            .filter(|t| self.is_tool_allowed(t, depth))
-            .cloned()
-            .collect()
-    }
-
-    /// Get the maximum turns allowed at a given depth.
-    pub fn max_turns_at_depth(&self, depth: u32) -> u32 {
-        if let Some(depth_tools) = self.depth_tool_restrictions.get(&depth) {
-            depth_tools.max_turns.unwrap_or(self.max_turns_per_agent)
-        } else {
-            self.max_turns_per_agent
-        }
-    }
-
-    /// Get the maximum cost allowed at a given depth.
-    pub fn max_cost_at_depth(&self, depth: u32) -> Option<f64> {
-        if let Some(depth_tools) = self.depth_tool_restrictions.get(&depth) {
-            depth_tools.max_cost_usd.or(self.max_cost_per_agent)
-        } else {
-            self.max_cost_per_agent
-        }
-    }
-
-    /// Check if the given depth is within limits.
-    pub fn is_depth_allowed(&self, depth: u32) -> bool {
-        depth <= self.max_depth
-    }
-
-    /// Check if budget is exceeded.
-    pub fn is_budget_exceeded(&self, current_cost: f64, current_tokens: u64) -> bool {
-        if let Some(max_cost) = self.total_budget_usd {
-            if current_cost >= max_cost {
-                return true;
-            }
-        }
-        if let Some(max_tokens) = self.total_budget_tokens {
-            if current_tokens >= max_tokens {
-                return true;
-            }
-        }
-        false
-    }
-
-    /// Check if per-agent budget is exceeded.
-    pub fn is_agent_budget_exceeded(&self, cost: f64, tokens: u64, depth: u32) -> bool {
-        // Check per-agent cost
-        if let Some(max_cost) = self.max_cost_at_depth(depth) {
-            if cost >= max_cost {
-                return true;
-            }
-        }
-
-        // Check per-agent tokens
-        if let Some(max_tokens) = self.max_tokens_per_agent {
-            if tokens >= max_tokens {
-                return true;
-            }
-        }
-
-        false
-    }
-
-    /// Get a description of the policy.
-    pub fn describe(&self) -> String {
-        let mut parts = vec![];
-
-        parts.push(format!("max_depth={}", self.max_depth));
-
-        if !self.tool_whitelist.is_empty() {
-            let mut tools: Vec<_> = self.tool_whitelist.iter().collect();
-            tools.sort();
-            parts.push(format!(
-                "whitelist=[{}]",
-                tools
-                    .iter()
-                    .map(|s| s.as_str())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            ));
-        }
-
-        if !self.tool_blacklist.is_empty() {
-            let mut tools: Vec<_> = self.tool_blacklist.iter().collect();
-            tools.sort();
-            parts.push(format!(
-                "blacklist=[{}]",
-                tools
-                    .iter()
-                    .map(|s| s.as_str())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            ));
-        }
-
-        if let Some(cost) = self.max_cost_per_agent {
-            parts.push(format!("max_cost_per_agent=${:.2}", cost));
-        }
-
-        if let Some(budget) = self.total_budget_usd {
-            parts.push(format!("total_budget=${:.2}", budget));
-        }
-
-        parts.push(format!("max_turns={}", self.max_turns_per_agent));
-        parts.push(format!("timeout={}s", self.agent_timeout_secs));
-
-        format!("TeamPolicy({})", parts.join(", "))
-    }
-
-    /// Create a policy for read-only operations.
-    pub fn read_only() -> Self {
-        Self::default()
-            .with_tool_whitelist(vec![
-                "FileRead".into(),
-                "Grep".into(),
-                "Glob".into(),
-                "Bash".into(),
-            ])
-            .with_max_turns_per_agent(5)
-    }
-
-    /// Create a policy for safe operations (read + write, no network).
-    pub fn safe_tools() -> Self {
-        Self::default()
-            .with_tool_whitelist(vec![
-                "FileRead".into(),
-                "FileEdit".into(),
-                "FileWrite".into(),
-                "Grep".into(),
-                "Glob".into(),
-                "Bash".into(),
-            ])
-            .with_tool_blacklist(vec!["WebSearch".into(), "WebFetch".into()])
-    }
-
-    /// Create a policy with full access (all tools allowed).
-    pub fn full_access() -> Self {
-        Self {
-            tool_whitelist: HashSet::new(),
-            tool_blacklist: HashSet::new(),
-            ..Self::default()
-        }
-    }
 }
 
 /// Per-agent execution policy derived from the team policy.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AgentPolicy {
-    /// The team policy this is derived from.
-    #[serde(skip)]
-
-    /// Depth of this agent in the nesting hierarchy.
-    pub depth: u32,
-
     /// Tools allowed for this agent.
     #[serde(default, skip_serializing_if = "HashSet::is_empty")]
     pub allowed_tools: HashSet<String>,
@@ -434,33 +138,12 @@ pub struct AgentPolicy {
 
 impl AgentPolicy {
     /// Create an agent policy from a team policy.
-    pub fn from_team_policy(team_policy: &TeamPolicy, depth: u32) -> Self {
-        // Get depth-specific restrictions if any
-        let depth_tools = team_policy.depth_tool_restrictions.get(&depth);
-
-        // Determine allowed/denied tools
-        let allowed_tools = if let Some(dt) = depth_tools {
-            if dt.allowed_tools.is_empty() {
-                team_policy.tool_whitelist.clone()
-            } else {
-                dt.allowed_tools.clone()
-            }
-        } else {
-            team_policy.tool_whitelist.clone()
-        };
-
-        let denied_tools = if let Some(dt) = depth_tools {
-            dt.denied_tools.clone()
-        } else {
-            team_policy.tool_blacklist.clone()
-        };
-
+    pub fn from_team_policy(team_policy: &TeamPolicy) -> Self {
         Self {
-            depth,
-            allowed_tools,
-            denied_tools,
-            max_turns: team_policy.max_turns_at_depth(depth),
-            max_cost_usd: team_policy.max_cost_at_depth(depth),
+            allowed_tools: team_policy.tool_whitelist.clone(),
+            denied_tools: team_policy.tool_blacklist.clone(),
+            max_turns: team_policy.max_turns_per_agent,
+            max_cost_usd: team_policy.max_cost_per_agent,
             max_tokens: team_policy.max_tokens_per_agent,
             timeout_secs: team_policy.agent_timeout_secs,
         }
@@ -480,74 +163,6 @@ impl AgentPolicy {
 
         // Empty allowed_tools means all tools are permitted (except denied)
         true
-    }
-
-    /// Filter tools to only allowed ones.
-    pub fn filter_tools(&self, tools: &[String]) -> Vec<String> {
-        tools
-            .iter()
-            .filter(|t| self.is_tool_allowed(t))
-            .cloned()
-            .collect()
-    }
-
-    /// Check if budget is exceeded.
-    pub fn is_budget_exceeded(&self, cost: f64, tokens: u64) -> bool {
-        if let Some(max_cost) = self.max_cost_usd {
-            if cost >= max_cost {
-                return true;
-            }
-        }
-        if let Some(max_tokens) = self.max_tokens {
-            if tokens >= max_tokens {
-                return true;
-            }
-        }
-        false
-    }
-
-    /// Get a description of this agent's policy.
-    pub fn describe(&self) -> String {
-        let mut parts = vec![];
-        parts.push(format!("depth={}", self.depth));
-
-        if !self.allowed_tools.is_empty() {
-            let mut tools: Vec<_> = self.allowed_tools.iter().collect();
-            tools.sort();
-            parts.push(format!(
-                "tools=[{}]",
-                tools
-                    .iter()
-                    .map(|s| s.as_str())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            ));
-        } else {
-            parts.push("tools=all".to_string());
-        }
-
-        if !self.denied_tools.is_empty() {
-            let mut tools: Vec<_> = self.denied_tools.iter().collect();
-            tools.sort();
-            parts.push(format!(
-                "denied=[{}]",
-                tools
-                    .iter()
-                    .map(|s| s.as_str())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            ));
-        }
-
-        parts.push(format!("max_turns={}", self.max_turns));
-
-        if let Some(cost) = self.max_cost_usd {
-            parts.push(format!("max_cost=${:.2}", cost));
-        }
-
-        parts.push(format!("timeout={}s", self.timeout_secs));
-
-        format!("AgentPolicy({})", parts.join(", "))
     }
 }
 
@@ -919,16 +534,15 @@ mod tests {
     use super::*;
 
     use crate::engine::team::policy::AgentPolicy;
-    use crate::engine::team::policy::DepthTools;
     use crate::engine::team::policy::TeamPolicy;
     #[test]
     fn test_team_policy_default() {
         let policy = TeamPolicy::default();
-        assert_eq!(policy.max_depth, 3);
         assert!(policy.tool_whitelist.is_empty());
         assert!(policy.tool_blacklist.is_empty());
         assert!(policy.max_cost_per_agent.is_some());
-        assert!(policy.total_budget_usd.is_some());
+        assert!(policy.max_tokens_per_agent.is_some());
+        assert_eq!(policy.max_turns_per_agent, 10);
     }
 
     #[test]
@@ -936,9 +550,10 @@ mod tests {
         let policy =
             TeamPolicy::default().with_tool_whitelist(vec!["FileRead".into(), "Grep".into()]);
 
-        assert!(policy.is_tool_allowed("FileRead", 0));
-        assert!(policy.is_tool_allowed("Grep", 0));
-        assert!(!policy.is_tool_allowed("WebSearch", 0));
+        let agent_policy = AgentPolicy::from_team_policy(&policy);
+        assert!(agent_policy.is_tool_allowed("FileRead"));
+        assert!(agent_policy.is_tool_allowed("Grep"));
+        assert!(!agent_policy.is_tool_allowed("WebSearch"));
     }
 
     #[test]
@@ -946,68 +561,28 @@ mod tests {
         let policy = TeamPolicy::default().with_tool_blacklist(vec!["WebSearch".into()]);
 
         // All tools allowed except WebSearch
-        assert!(policy.is_tool_allowed("FileRead", 0));
-        assert!(policy.is_tool_allowed("Bash", 0));
-        assert!(!policy.is_tool_allowed("WebSearch", 0));
-    }
-
-    #[test]
-    fn test_team_policy_depth_restrictions() {
-        let mut policy = TeamPolicy::default();
-        policy.depth_tool_restrictions.insert(
-            1,
-            DepthTools {
-                depth: 1,
-                allowed_tools: vec!["FileRead".into(), "Bash".into()].into_iter().collect(),
-                denied_tools: Default::default(),
-                max_turns: Some(5),
-                max_cost_usd: Some(0.5),
-            },
-        );
-
-        // Depth 0: all tools allowed
-        assert!(policy.is_tool_allowed("WebSearch", 0));
-
-        // Depth 1: only FileRead and Bash allowed
-        assert!(policy.is_tool_allowed("FileRead", 1));
-        assert!(policy.is_tool_allowed("Bash", 1));
-        assert!(!policy.is_tool_allowed("WebSearch", 1));
-
-        // Depth 2: back to default (all allowed)
-        assert!(policy.is_tool_allowed("WebSearch", 2));
-    }
-
-    #[test]
-    fn test_team_policy_max_depth() {
-        let policy = TeamPolicy::default().with_max_depth(2);
-
-        assert!(policy.is_depth_allowed(0));
-        assert!(policy.is_depth_allowed(1));
-        assert!(policy.is_depth_allowed(2));
-        assert!(!policy.is_depth_allowed(3));
-    }
-
-    #[test]
-    fn test_team_policy_budget_exceeded() {
-        let policy = TeamPolicy::default().with_total_budget(10.0);
-
-        assert!(!policy.is_budget_exceeded(5.0, 0));
-        assert!(policy.is_budget_exceeded(10.0, 0));
-        assert!(policy.is_budget_exceeded(15.0, 0));
+        let agent_policy = AgentPolicy::from_team_policy(&policy);
+        assert!(agent_policy.is_tool_allowed("FileRead"));
+        assert!(agent_policy.is_tool_allowed("Bash"));
+        assert!(!agent_policy.is_tool_allowed("WebSearch"));
     }
 
     #[test]
     fn test_agent_policy_from_team_policy() {
         let team_policy = TeamPolicy::default()
             .with_tool_whitelist(vec!["FileRead".into(), "Grep".into()])
-            .with_max_turns_per_agent(5);
+            .with_max_turns_per_agent(5)
+            .with_max_cost_per_agent(0.5)
+            .with_max_tokens_per_agent(25_000);
 
-        let agent_policy = AgentPolicy::from_team_policy(&team_policy, 1);
+        let agent_policy = AgentPolicy::from_team_policy(&team_policy);
 
-        assert_eq!(agent_policy.depth, 1);
         assert!(agent_policy.is_tool_allowed("FileRead"));
         assert!(!agent_policy.is_tool_allowed("WebSearch"));
         assert_eq!(agent_policy.max_turns, 5);
+        assert_eq!(agent_policy.max_cost_usd, Some(0.5));
+        assert_eq!(agent_policy.max_tokens, Some(25_000));
+        assert_eq!(agent_policy.timeout_secs, team_policy.agent_timeout_secs);
     }
 
     #[test]
@@ -1087,39 +662,6 @@ mod tests {
     }
 
     #[test]
-    fn test_read_only_policy() {
-        let policy = TeamPolicy::read_only();
-
-        assert!(policy.is_tool_allowed("FileRead", 0));
-        assert!(policy.is_tool_allowed("Grep", 0));
-        assert!(policy.is_tool_allowed("Glob", 0));
-        assert!(policy.is_tool_allowed("Bash", 0));
-        assert!(!policy.is_tool_allowed("FileWrite", 0));
-        assert!(!policy.is_tool_allowed("FileEdit", 0));
-    }
-
-    #[test]
-    fn test_safe_tools_policy() {
-        let policy = TeamPolicy::safe_tools();
-
-        assert!(policy.is_tool_allowed("FileRead", 0));
-        assert!(policy.is_tool_allowed("FileWrite", 0));
-        assert!(policy.is_tool_allowed("FileEdit", 0));
-        assert!(policy.is_tool_allowed("Bash", 0));
-        assert!(!policy.is_tool_allowed("WebSearch", 0));
-        assert!(!policy.is_tool_allowed("WebFetch", 0));
-    }
-
-    #[test]
-    fn test_full_access_policy() {
-        let policy = TeamPolicy::full_access();
-
-        assert!(policy.is_tool_allowed("FileRead", 0));
-        assert!(policy.is_tool_allowed("WebSearch", 0));
-        assert!(policy.is_tool_allowed("Anything", 0));
-    }
-
-    #[test]
     fn test_policy_serialization() {
         let policy = TeamPolicy::default()
             .with_tool_whitelist(vec!["FileRead".into()])
@@ -1164,16 +706,5 @@ mod tests {
     fn test_agent_usage_total() {
         let usage = AgentUsage::new(100, 50);
         assert_eq!(usage.total(), 150);
-    }
-
-    #[test]
-    fn test_team_policy_describe() {
-        let policy = TeamPolicy::default()
-            .with_tool_whitelist(vec!["FileRead".into()])
-            .with_max_turns_per_agent(5);
-
-        let desc = policy.describe();
-        assert!(desc.contains("max_depth=3"));
-        assert!(desc.contains("max_turns=5"));
     }
 }

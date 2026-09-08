@@ -611,6 +611,8 @@ mod tests {
             context_window: 200_000,
             auto_compact_threshold_ratio: 0.7,
             parent_turn_id: None,
+            max_tokens: 16_384,
+            max_tokens_budget: None,
             agent_label: None,
             session_memory: None,
             file_cache: None,

@@ -166,22 +166,13 @@ impl FallbackController {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashMap;
 
     fn make_config(model: &str, fallbacks: Vec<&str>, max_retries: u32) -> BaoclawConfig {
         BaoclawConfig {
             model: model.to_string(),
             fallback_models: fallbacks.into_iter().map(|s| s.to_string()).collect(),
             max_retries_per_model: max_retries,
-            api_type: "anthropic".to_string(),
-            openai_base_url: None,
-            context_window: 200_000,
-            auto_compact_threshold_ratio: 0.7,
-            tool_output_threshold_chars: 200_000,
-            model_profiles: HashMap::new(),
-            primary_profile: None,
-            fallback_profiles: Vec::new(),
-            extra: HashMap::new(),
+            ..Default::default()
         }
     }
 

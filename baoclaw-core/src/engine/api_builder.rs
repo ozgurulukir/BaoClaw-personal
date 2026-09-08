@@ -380,7 +380,7 @@ pub fn build_api_request(messages: &[Message], config: &QueryLoopConfig) -> Crea
         messages: api_messages,
         system,
         tools,
-        max_tokens: 16384,
+        max_tokens: config.max_tokens,
         stream: true,
         thinking: match &config.thinking_config {
             ThinkingConfig::Disabled => None,

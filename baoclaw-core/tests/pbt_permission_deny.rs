@@ -145,7 +145,6 @@ proptest! {
                 always_allow_rules: HashMap::new(),
                 always_deny_rules: deny_rules,
                 always_ask_rules: HashMap::new(),
-                is_bypass_permissions_mode_available: false,
                 auto_allow_channels: HashMap::new(),
                 ask_timeout_secs: 300,
                 persist_grants: false,

@@ -35,7 +35,6 @@ impl BashTool {
     }
 
     const DEFAULT_TIMEOUT_MS: u64 = 120_000;
-    const MAX_TIMEOUT_MS: u64 = 300_000;
     const MAX_OUTPUT_BYTES: usize = 1_048_576;
 
     /// Build the actual command parts to execute.
@@ -153,7 +152,7 @@ impl Tool for BashTool {
             .get("timeout")
             .and_then(|v| v.as_u64())
             .unwrap_or(Self::DEFAULT_TIMEOUT_MS)
-            .min(Self::MAX_TIMEOUT_MS);
+            .min(crate::config::bash_max_timeout_ms());
 
         let timeout_duration = Duration::from_millis(timeout_ms);
 

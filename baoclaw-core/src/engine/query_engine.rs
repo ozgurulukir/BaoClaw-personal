@@ -44,6 +44,12 @@ pub struct QueryEngineConfig {
     pub context_window: u64,
     /// Auto-compact threshold as fraction of `context_window`. Default: 0.7.
     pub auto_compact_threshold_ratio: f64,
+    /// Output token cap sent with each model request (default 16_384).
+    pub max_tokens: u32,
+    /// Per-query token ceiling (input + output). None = unlimited. Driven by
+    /// team policies (`max_tokens_per_agent`); interactive engines leave it
+    /// unset and rely on `max_budget_usd` for cost-based protection.
+    pub max_tokens_budget: Option<u64>,
     /// For sub-agents: the turn_id of the parent agent's current turn.
     pub parent_turn_id: Option<u32>,
     /// For sub-agents: a short label describing the task (shown in CLI).
@@ -1109,6 +1115,9 @@ impl QueryEngine {
             permission: self.config.permission.clone(),
             context_window: self.config.context_window,
             auto_compact_threshold_ratio: self.config.auto_compact_threshold_ratio,
+            max_budget_usd: self.config.max_budget_usd,
+            max_tokens_budget: self.config.max_tokens_budget,
+            max_tokens: self.config.max_tokens,
             telemetry: self.config.telemetry.clone(),
             evolution: self.config.evolution.clone(),
         };
@@ -1182,6 +1191,13 @@ pub struct QueryLoopConfig {
     pub context_window: u64,
     /// Auto-compact threshold ratio — propagated to ToolContext for sub-agents.
     pub auto_compact_threshold_ratio: f64,
+    /// Per-query cost ceiling (USD). When the current query's accumulated
+    /// cost reaches it, the model gets one grace call and is then stopped.
+    pub max_budget_usd: Option<f64>,
+    /// Per-query token ceiling (input + output). None = unlimited.
+    pub max_tokens_budget: Option<u64>,
+    /// Output token cap sent with each model request (default 16_384).
+    pub max_tokens: u32,
     /// Local telemetry recorder (cloned from the engine config).
     pub telemetry: Option<Arc<crate::engine::telemetry::collector::TelemetryCollector>>,
     /// Evolution engine for trajectory recording.
@@ -1299,6 +1315,8 @@ mod tests {
             max_retries_per_model: 2,
             context_window: 200_000,
             auto_compact_threshold_ratio: 0.7,
+            max_tokens: 16_384,
+            max_tokens_budget: None,
             parent_turn_id: None,
             agent_label: None,
             session_memory: None,
@@ -1757,47 +1775,7 @@ mod tests {
 
     #[test]
     fn test_build_system_prompt_default() {
-        let (_abort_tx, abort_rx) = watch::channel(false);
-        let config = QueryLoopConfig {
-            api_client: Arc::new(UnifiedClient::new_anthropic(ApiClientConfig {
-                api_key: "test".to_string(),
-                base_url: None,
-                max_retries: None,
-                api_path: None,
-            })),
-            tools: vec![],
-            model: "test".to_string(),
-            max_turns: None,
-            cwd: PathBuf::from("/tmp"),
-            custom_system_prompt: None,
-            append_system_prompt: None,
-            project_instructions: None,
-            git_info: None,
-            thinking_config: ThinkingConfig::Disabled,
-            abort_rx,
-            session_id: None,
-            fallback_models: vec![],
-            max_retries_per_model: 2,
-            token_counter: Arc::new(tokio::sync::Mutex::new(
-                crate::engine::token_counter::TokenCounter::new(200_000, 0.7),
-            )),
-            parent_turn_id: None,
-            agent_label: None,
-            session_memory: None,
-            compact_fail_count: 0,
-            recent_messages_for_rules: vec![],
-            file_cache: None,
-            tool_result_store: None,
-            initial_budget: None,
-            cached_rules_raw: vec![],
-            adaptive_compact: AdaptiveCompactTracker::new(),
-            tool_health: Arc::new(crate::engine::tool_health::ToolHealthTracker::new()),
-            permission: None,
-            telemetry: None,
-            evolution: None,
-            context_window: 200_000,
-            auto_compact_threshold_ratio: 0.7,
-        };
+        let config = make_loop_config("test");
         let system = build_system_prompt(&config);
         assert!(system.is_some());
         let blocks = system.unwrap();
@@ -1810,46 +1788,10 @@ mod tests {
 
     #[test]
     fn test_build_system_prompt_custom() {
-        let (_abort_tx, abort_rx) = watch::channel(false);
         let config = QueryLoopConfig {
-            api_client: Arc::new(UnifiedClient::new_anthropic(ApiClientConfig {
-                api_key: "test".to_string(),
-                base_url: None,
-                max_retries: None,
-                api_path: None,
-            })),
-            tools: vec![],
-            model: "test".to_string(),
-            max_turns: None,
-            cwd: PathBuf::from("/tmp"),
             custom_system_prompt: Some("You are a Rust expert.".to_string()),
             append_system_prompt: Some("Be concise.".to_string()),
-            project_instructions: None,
-            git_info: None,
-            thinking_config: ThinkingConfig::Disabled,
-            abort_rx,
-            session_id: None,
-            fallback_models: vec![],
-            max_retries_per_model: 2,
-            token_counter: Arc::new(tokio::sync::Mutex::new(
-                crate::engine::token_counter::TokenCounter::new(200_000, 0.7),
-            )),
-            parent_turn_id: None,
-            agent_label: None,
-            session_memory: None,
-            compact_fail_count: 0,
-            recent_messages_for_rules: vec![],
-            file_cache: None,
-            tool_result_store: None,
-            initial_budget: None,
-            cached_rules_raw: vec![],
-            adaptive_compact: AdaptiveCompactTracker::new(),
-            tool_health: Arc::new(crate::engine::tool_health::ToolHealthTracker::new()),
-            permission: None,
-            telemetry: None,
-            evolution: None,
-            context_window: 200_000,
-            auto_compact_threshold_ratio: 0.7,
+            ..make_loop_config("test")
         };
         let system = build_system_prompt(&config);
         assert!(system.is_some());
@@ -1860,47 +1802,7 @@ mod tests {
 
     #[test]
     fn test_build_api_request_basic() {
-        let (_abort_tx, abort_rx) = watch::channel(false);
-        let config = QueryLoopConfig {
-            api_client: Arc::new(UnifiedClient::new_anthropic(ApiClientConfig {
-                api_key: "test".to_string(),
-                base_url: None,
-                max_retries: None,
-                api_path: None,
-            })),
-            tools: vec![],
-            model: "claude-sonnet-4-20250514".to_string(),
-            max_turns: None,
-            cwd: PathBuf::from("/tmp"),
-            custom_system_prompt: None,
-            append_system_prompt: None,
-            project_instructions: None,
-            git_info: None,
-            thinking_config: ThinkingConfig::Disabled,
-            abort_rx,
-            session_id: None,
-            fallback_models: vec![],
-            max_retries_per_model: 2,
-            token_counter: Arc::new(tokio::sync::Mutex::new(
-                crate::engine::token_counter::TokenCounter::new(200_000, 0.7),
-            )),
-            parent_turn_id: None,
-            agent_label: None,
-            session_memory: None,
-            compact_fail_count: 0,
-            recent_messages_for_rules: vec![],
-            file_cache: None,
-            tool_result_store: None,
-            initial_budget: None,
-            cached_rules_raw: vec![],
-            adaptive_compact: AdaptiveCompactTracker::new(),
-            tool_health: Arc::new(crate::engine::tool_health::ToolHealthTracker::new()),
-            permission: None,
-            telemetry: None,
-            evolution: None,
-            context_window: 200_000,
-            auto_compact_threshold_ratio: 0.7,
-        };
+        let config = make_loop_config("claude-sonnet-4-20250514");
         let messages = vec![Message {
             uuid: "550e8400-e29b-41d4-a716-446655440000".to_string(),
             timestamp: "2024-01-15T10:30:00Z".to_string(),
@@ -2001,46 +1903,9 @@ mod tests {
 
     #[test]
     fn test_build_system_prompt_with_project_instructions() {
-        let (_abort_tx, abort_rx) = watch::channel(false);
         let config = QueryLoopConfig {
-            api_client: Arc::new(UnifiedClient::new_anthropic(ApiClientConfig {
-                api_key: "test".to_string(),
-                base_url: None,
-                max_retries: None,
-                api_path: None,
-            })),
-            tools: vec![],
-            model: "test".to_string(),
-            max_turns: None,
-            cwd: PathBuf::from("/tmp"),
-            custom_system_prompt: None,
-            append_system_prompt: None,
             project_instructions: Some("Always use snake_case".to_string()),
-            git_info: None,
-            thinking_config: ThinkingConfig::Disabled,
-            abort_rx,
-            session_id: None,
-            fallback_models: vec![],
-            max_retries_per_model: 2,
-            token_counter: Arc::new(tokio::sync::Mutex::new(
-                crate::engine::token_counter::TokenCounter::new(200_000, 0.7),
-            )),
-            parent_turn_id: None,
-            agent_label: None,
-            session_memory: None,
-            compact_fail_count: 0,
-            recent_messages_for_rules: vec![],
-            file_cache: None,
-            tool_result_store: None,
-            initial_budget: None,
-            cached_rules_raw: vec![],
-            adaptive_compact: AdaptiveCompactTracker::new(),
-            tool_health: Arc::new(crate::engine::tool_health::ToolHealthTracker::new()),
-            permission: None,
-            telemetry: None,
-            evolution: None,
-            context_window: 200_000,
-            auto_compact_threshold_ratio: 0.7,
+            ..make_loop_config("test")
         };
         let system = build_system_prompt(&config);
         assert!(system.is_some());
@@ -2051,47 +1916,7 @@ mod tests {
 
     #[test]
     fn test_build_system_prompt_no_project_instructions() {
-        let (_abort_tx, abort_rx) = watch::channel(false);
-        let config = QueryLoopConfig {
-            api_client: Arc::new(UnifiedClient::new_anthropic(ApiClientConfig {
-                api_key: "test".to_string(),
-                base_url: None,
-                max_retries: None,
-                api_path: None,
-            })),
-            tools: vec![],
-            model: "test".to_string(),
-            max_turns: None,
-            cwd: PathBuf::from("/tmp"),
-            custom_system_prompt: None,
-            append_system_prompt: None,
-            project_instructions: None,
-            git_info: None,
-            thinking_config: ThinkingConfig::Disabled,
-            abort_rx,
-            session_id: None,
-            fallback_models: vec![],
-            max_retries_per_model: 2,
-            token_counter: Arc::new(tokio::sync::Mutex::new(
-                crate::engine::token_counter::TokenCounter::new(200_000, 0.7),
-            )),
-            parent_turn_id: None,
-            agent_label: None,
-            session_memory: None,
-            compact_fail_count: 0,
-            recent_messages_for_rules: vec![],
-            file_cache: None,
-            tool_result_store: None,
-            initial_budget: None,
-            cached_rules_raw: vec![],
-            adaptive_compact: AdaptiveCompactTracker::new(),
-            tool_health: Arc::new(crate::engine::tool_health::ToolHealthTracker::new()),
-            permission: None,
-            telemetry: None,
-            evolution: None,
-            context_window: 200_000,
-            auto_compact_threshold_ratio: 0.7,
-        };
+        let config = make_loop_config("test");
         let system = build_system_prompt(&config);
         assert!(system.is_some());
         let text = system.unwrap()[0]["text"].as_str().unwrap().to_string();
@@ -2253,7 +2078,7 @@ mod tests {
 
     // --- Thinking config in build_api_request tests ---
 
-    fn make_loop_config_with_thinking(thinking_config: ThinkingConfig) -> QueryLoopConfig {
+    fn make_loop_config(model: &str) -> QueryLoopConfig {
         let (_abort_tx, abort_rx) = watch::channel(false);
         QueryLoopConfig {
             api_client: Arc::new(UnifiedClient::new_anthropic(ApiClientConfig {
@@ -2263,14 +2088,14 @@ mod tests {
                 api_path: None,
             })),
             tools: vec![],
-            model: "claude-sonnet-4-20250514".to_string(),
+            model: model.to_string(),
             max_turns: None,
             cwd: PathBuf::from("/tmp"),
             custom_system_prompt: None,
             append_system_prompt: None,
             project_instructions: None,
             git_info: None,
-            thinking_config,
+            thinking_config: ThinkingConfig::Disabled,
             abort_rx,
             session_id: None,
             fallback_models: vec![],
@@ -2292,9 +2117,18 @@ mod tests {
             permission: None,
             telemetry: None,
             evolution: None,
+            max_budget_usd: None,
+            max_tokens_budget: None,
+            max_tokens: 16_384,
             context_window: 200_000,
             auto_compact_threshold_ratio: 0.7,
         }
+    }
+
+    fn make_loop_config_with_thinking(thinking_config: ThinkingConfig) -> QueryLoopConfig {
+        let mut config = make_loop_config("claude-sonnet-4-20250514");
+        config.thinking_config = thinking_config;
+        config
     }
 
     fn make_test_messages() -> Vec<Message> {

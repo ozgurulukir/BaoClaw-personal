@@ -43,7 +43,6 @@ pub struct ToolPermissionContext {
     pub always_allow_rules: ToolPermissionRulesBySource,
     pub always_deny_rules: ToolPermissionRulesBySource,
     pub always_ask_rules: ToolPermissionRulesBySource,
-    pub is_bypass_permissions_mode_available: bool,
     /// Per-channel auto-allow knobs for clients that answer their own
     /// permission prompts (keyed by shared_session_id, e.g. "tui"). A missing
     /// key means auto-allow is ON, so legacy configs keep today's behavior.
@@ -383,7 +382,6 @@ impl Default for ToolPermissionContext {
             always_allow_rules: HashMap::new(),
             always_deny_rules: HashMap::new(),
             always_ask_rules: HashMap::new(),
-            is_bypass_permissions_mode_available: false,
             auto_allow_channels: HashMap::new(),
             ask_timeout_secs: DEFAULT_ASK_TIMEOUT_SECS,
             persist_grants: true,
@@ -417,7 +415,6 @@ mod tests {
             always_allow_rules: HashMap::new(),
             always_deny_rules: HashMap::new(),
             always_ask_rules: HashMap::new(),
-            is_bypass_permissions_mode_available: false,
             auto_allow_channels: HashMap::new(),
             ask_timeout_secs: DEFAULT_ASK_TIMEOUT_SECS,
             persist_grants: true,
@@ -865,7 +862,6 @@ mod tests {
         assert!(ctx.additional_search_dirs.is_empty());
         assert!(ctx.additional_write_dirs.is_empty());
         assert_eq!(ctx.always_allow_rules["user"].len(), 1);
-        assert!(!ctx.is_bypass_permissions_mode_available);
     }
 
     #[test]

@@ -74,6 +74,9 @@ proptest! {
             adaptive_compact: baoclaw_core::engine::query_engine::AdaptiveCompactTracker::new(),
             tool_health: std::sync::Arc::new(baoclaw_core::engine::tool_health::ToolHealthTracker::new()),
             permission: None,
+            max_budget_usd: None,
+            max_tokens_budget: None,
+            max_tokens: 16_384,
         };
 
         let system = build_system_prompt(&config);

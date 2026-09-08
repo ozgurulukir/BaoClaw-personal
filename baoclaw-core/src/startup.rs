@@ -263,6 +263,10 @@ pub(super) fn load_config_and_api_client() -> (BaoclawConfig, Arc<UnifiedClient>
     // The executor reads the tool-output cap through this process-wide
     // accessor (it has no config handle at the truncation sites).
     config::init_tool_output_threshold(baoclaw_config.tool_output_threshold_chars);
+    // Same pattern for the Bash timeout ceiling and the parallel-tool cap:
+    // both are enforced deep inside tools that carry no config handle.
+    config::init_bash_max_timeout_ms(baoclaw_config.bash_max_timeout_ms);
+    config::init_max_parallel_tools(baoclaw_config.max_parallel_tools);
 
     // === P1-1: Model profiles support ===
     // Resolve the primary profile (auto-migrated from old format by normalize_profiles).
@@ -739,6 +743,8 @@ pub(super) async fn start_cron_scheduler(shared: &SharedState) {
                     max_retries_per_model: headless_kit.max_retries_per_model,
                     context_window: headless_kit.context_window,
                     auto_compact_threshold_ratio: headless_kit.auto_compact_threshold_ratio,
+                    max_tokens: headless_kit.max_tokens,
+                    max_tokens_budget: None,
                     parent_turn_id: None,
                     agent_label: Some("cron".to_string()),
                     session_memory: None,

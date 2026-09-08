@@ -2,7 +2,6 @@
 //! PBT: Property P2 — current_model() always returns a model from the chain
 
 use proptest::prelude::*;
-use std::collections::HashMap;
 
 use baoclaw_core::api::fallback::{FallbackAction, FallbackController};
 use baoclaw_core::config::BaoclawConfig;
@@ -16,15 +15,7 @@ fn make_config(n_fallbacks: usize, max_retries: u32) -> BaoclawConfig {
         model: "primary-model".to_string(),
         fallback_models: fallbacks,
         max_retries_per_model: max_retries,
-        api_type: "anthropic".to_string(),
-        openai_base_url: None,
-        context_window: 200_000,
-        auto_compact_threshold_ratio: 0.7,
-        tool_output_threshold_chars: 200_000,
-        primary_profile: None,
-        model_profiles: HashMap::new(),
-        fallback_profiles: Vec::new(),
-        extra: HashMap::new(),
+        ..Default::default()
     }
 }
 

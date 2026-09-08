@@ -381,7 +381,7 @@ impl TeamExecutor {
             let abort_rx_clone = abort_rx.clone();
             let agent_id_clone = agent_id.clone();
             let agent_policy =
-                crate::engine::team::policy::AgentPolicy::from_team_policy(&team_policy, 1);
+                crate::engine::team::policy::AgentPolicy::from_team_policy(&team_policy);
             let kit = self.kit.clone();
 
             join_set.spawn(async move {
@@ -512,7 +512,7 @@ impl TeamExecutor {
 
             // Create agent policy
             let agent_policy =
-                crate::engine::team::policy::AgentPolicy::from_team_policy(&team_policy, 1);
+                crate::engine::team::policy::AgentPolicy::from_team_policy(&team_policy);
 
             // Execute the agent
             let result = Self::execute_single_agent(
@@ -699,7 +699,7 @@ impl TeamExecutor {
                 let model = self.default_model.clone();
                 let shared_state_clone = Arc::clone(&shared_state);
                 let agent_policy =
-                    crate::engine::team::policy::AgentPolicy::from_team_policy(&team_policy, 1);
+                    crate::engine::team::policy::AgentPolicy::from_team_policy(&team_policy);
                 let agent_id_for_result = agent_id.clone();
                 let kit = self.kit.clone();
 
@@ -859,7 +859,7 @@ impl TeamExecutor {
         cwd: PathBuf,
         model: String,
         prompt: String,
-        mut abort_rx: watch::Receiver<bool>,
+        abort_rx: watch::Receiver<bool>,
         agent_policy: Option<crate::engine::team::policy::AgentPolicy>,
         agent_id: String,
         kit: crate::engine::kit::HeadlessEngineKit,
@@ -871,6 +871,8 @@ impl TeamExecutor {
         // Get policy constraints or use defaults
         let max_turns = agent_policy.as_ref().map(|p| p.max_turns).unwrap_or(10);
         let max_budget = agent_policy.as_ref().and_then(|p| p.max_cost_usd);
+        let max_tokens_budget = agent_policy.as_ref().and_then(|p| p.max_tokens);
+        let agent_timeout_secs = agent_policy.as_ref().map(|p| p.timeout_secs);
 
         // Filter tools based on policy
         let filtered_tools = if let Some(ref policy) = agent_policy {
@@ -908,6 +910,8 @@ impl TeamExecutor {
             max_retries_per_model: kit.max_retries_per_model,
             context_window: kit.context_window,
             auto_compact_threshold_ratio: kit.auto_compact_threshold_ratio,
+            max_tokens: kit.max_tokens,
+            max_tokens_budget,
             parent_turn_id: None,
             agent_label: Some("sub-agent".to_string()),
             session_memory: None,
@@ -932,48 +936,72 @@ impl TeamExecutor {
         let _files_written: Vec<String> = Vec::new();
         let _commands_executed: Vec<String> = Vec::new();
 
-        loop {
-            tokio::select! {
-                // Check for abort
-                _ = abort_rx.changed() => {
-                    if *abort_rx.borrow() {
+        // Policy wall-clock timeout wraps the whole event pump so agents
+        // inherit `agent_timeout_secs` from the team policy (default 300s).
+        let pump = async {
+            loop {
+                tokio::select! {
+                    // Check for abort. wait_for_abort (not a bare
+                    // changed()) matters: the DAG spawn path drops the
+                    // watch sender immediately, and a dropped sender makes
+                    // changed() resolve instantly — a bare arm here would
+                    // busy-spin the whole agent run.
+                    _ = crate::engine::wait_for_abort(abort_rx.clone()) => {
                         engine.abort();
                         return Err(TeamError {
                             code: "aborted".to_string(),
                             message: "Agent execution was aborted".to_string(),
-                            agent_id: Some(agent_id),
+                            agent_id: Some(agent_id.clone()),
                         });
                     }
-                }
 
-                // Process events
-                event = rx.recv() => {
-                    match event {
-                        Some(EngineEvent::AssistantChunk { content, .. }) => {
-                            final_text.push_str(&content);
-                        }
-                        Some(EngineEvent::Result(result)) => {
-                            if let Some(text) = result.text {
-                                final_text = text;
+                    // Process events
+                    event = rx.recv() => {
+                        match event {
+                            Some(EngineEvent::AssistantChunk { content, .. }) => {
+                                final_text.push_str(&content);
                             }
-                            total_input_tokens += result.usage.input_tokens;
-                            total_output_tokens += result.usage.output_tokens;
-                            total_cost += result.total_cost_usd;
-                            // turns tracking is not available in QueryResult
-                            break;
+                            Some(EngineEvent::Result(result)) => {
+                                if let Some(text) = result.text {
+                                    final_text = text;
+                                }
+                                total_input_tokens += result.usage.input_tokens;
+                                total_output_tokens += result.usage.output_tokens;
+                                total_cost += result.total_cost_usd;
+                                // turns tracking is not available in QueryResult
+                                break;
+                            }
+                            Some(EngineEvent::Error(err)) => {
+                                return Err(TeamError {
+                                    code: err.code,
+                                    message: err.message,
+                                    agent_id: Some(agent_id.clone()),
+                                });
+                            }
+                            None => break,
+                            _ => {}
                         }
-                        Some(EngineEvent::Error(err)) => {
-                            return Err(TeamError {
-                                code: err.code,
-                                message: err.message,
-                                agent_id: Some(agent_id),
-                            });
-                        }
-                        None => break,
-                        _ => {}
                     }
                 }
             }
+            Ok(())
+        };
+
+        if let Some(secs) = agent_timeout_secs {
+            let timeout = tokio::time::timeout(std::time::Duration::from_secs(secs), pump).await;
+            if timeout.is_err() {
+                // The dropped pump no longer drains events; stop the engine
+                // so the spawned query loop winds down too.
+                engine.abort();
+                return Err(TeamError {
+                    code: "agent_timeout".to_string(),
+                    message: format!("Agent exceeded its {}s timeout", secs),
+                    agent_id: Some(agent_id),
+                });
+            }
+            timeout.unwrap()?;
+        } else {
+            pump.await?;
         }
 
         // Build result
@@ -1084,18 +1112,6 @@ impl TeamExecutor {
             .get("policy")
             .and_then(|v| serde_json::from_value(v.clone()).ok())
             .unwrap_or_else(|| self.default_policy.clone())
-    }
-
-    /// Create an agent policy from the team policy.
-    pub fn create_agent_policy(
-        &self,
-        team: &AgentTeam,
-        depth: u32,
-    ) -> crate::engine::team::policy::AgentPolicy {
-        use crate::engine::team::policy::AgentPolicy;
-
-        let team_policy = self.get_team_policy(team);
-        AgentPolicy::from_team_policy(&team_policy, depth)
     }
 
     /// Remove a completed team from the manager.

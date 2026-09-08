@@ -33,6 +33,12 @@ pub struct HeadlessEngineKit {
     /// engine so token accounting behaves identically.
     pub context_window: u64,
     pub auto_compact_threshold_ratio: f64,
+    /// Output token cap sent with each model request (default 16_384).
+    pub max_tokens: u32,
+    /// Per-query cost ceiling from the daemon config. None = the engine
+    /// runs unbounded (cron jobs override with their own tighter limit).
+    /// Token ceilings are a team-policy concern, not a kit one.
+    pub max_budget_usd: Option<f64>,
     /// Telemetry recording (turn/session cost and usage trends).
     pub telemetry: Option<Arc<TelemetryCollector>>,
     /// Trajectory recording — headless runs become rateable via `/rate`.
@@ -59,6 +65,8 @@ impl HeadlessEngineKit {
             max_retries_per_model: 2,
             context_window: 200_000,
             auto_compact_threshold_ratio: 0.7,
+            max_tokens: 16_384,
+            max_budget_usd: None,
             telemetry: None,
             evolution: None,
             memory_store: None,

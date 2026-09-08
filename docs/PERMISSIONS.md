@@ -110,7 +110,6 @@ pub struct ToolPermissionContext {
     pub always_allow_rules: ToolPermissionRulesBySource,  // HashMap<source, Vec<PermissionRule>>
     pub always_deny_rules: ToolPermissionRulesBySource,
     pub always_ask_rules: ToolPermissionRulesBySource,
-    pub is_bypass_permissions_mode_available: bool,
     pub auto_allow_channels: HashMap<String, bool>,  // missing key = ON
     pub ask_timeout_secs: u64,                       // default 300
     pub persist_grants: bool,                        // default true

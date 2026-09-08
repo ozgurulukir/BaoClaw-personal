@@ -32,6 +32,17 @@ use crate::engine::tool_loop::{
 /// Hard ceiling for a single streaming LLM API call.
 const API_CALL_TIMEOUT_SECS: u64 = 300; // 5 min
 
+/// How many times an empty stream (turn ended with zero content blocks) is
+/// retried before the query fails with an `empty_stream` error instead of
+/// reporting a silent, text-less success.
+const MAX_EMPTY_STREAM_RETRIES: u32 = 2;
+
+/// How many times a `model_context_window_exceeded` turn is retried after a
+/// compaction before the query fails with a `context_overflow` error.
+/// Guards against a compaction that made no progress (e.g. the whole
+/// history fits inside the keep-recent window).
+const MAX_OVERFLOW_COMPACT_RETRIES: u32 = 2;
+
 /// Append a transcript entry; failures are logged, never fatal
 /// (a broken transcript must not take down the query loop).
 fn append_transcript(writer: &mut Option<TranscriptWriter>, entry: &TranscriptEntry) {
@@ -77,6 +88,17 @@ pub async fn run_query_loop(
     // Iteration budget pressure tracking (Hermes-style 70/90/100 gradient)
     let mut budget_warned_70: bool = false;
     let mut budget_warned_90: bool = false;
+
+    // Cost/token budget: the turn at which the grace call was injected
+    // (None = not yet hit). Hard stop happens once a full turn has elapsed
+    // past the grace point with the budget still exceeded.
+    let mut budget_grace_turn: Option<u32> = None;
+
+    // Consecutive empty-stream retries (see MAX_EMPTY_STREAM_RETRIES).
+    let mut empty_stream_retries: u32 = 0;
+    // Consecutive context-overflow compaction retries (see
+    // MAX_OVERFLOW_COMPACT_RETRIES).
+    let mut overflow_retries: u32 = 0;
 
     // Per-turn tracking for TurnStart/TurnEnd events
     let mut turn_id_counter: u32 = 0;
@@ -128,15 +150,13 @@ pub async fn run_query_loop(
         model: config.model.clone(),
         fallback_models: config.fallback_models.clone(),
         max_retries_per_model: config.max_retries_per_model,
-        api_type: "anthropic".to_string(),
-        openai_base_url: None,
         context_window: config.context_window,
         auto_compact_threshold_ratio: config.auto_compact_threshold_ratio,
+        // The executor reads this cap through the process-wide accessor, so
+        // the fallback controller must see the initialized value, not the
+        // struct default.
         tool_output_threshold_chars: crate::config::tool_output_threshold(),
-        model_profiles: std::collections::HashMap::new(),
-        primary_profile: None,
-        fallback_profiles: Vec::new(),
-        extra: std::collections::HashMap::new(),
+        ..Default::default()
     };
     let mut fallback_controller = FallbackController::new(&fallback_config);
 
@@ -184,6 +204,92 @@ pub async fn run_query_loop(
                 }))
                 .await;
             return;
+        }
+
+        // ── Cost/token budget enforcement ──
+        // First hit injects a final-answer request. The grace call is
+        // tracked by turn, not by a flag, so transient API retries
+        // (rate limit, fallback) don't consume it; once a full turn has
+        // elapsed past the grace point with the budget still exceeded,
+        // the query stops with a budget_exceeded error.
+        {
+            let tokens_used = total_usage
+                .input_tokens
+                .saturating_add(total_usage.output_tokens);
+            let cost_hit = config
+                .max_budget_usd
+                .is_some_and(|b| cost_tracker.current_query_cost() >= b);
+            let token_hit = config.max_tokens_budget.is_some_and(|t| tokens_used >= t);
+            if cost_hit || token_hit {
+                if budget_grace_turn.is_some_and(|grace| turn_count > grace) {
+                    let which = if cost_hit && token_hit {
+                        "cost and token budgets"
+                    } else if cost_hit {
+                        "cost budget"
+                    } else {
+                        "token budget"
+                    };
+                    let err = EngineError {
+                        code: "budget_exceeded".to_string(),
+                        message: format!(
+                            "Query {} reached: stopped after {} turn(s), ${:.4}, {} tokens",
+                            which,
+                            turn_count,
+                            cost_tracker.current_query_cost(),
+                            tokens_used
+                        ),
+                        details: None,
+                    };
+                    let _ = tx.send(EngineEvent::Error(err.clone())).await;
+                    record_query_trajectory(
+                        &config,
+                        &traj_prompt,
+                        std::mem::take(&mut traj_actions),
+                        crate::engine::evolution::TrajectoryOutcome::Error {
+                            code: err.code.clone(),
+                            message: err.message.clone(),
+                        },
+                        start_time.elapsed().as_millis() as u64,
+                    )
+                    .await;
+                    let _ = tx
+                        .send(EngineEvent::Result(QueryResult {
+                            error: Some(err),
+                            status: QueryStatus::Error,
+                            text: None,
+                            stop_reason: None,
+                            total_cost_usd: cost_tracker.total_cost(),
+                            usage: total_usage,
+                            num_turns: turn_count,
+                            duration_ms: start_time.elapsed().as_millis() as u64,
+                        }))
+                        .await;
+                    return;
+                }
+                if budget_grace_turn.is_none() {
+                    eprintln!(
+                        "⚠ Budget limit reached (${:.4}, {} tokens) — forcing final response",
+                        cost_tracker.current_query_cost(),
+                        tokens_used
+                    );
+                    budget_grace_turn = Some(turn_count);
+                    messages.push(Message {
+                        uuid: uuid::Uuid::new_v4().to_string(),
+                        timestamp: chrono::Utc::now().to_rfc3339(),
+                        content: MessageContent::User {
+                            message: ApiUserMessage {
+                                role: "user".to_string(),
+                                content: Value::String(
+                                    "[System: Resource budget EXHAUSTED (cost/token limit). You MUST produce your final response NOW. Do NOT use any tools.]"
+                                        .to_string(),
+                                ),
+                            },
+                            is_meta: false,
+                            tool_use_result: None,
+                        },
+                    });
+                }
+            }
         }
 
         // ── Git info refresh (non-blocking after first turn) ──
@@ -372,6 +478,10 @@ pub async fn run_query_loop(
             content_blocks: assistant_content_blocks,
             stop_reason,
         } = turn;
+        if !assistant_content_blocks.is_empty() {
+            empty_stream_retries = 0;
+            overflow_retries = 0;
+        }
 
         // Record the assistant turn in history, transcript, and cross-session index
         record_assistant_turn(
@@ -393,8 +503,101 @@ pub async fn run_query_loop(
         if tool_uses.is_empty() {
             // Check for context window exceeded — auto-compact and retry
             if stop_reason.as_deref() == Some("model_context_window_exceeded") {
+                if overflow_retries >= MAX_OVERFLOW_COMPACT_RETRIES {
+                    let err = EngineError {
+                        code: "context_overflow".to_string(),
+                        message: String::from(
+                            "Context window still exceeded after repeated compactions",
+                        ),
+                        details: None,
+                    };
+                    let _ = tx.send(EngineEvent::Error(err.clone())).await;
+                    record_query_trajectory(
+                        &config,
+                        &traj_prompt,
+                        std::mem::take(&mut traj_actions),
+                        crate::engine::evolution::TrajectoryOutcome::Error {
+                            code: err.code.clone(),
+                            message: err.message.clone(),
+                        },
+                        start_time.elapsed().as_millis() as u64,
+                    )
+                    .await;
+                    let _ = tx
+                        .send(EngineEvent::Result(QueryResult {
+                            error: Some(err),
+                            status: QueryStatus::Error,
+                            text: None,
+                            stop_reason,
+                            total_cost_usd: cost_tracker.total_cost(),
+                            usage: total_usage,
+                            num_turns: turn_count,
+                            duration_ms: start_time.elapsed().as_millis() as u64,
+                        }))
+                        .await;
+                    return;
+                }
+                overflow_retries += 1;
                 context_overflow_compact(messages, &tx, &config).await;
                 continue; // retry the query loop
+            }
+
+            // Genuinely empty stream: the turn ended with no content blocks
+            // at all. Retry a couple of times (transient provider glitch),
+            // then fail the query instead of reporting a silent success.
+            if assistant_content_blocks.is_empty() {
+                if empty_stream_retries < MAX_EMPTY_STREAM_RETRIES {
+                    empty_stream_retries += 1;
+                    // Drop the empty assistant turn just recorded so the
+                    // history stays clean for the retry.
+                    if let Some(last) = messages.last() {
+                        if matches!(&last.content, MessageContent::Assistant { .. }) {
+                            messages.pop();
+                        }
+                    }
+                    eprintln!(
+                        "Empty stream from model (attempt {}/{}), retrying...",
+                        empty_stream_retries, MAX_EMPTY_STREAM_RETRIES
+                    );
+                    tokio::time::sleep(std::time::Duration::from_millis(
+                        500 * u64::from(empty_stream_retries),
+                    ))
+                    .await;
+                    continue;
+                }
+                let err = EngineError {
+                    code: "empty_stream".to_string(),
+                    message: format!(
+                        "Model returned an empty stream (no content) after {} retries",
+                        empty_stream_retries
+                    ),
+                    details: None,
+                };
+                let _ = tx.send(EngineEvent::Error(err.clone())).await;
+                record_query_trajectory(
+                    &config,
+                    &traj_prompt,
+                    std::mem::take(&mut traj_actions),
+                    crate::engine::evolution::TrajectoryOutcome::Error {
+                        code: err.code.clone(),
+                        message: err.message.clone(),
+                    },
+                    start_time.elapsed().as_millis() as u64,
+                )
+                .await;
+                let _ = tx
+                    .send(EngineEvent::Result(QueryResult {
+                        error: Some(err),
+                        status: QueryStatus::Error,
+                        text: None,
+                        stop_reason,
+                        total_cost_usd: cost_tracker.total_cost(),
+                        usage: total_usage,
+                        num_turns: turn_count,
+                        duration_ms: start_time.elapsed().as_millis() as u64,
+                    }))
+                    .await;
+                return;
             }
 
             // No tools → query complete
@@ -673,6 +876,9 @@ async fn call_api_with_fallback(
         evolution: None,
         context_window: config.context_window,
         auto_compact_threshold_ratio: config.auto_compact_threshold_ratio,
+        max_budget_usd: config.max_budget_usd,
+        max_tokens_budget: config.max_tokens_budget,
+        max_tokens: config.max_tokens,
     };
     let request = build_api_request(messages, &current_config);
 
@@ -1284,8 +1490,14 @@ async fn context_overflow_compact(
     // Also remove the user message (we'll re-add it after compact)
     let user_msg = messages.pop();
 
-    // Inline compact: keep last 4 messages, summarize the rest
-    let keep_recent: usize = 4;
+    // Inline compact: keep a window of recent messages, summarize the rest.
+    // The adaptive band (8-30, fresh tracker starts at 10) replaces the old
+    // hard-coded 4, which dropped almost all working context on overflow.
+    // The `.min()` guarantees the compact actually drops something — if the
+    // whole history fits inside the keep window, the caller would retry the
+    // identical oversized request forever.
+    let keep_recent: usize =
+        adaptive_keep_recent(&config.adaptive_compact).min(messages.len().saturating_sub(2).max(1));
     if messages.len() > keep_recent {
         let split = adjust_compact_split(messages, messages.len() - keep_recent);
 
