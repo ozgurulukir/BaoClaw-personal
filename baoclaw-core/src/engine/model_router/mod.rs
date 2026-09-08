@@ -44,7 +44,7 @@
 //! Routing statistics are stored in `~/.baoclaw/router_stats.db` (SQLite).
 
 pub mod budget;
-pub mod learning;
+
 pub mod router;
 pub mod types;
 

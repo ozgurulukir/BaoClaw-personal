@@ -274,12 +274,6 @@ mod tests {
     use super::*;
     use std::sync::Arc;
 
-    struct NoopProgress;
-    #[async_trait]
-    impl ProgressSender for NoopProgress {
-        async fn send_progress(&self, _id: &str, _data: Value) {}
-    }
-
     fn make_context() -> ToolContext {
         let (_tx, rx) = tokio::sync::watch::channel(false);
         ToolContext {

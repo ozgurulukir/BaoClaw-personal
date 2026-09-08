@@ -66,10 +66,6 @@ pub enum ClientMethod {
     GitCommit { message: String },
     #[serde(rename = "gitStatus")]
     GitStatus,
-    #[serde(rename = "listMcpResources")]
-    ListMcpResources,
-    #[serde(rename = "readMcpResource")]
-    ReadMcpResource { server_name: String, uri: String },
     #[serde(rename = "taskCreate")]
     TaskCreate { description: String, prompt: String },
     #[serde(rename = "taskList")]
@@ -100,8 +96,6 @@ pub enum ClientMethod {
     MemoryArchiveList,
     #[serde(rename = "memoryCleanup")]
     MemoryCleanup,
-    #[serde(rename = "switchCwd")]
-    SwitchCwd { cwd: PathBuf },
     #[serde(rename = "cronAdd")]
     CronAdd {
         name: String,
@@ -171,25 +165,6 @@ pub enum ClientMethod {
     },
     #[serde(rename = "specEdit")]
     SpecEdit { feature_name: String, phase: String },
-    #[serde(rename = "hooksList")]
-    HooksList,
-    #[serde(rename = "hooksAdd")]
-    HooksAdd {
-        id: String,
-        name: String,
-        trigger: String,
-        #[serde(default)]
-        filter: Option<Value>,
-        action: Value,
-        #[serde(default)]
-        enabled: bool,
-        #[serde(default)]
-        priority: i32,
-    },
-    #[serde(rename = "hooksToggle")]
-    HooksToggle { id: String },
-    #[serde(rename = "hooksRemove")]
-    HooksRemove { id: String },
 
     // ── Team Management RPC ──
     #[serde(rename = "teamSpawn")]
@@ -240,14 +215,8 @@ pub enum ClientMethod {
     GitPrList,
     #[serde(rename = "gitBranchList")]
     GitBranchList,
-    #[serde(rename = "gitBranchCreate")]
-    GitBranchCreate { name: String },
     #[serde(rename = "gitConflictCheck")]
     GitConflictCheck,
-    #[serde(rename = "gitCommitAmend")]
-    GitCommitAmend,
-    #[serde(rename = "gitUndo")]
-    GitUndo,
 
     // ── Model Router RPC ──
     #[serde(rename = "modelList")]
@@ -256,8 +225,6 @@ pub enum ClientMethod {
     ModelRoute { task: String },
     #[serde(rename = "modelBudget")]
     ModelBudget,
-    #[serde(rename = "modelStats")]
-    ModelStats,
 
     // ── Telemetry RPC ──
     #[serde(rename = "telemetryStats")]
@@ -823,131 +790,6 @@ mod tests {
     #[test]
     fn test_parse_doc_upload_missing_path() {
         let req = make_request("docUpload", json!({}));
-        let err = parse_client_method(&req).unwrap_err();
-        assert!(matches!(err, RouterError::InvalidParams(_)));
-    }
-
-    // --- Hooks management RPC tests ---
-
-    #[test]
-    fn test_parse_hooks_list() {
-        let req = make_request("hooksList", json!(null));
-        let method = parse_client_method(&req).unwrap();
-        assert_eq!(method, ClientMethod::HooksList);
-    }
-
-    #[test]
-    fn test_parse_hooks_add() {
-        let req = make_request(
-            "hooksAdd",
-            json!({
-                "id": "auto-lint",
-                "name": "Auto Lint on Save",
-                "trigger": "file_edited",
-                "filter": { "file_pattern": "*.ts" },
-                "action": { "type": "run_command", "command": "npm run lint" },
-                "enabled": true,
-                "priority": 100
-            }),
-        );
-        let method = parse_client_method(&req).unwrap();
-        match method {
-            ClientMethod::HooksAdd {
-                id,
-                name,
-                trigger,
-                filter,
-                action,
-                enabled,
-                priority,
-            } => {
-                assert_eq!(id, "auto-lint");
-                assert_eq!(name, "Auto Lint on Save");
-                assert_eq!(trigger, "file_edited");
-                assert!(filter.is_some());
-                assert_eq!(action["type"], "run_command");
-                assert!(enabled);
-                assert_eq!(priority, 100);
-            }
-            _ => panic!("Expected HooksAdd, got {:?}", method),
-        }
-    }
-
-    #[test]
-    fn test_parse_hooks_add_minimal() {
-        let req = make_request(
-            "hooksAdd",
-            json!({
-                "id": "test-hook",
-                "name": "Test Hook",
-                "trigger": "file_created",
-                "action": { "type": "ask_agent", "prompt": "Review this file" }
-            }),
-        );
-        let method = parse_client_method(&req).unwrap();
-        match method {
-            ClientMethod::HooksAdd {
-                id,
-                name,
-                trigger,
-                filter,
-                action,
-                enabled,
-                priority,
-            } => {
-                assert_eq!(id, "test-hook");
-                assert_eq!(name, "Test Hook");
-                assert_eq!(trigger, "file_created");
-                assert!(filter.is_none());
-                assert_eq!(action["type"], "ask_agent");
-                assert!(!enabled); // default false when not specified
-                assert_eq!(priority, 0); // default 0
-            }
-            _ => panic!("Expected HooksAdd, got {:?}", method),
-        }
-    }
-
-    #[test]
-    fn test_parse_hooks_add_missing_required() {
-        let req = make_request("hooksAdd", json!({}));
-        let err = parse_client_method(&req).unwrap_err();
-        assert!(matches!(err, RouterError::InvalidParams(_)));
-    }
-
-    #[test]
-    fn test_parse_hooks_toggle() {
-        let req = make_request("hooksToggle", json!({ "id": "auto-lint" }));
-        let method = parse_client_method(&req).unwrap();
-        match method {
-            ClientMethod::HooksToggle { id } => {
-                assert_eq!(id, "auto-lint");
-            }
-            _ => panic!("Expected HooksToggle, got {:?}", method),
-        }
-    }
-
-    #[test]
-    fn test_parse_hooks_toggle_missing_id() {
-        let req = make_request("hooksToggle", json!({}));
-        let err = parse_client_method(&req).unwrap_err();
-        assert!(matches!(err, RouterError::InvalidParams(_)));
-    }
-
-    #[test]
-    fn test_parse_hooks_remove() {
-        let req = make_request("hooksRemove", json!({ "id": "auto-lint" }));
-        let method = parse_client_method(&req).unwrap();
-        match method {
-            ClientMethod::HooksRemove { id } => {
-                assert_eq!(id, "auto-lint");
-            }
-            _ => panic!("Expected HooksRemove, got {:?}", method),
-        }
-    }
-
-    #[test]
-    fn test_parse_hooks_remove_missing_id() {
-        let req = make_request("hooksRemove", json!({}));
         let err = parse_client_method(&req).unwrap_err();
         assert!(matches!(err, RouterError::InvalidParams(_)));
     }

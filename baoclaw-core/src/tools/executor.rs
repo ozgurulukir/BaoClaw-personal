@@ -547,19 +547,6 @@ async fn call_tool_and_wrap(
     }
 }
 
-/// Truncate result data if its serialized size exceeds max_size_chars.
-fn truncate_if_needed(data: Value, max_size_chars: usize) -> Value {
-    let serialized = serde_json::to_string(&data).unwrap_or_default();
-    if serialized.len() <= max_size_chars {
-        return data;
-    }
-    let truncated: String = serialized.chars().take(max_size_chars).collect();
-    Value::String(format!(
-        "{}\n\n[Result truncated: output exceeded {} characters]",
-        truncated, max_size_chars
-    ))
-}
-
 /// Try to persist large tool results to disk; fall back to truncation.
 ///
 /// If a `ToolResultStore` is available in the context and the serialized
@@ -1171,23 +1158,6 @@ mod tests {
         assert_eq!(results.len(), 2);
         assert!(!results[0].is_error);
         assert!(!results[1].is_error);
-    }
-
-    // --- truncate_if_needed tests ---
-
-    #[test]
-    fn test_truncate_if_needed_small() {
-        let data = json!("hello");
-        let result = truncate_if_needed(data.clone(), 1000);
-        assert_eq!(result, data);
-    }
-
-    #[test]
-    fn test_truncate_if_needed_large() {
-        let data = Value::String("x".repeat(100));
-        let result = truncate_if_needed(data, 20);
-        let s = result.as_str().unwrap();
-        assert!(s.contains("[Result truncated"));
     }
 
     // ── Interactive permission gate (execute_tool_with_permission) ──

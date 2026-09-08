@@ -31,7 +31,6 @@ pub struct FallbackController {
     max_retries_per_model: u32,
     total_retries: u32,
     server_error_count: u32,
-    max_server_retries: u32,
 }
 
 impl FallbackController {
@@ -88,7 +87,6 @@ impl FallbackController {
             max_retries_per_model: config.max_retries_per_model,
             total_retries: 0,
             server_error_count: 0,
-            max_server_retries: 3,
         }
     }
 

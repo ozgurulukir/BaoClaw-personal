@@ -633,21 +633,6 @@ impl SpecEngine {
         Ok(())
     }
 
-    /// Advance the spec to a new phase (validates transition).
-    pub fn advance_phase(&self, feature_name: &str, new_phase: SpecPhase) -> Result<(), SpecError> {
-        let mut config = self.store.read_config(feature_name)?;
-        if !Self::is_valid_transition(&config.phase, &new_phase) {
-            return Err(SpecError::InvalidPhaseTransition {
-                current: config.phase,
-                target: new_phase,
-            });
-        }
-        config.phase = new_phase;
-        config.updated_at = chrono::Utc::now().to_rfc3339();
-        self.store.write_config(feature_name, &config)?;
-        Ok(())
-    }
-
     /// Get the next pending task.
     pub fn next_task(&self, feature_name: &str) -> Result<Option<TaskItem>, SpecError> {
         let content = self.store.read_doc(feature_name, "tasks.md")?;
@@ -670,93 +655,5 @@ impl SpecEngine {
         self.store
             .write_doc(feature_name, "tasks.md", &serialized)?;
         Ok(())
-    }
-
-    /// Build context for task execution (injects relevant requirements + design snippets).
-    pub fn build_task_context(
-        &self,
-        feature_name: &str,
-        task_id: &str,
-    ) -> Result<String, SpecError> {
-        let tasks_content = self.store.read_doc(feature_name, "tasks.md")?;
-        let doc = TaskTracker::parse(&tasks_content)?;
-
-        // Find the task
-        let task = Self::find_task_by_id(&doc.tasks, task_id)
-            .ok_or_else(|| SpecError::TaskNotFound(task_id.to_string()))?;
-
-        let mut context = String::new();
-        context.push_str(&format!(
-            "# Current Task: {} {}\n\n",
-            task.id, task.description
-        ));
-
-        // Inject requirement references if available
-        if let Some(ref req_ref) = task.requirement_ref {
-            if let Ok(requirements) = self.store.read_doc(feature_name, "requirements.md") {
-                context.push_str("## Relevant Requirements\n\n");
-                // Extract sections matching the requirement references.
-                // Requirements docs may be written in English or Chinese
-                // (mirrors the bilingual `_Requirements:`/`_需求:` refs).
-                for req_id in req_ref.split(',').map(|s| s.trim()) {
-                    let section_id = req_id.split('.').next().unwrap_or(req_id);
-                    let patterns = [
-                        format!("### Requirement {}:", section_id),
-                        format!("### 需求 {}:", section_id),
-                    ];
-                    let start = patterns
-                        .iter()
-                        .find_map(|pattern| requirements.find(pattern));
-                    if let Some(start) = start {
-                        let section = &requirements[start..];
-                        let end = section[1..]
-                            .find("\n### ")
-                            .map(|i| i + 1)
-                            .unwrap_or(section.len().min(2000));
-                        context.push_str(&section[..end]);
-                        context.push_str("\n\n");
-                    }
-                }
-            }
-        }
-
-        // Inject design context
-        if let Ok(design) = self.store.read_doc(feature_name, "design.md") {
-            context.push_str("## Relevant Design\n\n");
-            // Include first 3000 chars of design as context (truncated for context window)
-            let truncated: String = design.chars().take(3000).collect();
-            context.push_str(&truncated);
-            if design.len() > 3000 {
-                context.push_str("\n...[truncated]");
-            }
-            context.push('\n');
-        }
-
-        Ok(context)
-    }
-
-    // ── Private helpers ──
-
-    fn is_valid_transition(current: &SpecPhase, target: &SpecPhase) -> bool {
-        matches!(
-            (current, target),
-            (SpecPhase::Requirements, SpecPhase::RequirementsComplete)
-                | (SpecPhase::RequirementsComplete, SpecPhase::Design)
-                | (SpecPhase::Design, SpecPhase::DesignComplete)
-                | (SpecPhase::DesignComplete, SpecPhase::Tasks)
-                | (SpecPhase::Tasks, SpecPhase::TasksComplete)
-        )
-    }
-
-    fn find_task_by_id<'a>(tasks: &'a [TaskItem], task_id: &str) -> Option<&'a TaskItem> {
-        for task in tasks {
-            if task.id == task_id {
-                return Some(task);
-            }
-            if let Some(found) = Self::find_task_by_id(&task.children, task_id) {
-                return Some(found);
-            }
-        }
-        None
     }
 }

@@ -145,15 +145,6 @@ impl Default for PermissionCache {
 mod tests {
     use super::*;
 
-    use std::time::SystemTime;
-    use std::time::UNIX_EPOCH;
-    fn now_secs() -> u64 {
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs()
-    }
-
     #[test]
     fn test_cache_store_and_check() {
         let cache = PermissionCache::new();

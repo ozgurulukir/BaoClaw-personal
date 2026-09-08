@@ -9,7 +9,6 @@
 //! - `commit` — Squash, amend, undo, blame, history
 //! - `auth` — GitHub/GitLab token management
 
-pub mod auth;
 pub mod branch;
 pub mod commit;
 pub mod conflict;

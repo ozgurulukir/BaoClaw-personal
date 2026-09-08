@@ -12,7 +12,6 @@ use tokio::sync::{mpsc, watch};
 use crate::api::client::CreateMessageRequest;
 use crate::api::unified::UnifiedClient;
 use crate::engine::git_info::{get_git_info, GitInfo};
-use crate::engine::hooks::{HookManager, TriggerContext, TriggerType};
 use crate::engine::session_memory::SessionMemory;
 use crate::engine::token_counter::BudgetStatus;
 use crate::models::message::{ApiUserMessage, ContentBlock, Message, MessageContent, Usage};
@@ -55,8 +54,6 @@ pub struct QueryEngineConfig {
     pub file_cache: Option<Arc<tokio::sync::Mutex<crate::engine::file_cache::FileCache>>>,
     /// Tool result store for persisting large outputs to disk.
     pub tool_result_store: Option<Arc<crate::engine::tool_result_store::ToolResultStore>>,
-    /// Hook manager for triggering actions on events.
-    pub hook_manager: Option<Arc<HookManager>>,
     /// Interactive permission gate + manager. When present, mutating tools
     /// prompt the user instead of failing closed; None keeps the direct
     /// fail-closed behavior (cron, sub-agents, tests).
@@ -348,8 +345,6 @@ pub struct QueryEngine {
     cached_rules_raw: Vec<CachedRule>,
     /// Cached git info (loaded once in new(), refreshed async each turn).
     cached_git_info: Option<GitInfo>,
-    /// Hook manager for triggering actions on events.
-    hook_manager: Option<Arc<HookManager>>,
     /// Intent predictor for context warmup (shared with warmup task).
     intent_predictor: Arc<tokio::sync::Mutex<crate::engine::intent_predictor::IntentPredictor>>,
     /// Warmup manager — preloads resources predicted from user input.
@@ -370,19 +365,6 @@ impl QueryEngine {
         let cached_project_instructions = load_project_instructions(&config.cwd);
         let cached_rules_raw = load_all_rule_files(&config.cwd);
         let cached_git_info = get_git_info(&config.cwd);
-
-        // Initialize hook manager from config if present
-        let hook_manager = config.hook_manager.clone();
-        if let Some(ref hm) = hook_manager {
-            // Set working directory for the hook executor
-            // Note: This is async, but we're in a sync context. The working directory
-            // will be set lazily when hooks are first processed.
-            let hm_clone = Arc::clone(hm);
-            let cwd = config.cwd.clone();
-            tokio::spawn(async move {
-                hm_clone.set_working_directory(cwd).await;
-            });
-        }
 
         // Context warmup: intent predictor + warmup manager share the file cache.
         let intent_predictor = Arc::new(tokio::sync::Mutex::new(
@@ -407,7 +389,6 @@ impl QueryEngine {
             cached_project_instructions,
             cached_rules_raw,
             cached_git_info,
-            hook_manager,
             intent_predictor,
             warmup_manager,
         }
@@ -951,20 +932,6 @@ impl QueryEngine {
         };
         self.messages.push(user_msg);
 
-        // Trigger UserMessage hook
-        if let Some(ref hook_manager) = self.hook_manager {
-            let hm = Arc::clone(hook_manager);
-            let prompt_text = prompt.clone();
-            let cwd = self.config.cwd.clone();
-            tokio::spawn(async move {
-                let ctx = TriggerContext::user_message(&prompt_text).with_cwd(cwd);
-                let result = hm.process(TriggerType::UserMessage, ctx).await;
-                if !result.errors.is_empty() {
-                    eprintln!("UserMessage hook errors: {:?}", result.errors);
-                }
-            });
-        }
-
         // ── Context warmup (Task 4): predict intents and preload resources ──
         // Fully async via tokio::spawn — never blocks the main query flow.
         {
@@ -1127,7 +1094,6 @@ impl QueryEngine {
                 .tool_health
                 .clone()
                 .unwrap_or_else(|| Arc::new(crate::engine::tool_health::ToolHealthTracker::new())),
-            hook_manager: self.hook_manager.clone(),
             permission: self.config.permission.clone(),
             context_window: self.config.context_window,
             auto_compact_threshold_ratio: self.config.auto_compact_threshold_ratio,
@@ -1198,8 +1164,6 @@ pub struct QueryLoopConfig {
     /// Tool health tracker — accumulates success/failure rates across the
     /// daemon's queries and drives dispatch-time availability checks.
     pub tool_health: Arc<crate::engine::tool_health::ToolHealthTracker>,
-    /// Hook manager for triggering actions on events.
-    pub hook_manager: Option<Arc<HookManager>>,
     /// Interactive permission gate + manager (cloned from the engine config).
     pub permission: Option<crate::permissions::PermissionBridge>,
     /// Model context window (tokens) — propagated to ToolContext for sub-agents.
@@ -1328,7 +1292,6 @@ mod tests {
             session_memory: None,
             file_cache: None,
             tool_result_store: None,
-            hook_manager: None,
             permission: None,
             telemetry: None,
             evolution: None,
@@ -1815,7 +1778,6 @@ mod tests {
             cached_rules_raw: vec![],
             adaptive_compact: AdaptiveCompactTracker::new(),
             tool_health: Arc::new(crate::engine::tool_health::ToolHealthTracker::new()),
-            hook_manager: None,
             permission: None,
             telemetry: None,
             evolution: None,
@@ -1869,7 +1831,6 @@ mod tests {
             cached_rules_raw: vec![],
             adaptive_compact: AdaptiveCompactTracker::new(),
             tool_health: Arc::new(crate::engine::tool_health::ToolHealthTracker::new()),
-            hook_manager: None,
             permission: None,
             telemetry: None,
             evolution: None,
@@ -1920,7 +1881,6 @@ mod tests {
             cached_rules_raw: vec![],
             adaptive_compact: AdaptiveCompactTracker::new(),
             tool_health: Arc::new(crate::engine::tool_health::ToolHealthTracker::new()),
-            hook_manager: None,
             permission: None,
             telemetry: None,
             evolution: None,
@@ -2062,7 +2022,6 @@ mod tests {
             cached_rules_raw: vec![],
             adaptive_compact: AdaptiveCompactTracker::new(),
             tool_health: Arc::new(crate::engine::tool_health::ToolHealthTracker::new()),
-            hook_manager: None,
             permission: None,
             telemetry: None,
             evolution: None,
@@ -2113,7 +2072,6 @@ mod tests {
             cached_rules_raw: vec![],
             adaptive_compact: AdaptiveCompactTracker::new(),
             tool_health: Arc::new(crate::engine::tool_health::ToolHealthTracker::new()),
-            hook_manager: None,
             permission: None,
             telemetry: None,
             evolution: None,
@@ -2317,7 +2275,6 @@ mod tests {
             cached_rules_raw: vec![],
             adaptive_compact: AdaptiveCompactTracker::new(),
             tool_health: Arc::new(crate::engine::tool_health::ToolHealthTracker::new()),
-            hook_manager: None,
             permission: None,
             telemetry: None,
             evolution: None,

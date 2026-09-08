@@ -29,8 +29,6 @@ struct McpServerEntry {
     #[serde(default)]
     args: Vec<String>,
     #[serde(default)]
-    env: HashMap<String, String>,
-    #[serde(default)]
     disabled: bool,
     url: Option<String>,
     #[serde(rename = "type")]

@@ -454,62 +454,6 @@ pub(super) fn build_engine_tools(
     let engine_tools: Vec<Arc<dyn tools::Tool>> = {
         let mut all = engine_tools;
 
-        //         // MCP integration: discover and connect to MCP servers (with timeout)
-        //         // Singleton check: ensure MCP is only initialized once
-        //         if MCP_INITIALIZED.load(Ordering::SeqCst) {
-        //             eprintln!("MCP already initialized, skipping...");
-        //         } else {
-        //             MCP_INITIALIZED.store(true, Ordering::SeqCst);
-        //         let mcp_servers = discovery::mcp_config::discover_mcp_servers(std::path::Path::new(&cwd_str)).await;
-        //         for server_info in &mcp_servers {
-        //             if server_info.disabled {
-        //                 continue;
-        //             }
-        //             if let Some(ref command) = server_info.command {
-        //                 let config = mcp::McpServerConfig {
-        //                     name: server_info.name.clone(),
-        //                     command: command.clone(),
-        //                     args: server_info.args.clone(),
-        //                     env: std::collections::HashMap::new(),
-        //                     transport: mcp::McpTransportType::Stdio,
-        //                 };
-        //                 let mut client = mcp::McpClient::new(config);
-        //                 let connect_result = tokio::time::timeout(
-        //                     std::time::Duration::from_secs(30),
-        //                     client.connect_stdio(),
-        //                 ).await;
-        //                 match connect_result {
-        //                     Ok(Ok(())) => {
-        //                         let client = Arc::new(client);
-        //                         if let Ok(tools) = client.list_tools().await {
-        //                             eprintln!("MCP server '{}': {} tools discovered", server_info.name, tools.len());
-        //                             for tool_def in &tools {
-        //                                 eprintln!("  MCP tool: {}", tool_def.name);
-        //                             }
-        //                             for tool_def in tools {
-        //                                 let wrapper = McpToolWrapper::new(
-        //                                     Arc::clone(&client),
-        //                                     tool_def,
-        //                                     server_info.name.clone(),
-        //                                 );
-        //                                 all.push(Arc::new(wrapper));
-        //                             }
-        //                         } else {
-        //                             eprintln!("MCP server '{}': list_tools failed", server_info.name);
-        //                         }
-        //                         eprintln!("MCP server '{}' connected", server_info.name);
-        //                     }
-        //                     Ok(Err(e)) => {
-        //                         eprintln!("Warning: MCP server '{}' failed to connect: {}", server_info.name, e);
-        //                     }
-        //                     Err(_) => {
-        //                         eprintln!("Warning: MCP server '{}' connection timed out (30s)", server_info.name);
-        //                     }
-        //                 }
-        //             }
-        //         }
-        //
-
         all.push(Arc::new(ToolSearchTool::new(all.clone())));
         eprintln!("Total tools registered: {} (including MCP)", all.len());
         all
@@ -620,7 +564,7 @@ pub(super) fn resolve_session_id(cwd_str: &str) -> String {
 /// gate/manager, task manager, team executor, memory archive/cleanup, and all
 /// shared engine resources.
 pub(super) async fn assemble_shared_state(
-    cwd_str: &str,
+    _cwd_str: &str,
     is_daemon: bool,
     baoclaw_config: BaoclawConfig,
     api_client: Arc<UnifiedClient>,
@@ -717,13 +661,9 @@ pub(super) async fn assemble_shared_state(
         Arc::clone(&tool_health),
     ));
 
-    let team_executor = Arc::new(engine::team::TeamManager::new(
-        Arc::clone(&api_client),
-        engine_tools.clone(),
-        PathBuf::from(cwd_str),
-        baoclaw_config.model.clone(),
-        Arc::clone(&tool_health),
-    ));
+    // Team state store — execution builds a fresh TeamExecutor per RPC from
+    // the daemon's shared resources.
+    let team_executor = Arc::new(engine::team::TeamManager::new());
 
     // Create memory archive and cleanup scheduler for periodic memory maintenance
     let memory_archive = Arc::new(engine::memory::MemoryArchive::load());
@@ -773,7 +713,6 @@ pub(super) async fn assemble_shared_state(
         tool_result_store: Some(Arc::new(
             engine::tool_result_store::ToolResultStore::for_session(&session_id),
         )),
-        hook_manager: Arc::new(engine::hooks::HookManager::new()),
         team_executor,
     };
 
@@ -794,7 +733,6 @@ pub(super) async fn start_cron_scheduler(shared: &SharedState) {
         let cron_session_id = shared.session_id.clone();
         let cron_file_cache = Arc::clone(&shared.file_cache);
         let cron_tool_result_store = shared.tool_result_store.as_ref().map(Arc::clone);
-        let cron_hook_manager = Arc::clone(&shared.hook_manager);
         let cron_tool_health = Arc::clone(&shared.tool_health);
         let cron_memory_store = Arc::clone(&shared.memory_store);
 
@@ -809,7 +747,6 @@ pub(super) async fn start_cron_scheduler(shared: &SharedState) {
             let _session_id = cron_session_id.clone();
             let file_cache = Arc::clone(&cron_file_cache);
             let tool_result_store = cron_tool_result_store.as_ref().map(Arc::clone);
-            let hook_manager = Arc::clone(&cron_hook_manager);
             let tool_health = Arc::clone(&cron_tool_health);
             let memory_store = Arc::clone(&cron_memory_store);
 
@@ -844,7 +781,6 @@ pub(super) async fn start_cron_scheduler(shared: &SharedState) {
                     session_memory: None,
                     file_cache: Some(file_cache),
                     tool_result_store,
-                    hook_manager: Some(hook_manager),
                     // Headless cron jobs must never hang on an interactive
                     // permission prompt — mutating tools fail closed instead.
                     permission: None,

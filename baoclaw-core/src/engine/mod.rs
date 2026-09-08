@@ -7,7 +7,7 @@ pub mod abort_helpers;
 pub use abort_helpers::{cleanup_orphan_tool_uses, wait_for_abort};
 pub mod cost_tracker;
 pub mod cron;
-pub mod error_handling;
+
 pub mod evolution;
 pub mod git_info;
 pub mod memory;
@@ -25,7 +25,7 @@ pub use crate::infra::tool_result_store;
 pub mod cross_session_db;
 pub mod export;
 pub mod git_integration;
-pub mod hooks;
+
 pub mod intent_predictor;
 pub mod model_router;
 pub mod permission_gate;

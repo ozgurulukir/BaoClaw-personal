@@ -386,15 +386,6 @@ impl TelemetryCollector {
 
         Ok(result)
     }
-
-    /// Get the raw connection for advanced queries (used by TrendAnalyzer).
-    pub(crate) fn with_conn<F, R>(&self, f: F) -> Result<R, String>
-    where
-        F: FnOnce(&Connection) -> Result<R, String>,
-    {
-        let conn = self.conn.lock().map_err(|e| format!("Lock error: {}", e))?;
-        f(&conn)
-    }
 }
 
 #[cfg(test)]

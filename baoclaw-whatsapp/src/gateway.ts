@@ -50,6 +50,7 @@ import {
   COMMAND_REGISTRY,
   setGatewayInfo,
   setDaemonMetrics,
+  setDaemonInfo,
 } from "./commands.js";
 import { MediaHandler, isImageFile } from "./media.js";
 
@@ -165,6 +166,11 @@ export class WhatsAppGateway {
     );
     this.ipcClient = client;
     this.daemonInfo = info;
+    setDaemonInfo({
+      pid: info.pid,
+      session_id: info.session_id,
+      cwd: info.cwd,
+    });
     // Abort/permission must not wait behind an in-flight turn on the serial
     // main connection — deliver them via the dedicated control channel,
     // joining the same session the main connection just initialized.

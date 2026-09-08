@@ -12,20 +12,6 @@ struct DbHelper {
 }
 
 impl DbHelper {
-    fn from_collector(_collector: &TelemetryCollector) -> Self {
-        // We need to extract the db path. Since we don't expose it directly,
-        // we duplicate the default and use with_conn for queries.
-        // For trend analysis, we'll use the collector's with_conn method.
-        // This struct is a workaround for creating an independent connection.
-        let home = std::env::var("HOME")
-            .or_else(|_| std::env::var("USERPROFILE"))
-            .unwrap_or_else(|_| "/tmp".to_string());
-        let path = std::path::PathBuf::from(home)
-            .join(".baoclaw")
-            .join("telemetry.db");
-        Self { path }
-    }
-
     fn open(&self) -> Result<rusqlite::Connection, String> {
         if self.path.exists() {
             rusqlite::Connection::open(&self.path)

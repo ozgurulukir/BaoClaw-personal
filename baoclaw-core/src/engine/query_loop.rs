@@ -10,7 +10,6 @@ use crate::config::BaoclawConfig;
 use crate::engine::api_builder::build_api_request;
 use crate::engine::cost_tracker::CostTracker;
 use crate::engine::git_info::get_git_info_async;
-use crate::engine::hooks::{TriggerContext, TriggerType};
 use crate::engine::session_memory::SessionMemory;
 use crate::engine::token_counter::BudgetStatus;
 use crate::engine::transcript::{TranscriptEntry, TranscriptEntryType, TranscriptWriter};
@@ -418,7 +417,7 @@ pub async fn run_query_loop(
             return;
         }
 
-        // Execute the tool-call turn (events, tools, hooks, transcript, TurnEnd)
+        // Execute the tool-call turn (events, tools, transcript, TurnEnd)
         execute_tool_turn(
             messages,
             &tool_uses,
@@ -637,7 +636,6 @@ async fn call_api_with_fallback(
         cached_rules_raw: config.cached_rules_raw.clone(),
         adaptive_compact: AdaptiveCompactTracker::new(),
         tool_health: Arc::clone(&config.tool_health),
-        hook_manager: config.hook_manager.clone(),
         permission: config.permission.clone(),
         telemetry: None,
         evolution: None,
@@ -1150,7 +1148,7 @@ async fn ingest_stream_events(
     })
 }
 
-/// Append the assistant message to history, fire the AssistantMessage hook,
+/// Append the assistant message to history,
 #[allow(clippy::too_many_arguments)]
 /// write transcript + cross-session index entries, and emit StateUpdate.
 async fn record_assistant_turn(
@@ -1180,27 +1178,6 @@ async fn record_assistant_turn(
         },
     };
     messages.push(assistant_msg.clone());
-
-    // Trigger AssistantMessage hook
-    if let Some(ref hook_manager) = config.hook_manager {
-        let hm = Arc::clone(hook_manager);
-        let text: String = assistant_content_blocks
-            .iter()
-            .filter_map(|b| match b {
-                ContentBlock::Text { text } => Some(text.clone()),
-                _ => None,
-            })
-            .collect::<Vec<_>>()
-            .join(" ");
-        let cwd = config.cwd.clone();
-        tokio::spawn(async move {
-            let ctx = TriggerContext::assistant_message(&text).with_cwd(cwd);
-            let result = hm.process(TriggerType::AssistantMessage, ctx).await;
-            if !result.errors.is_empty() {
-                eprintln!("AssistantMessage hook errors: {:?}", result.errors);
-            }
-        });
-    }
 
     // Write assistant message to transcript
     append_transcript(
@@ -1385,7 +1362,7 @@ async fn context_overflow_compact(
 
 #[allow(clippy::too_many_arguments)]
 /// Execute one tool-call turn: emit ToolUse events, run the tools, emit
-/// ToolResult events and hooks, append the tool-result message, and emit TurnEnd.
+/// ToolResult events, append the tool-result message, and emit TurnEnd.
 async fn execute_tool_turn(
     messages: &mut Vec<Message>,
     tool_uses: &[ToolUseRequest],
@@ -1481,78 +1458,6 @@ async fn execute_tool_turn(
                 }),
             },
         );
-
-        // Trigger ToolResult hook for each tool result
-        if let Some(ref hook_manager) = config.hook_manager {
-            // Find the tool use for this result
-            let tool_use = tool_uses.iter().find(|tu| tu.id == result.tool_use_id);
-            let tool_name = tool_use.map(|tu| tu.name.clone()).unwrap_or_default();
-            let input = tool_use
-                .map(|tu| serde_json::to_string(&tu.input).unwrap_or_default())
-                .unwrap_or_default();
-            let output = serde_json::to_string(&result.output).unwrap_or_default();
-
-            let hm = Arc::clone(hook_manager);
-            let cwd = config.cwd.clone();
-            tokio::spawn(async move {
-                let ctx = TriggerContext::tool_result(&tool_name, &input, &output).with_cwd(cwd);
-                let result = hm.process(TriggerType::ToolResult, ctx).await;
-                if !result.errors.is_empty() {
-                    eprintln!("ToolResult hook errors: {:?}", result.errors);
-                }
-            });
-
-            // Trigger file-related hooks for file operation tools
-            // Only trigger on successful file operations (not errors)
-            if !result.is_error {
-                if let Some(tool_use) = tool_use {
-                    let trigger_type = match tool_use.name.as_str() {
-                        "Write" | "write_file" | "FileWrite" => tool_use
-                            .input
-                            .get("file_path")
-                            .or_else(|| tool_use.input.get("path"))
-                            .and_then(|v| v.as_str())
-                            .map(|path| (TriggerType::FileCreated, path.to_string())),
-                        "Edit" | "edit_file" | "FileEdit" => tool_use
-                            .input
-                            .get("file_path")
-                            .or_else(|| tool_use.input.get("path"))
-                            .and_then(|v| v.as_str())
-                            .map(|path| (TriggerType::FileEdited, path.to_string())),
-                        "Delete" | "delete_file" | "FileDelete" => tool_use
-                            .input
-                            .get("file_path")
-                            .or_else(|| tool_use.input.get("path"))
-                            .and_then(|v| v.as_str())
-                            .map(|path| (TriggerType::FileDeleted, path.to_string())),
-                        _ => None,
-                    };
-
-                    if let Some((trigger, file_path)) = trigger_type {
-                        let hm = Arc::clone(hook_manager);
-                        let cwd = config.cwd.clone();
-                        tokio::spawn(async move {
-                            let ctx = match trigger {
-                                TriggerType::FileCreated => {
-                                    TriggerContext::file_created(&file_path, &cwd)
-                                }
-                                TriggerType::FileEdited => {
-                                    TriggerContext::file_edited(&file_path, &cwd)
-                                }
-                                TriggerType::FileDeleted => {
-                                    TriggerContext::file_deleted(&file_path, &cwd)
-                                }
-                                _ => TriggerContext::new(),
-                            };
-                            let result = hm.process(trigger, ctx).await;
-                            if !result.errors.is_empty() {
-                                eprintln!("File hook errors: {:?}", result.errors);
-                            }
-                        });
-                    }
-                }
-            }
-        }
     }
 
     // Feed the shared tool-health tracker. Only real tools are recorded —

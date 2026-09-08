@@ -42,4 +42,3 @@ pub use image_edit_tool::ImageEditTool;
 pub mod evolve_tool_tests;
 pub mod memory_tool_tests;
 pub mod project_note_tool_tests;
-pub mod spec_tool;

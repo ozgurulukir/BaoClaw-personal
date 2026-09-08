@@ -10,6 +10,12 @@ import { spawn, ChildProcess } from "child_process";
 import { renderMarkdown } from "./markdownRenderer.js";
 import { IpcClient } from "./client.js";
 import { attachControlChannel, type ControlChannel } from "./controlChannel.js";
+import {
+  discoverLegacyDaemons as discoverDaemons,
+  getSocketDir,
+  resolveFixedSocket as fixedSocketPath,
+  type DaemonInfo,
+} from "./daemon.js";
 import { formatToolHealth, type ToolHealthData } from "./toolHealth.js";
 import * as fs from "fs";
 import * as os from "os";
@@ -22,7 +28,6 @@ function turnPrefix(): string {
 }
 
 import {
-  noColor,
   ESC,
   RESET,
   BOLD,
@@ -39,9 +44,6 @@ import {
   FG_WHITE,
   FG_GRAY,
   FG_BRIGHT_WHITE,
-  BG_DARK,
-  FG_CLAWD,
-  BG_CLAWD,
 } from "./colors.js";
 import {
   IMAGE_DIR,
@@ -580,18 +582,6 @@ function formatResultText(
 // Daemon discovery
 // ═══════════════════════════════════════════════════════════════
 
-interface DaemonInfo {
-  pid: number;
-  cwd: string;
-  session_id: string;
-  socket: string;
-  started_at: string;
-}
-
-function getSocketDir(): string {
-  return path.join(os.tmpdir(), "baoclaw-sockets");
-}
-
 /**
  * True if an API key is available from either source the Rust core accepts:
  * 1. ANTHROPIC_API_KEY env var (legacy fallback)
@@ -624,26 +614,6 @@ function hasApiKey(): boolean {
 }
 
 /**
- * Preferred fixed socket path for machine-level single daemon (P3-1c).
- * Linux: $XDG_RUNTIME_DIR/baoclaw.sock (/run/user/<UID>/)
- * macOS: /tmp/baoclaw-sockets/baoclaw.sock
- * Windows: %TEMP%/baoclaw-sockets/baoclaw.sock
- */
-function fixedSocketPath(): string | null {
-  const platform = process.platform;
-  if (platform === "linux") {
-    const xdg = process.env.XDG_RUNTIME_DIR;
-    if (xdg && fs.existsSync(xdg)) {
-      return path.join(xdg, "baoclaw.sock");
-    }
-    return null;
-  }
-  // macOS and others
-  const dir = path.join(os.tmpdir(), "baoclaw-sockets");
-  return path.join(dir, "baoclaw.sock");
-}
-
-/**
  * Cwd-hash socket path (P1-2 backward compat fallback).
  */
 function cwdHashSocketPath(cwd: string): string {
@@ -665,34 +635,6 @@ function resolveDaemonSocket(cwd: string): string {
   }
   // Fallback to cwd-hash (P1-2 backward compat)
   return cwdHashSocketPath(cwd);
-}
-
-/** Scan for running BaoClaw daemon instances */
-function discoverDaemons(): DaemonInfo[] {
-  const dir = getSocketDir();
-  if (!fs.existsSync(dir)) return [];
-
-  const daemons: DaemonInfo[] = [];
-  for (const file of fs.readdirSync(dir)) {
-    if (!file.endsWith(".json")) continue;
-    try {
-      const meta: DaemonInfo = JSON.parse(
-        fs.readFileSync(path.join(dir, file), "utf-8"),
-      );
-      // Check if the process is still alive
-      try {
-        process.kill(meta.pid, 0);
-      } catch {
-        continue;
-      } // dead process
-      // Check if socket file exists
-      if (!fs.existsSync(meta.socket)) continue;
-      daemons.push(meta);
-    } catch {
-      /* skip invalid files */
-    }
-  }
-  return daemons;
 }
 
 /** Prompt user to select a daemon or start new */
@@ -2697,6 +2639,14 @@ async function main() {
 
     const cmd_model = async (args: string): Promise<void> => {
       const modelArg = args.trim();
+      // Subcommands (list|route|budget) live in the extended handler —
+      // delegation instead of an unreachable duplicate registry entry.
+      // Anything else is a model name: fall through to switchModel below.
+      if (["list", "route", "budget"].includes(modelArg.split(/\s+/)[0])) {
+        await cmd_model_extended(modelArg);
+        rl.prompt();
+        return;
+      }
       if (!modelArg) {
         // Show current model, fallback chain, and config
         const configPath = path.join(os.homedir(), ".baoclaw", "config.json");
@@ -4608,6 +4558,13 @@ async function main() {
 
     const cmd_telemetry = async (args: string): Promise<void> => {
       const arg = args.trim().toLowerCase();
+      // Subcommands (stats|trends|export) live in the extended handler —
+      // delegation instead of an unreachable duplicate registry entry.
+      if (["stats", "trends", "export"].includes(arg)) {
+        await cmd_telemetry_extended(arg);
+        rl.prompt();
+        return;
+      }
       if (arg === "on") {
         console.log(
           `\n${FG_GREEN}${BOLD}Telemetry enabled${RESET} ${DIM}(events stored locally in ~/.baoclaw/telemetry/)${RESET}\n`,
@@ -5646,7 +5603,7 @@ async function main() {
 
       console.log(`  ${FG_GRAY}── Session & Info ──${RESET}`);
       console.log(
-        `  ${FG_WHITE}/tokens${RESET}    ${DIM}Show token usage stats${RESET}`,
+        `  ${FG_WHITE}/tokens${RESET}    ${DIM}Show token usage stats (/token alias)${RESET}`,
         `  ${FG_WHITE}/rate${RESET}     ${DIM}Rate the last interaction (good|bad|neutral)${RESET}`,
       );
       console.log(
@@ -5656,13 +5613,19 @@ async function main() {
         `  ${FG_WHITE}/session${RESET}   ${DIM}Show current session info${RESET}`,
       );
       console.log(
+        `  ${FG_WHITE}/health${RESET}    ${DIM}Tool health overview: /health [all]${RESET}`,
+      );
+      console.log(
+        `  ${FG_WHITE}/verbose${RESET}   ${DIM}Verbose output controls: /verbose [on|off|status]${RESET}`,
+      );
+      console.log(
         `  ${FG_WHITE}/model${RESET}     ${DIM}Show model config (keys masked)${RESET}`,
       );
       console.log(
         `  ${FG_WHITE}/config${RESET}    ${DIM}Show full config JSON (keys masked)${RESET}`,
       );
       console.log(
-        `  ${FG_WHITE}/memory${RESET}    ${DIM}Show memory system info (/memory list to view entries)${RESET}`,
+        `  ${FG_WHITE}/memory${RESET}    ${DIM}Memory system: /memory list|add|delete|clear|archive|restore|archives|cleanup|stats${RESET}`,
       );
       console.log(
         `  ${FG_WHITE}/clear${RESET}      ${DIM}Clear screen${RESET}`,
@@ -5671,7 +5634,7 @@ async function main() {
         `  ${FG_WHITE}/help${RESET}       ${DIM}Show this help${RESET}`,
       );
       console.log(
-        `  ${FG_WHITE}/quit${RESET}       ${DIM}Disconnect (daemon keeps running)${RESET}`,
+        `  ${FG_WHITE}/quit${RESET}       ${DIM}Disconnect (daemon keeps running; aliases: /exit, /q)${RESET}`,
       );
       console.log(
         `  ${FG_WHITE}/shutdown${RESET}   ${DIM}Stop the daemon process${RESET}`,
@@ -5717,12 +5680,6 @@ async function main() {
       { names: ["/team"], prefix: true, handler: cmd_team },
       { names: ["/telemetry"], prefix: true, handler: cmd_telemetry },
       { names: ["/template"], prefix: true, handler: cmd_template },
-      // Unreachable today: the /model handler above already matches
-      // "/model <args>" and returns; kept verbatim from the old chain.
-      { names: ["/model"], handler: cmd_model_extended },
-      // Unreachable today: the /telemetry handler above already matches
-      // "/telemetry <args>" and returns; kept verbatim from the old chain.
-      { names: ["/telemetry"], handler: cmd_telemetry_extended },
       { names: ["/permission"], handler: cmd_permission },
       { names: ["/permissions"], prefix: true, handler: cmd_permissions },
       { names: ["/tokens", "/token"], handler: cmd_tokens },

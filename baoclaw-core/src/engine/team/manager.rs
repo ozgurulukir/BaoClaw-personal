@@ -1,52 +1,33 @@
-//! Team Manager for sharing TeamExecutor across clients.
+//! Team Manager for sharing team state across clients.
 //!
-//! This module provides a wrapper around TeamExecutor that allows it to be
-//! shared across multiple client connections while maintaining team state.
+//! This module provides the team store that allows teams to be created,
+//! listed, and managed from different client connections. Execution itself
+//! builds a fresh [`TeamExecutor`](super::executor::TeamExecutor) per RPC
+//! from the daemon's shared resources.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
-use crate::api::unified::UnifiedClient;
 use crate::engine::team::types::AgentTeam;
-use crate::tools::trait_def::Tool;
 
 /// Manages teams across multiple client connections.
-///
-/// This struct wraps the team storage functionality, allowing teams to be
-/// created, listed, and managed from different clients.
 pub struct TeamManager {
     /// Active teams being managed.
     teams: Arc<RwLock<HashMap<String, AgentTeam>>>,
-    /// API client for creating executors.
-    api_client: Arc<UnifiedClient>,
-    /// Tools available to sub-agents.
-    tools: Vec<Arc<dyn Tool>>,
-    /// Default working directory.
-    default_cwd: PathBuf,
-    /// Default model.
-    default_model: String,
-    /// Shared tool-health tracker (failure stats accumulate daemon-wide).
-    tool_health: crate::engine::tool_health::ToolHealthHandle,
+}
+
+impl Default for TeamManager {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl TeamManager {
     /// Create a new TeamManager.
-    pub fn new(
-        api_client: Arc<UnifiedClient>,
-        tools: Vec<Arc<dyn Tool>>,
-        default_cwd: PathBuf,
-        default_model: String,
-        tool_health: crate::engine::tool_health::ToolHealthHandle,
-    ) -> Self {
+    pub fn new() -> Self {
         Self {
             teams: Arc::new(RwLock::new(HashMap::new())),
-            api_client,
-            tools,
-            default_cwd,
-            default_model,
-            tool_health,
         }
     }
 
@@ -60,19 +41,9 @@ impl TeamManager {
         self.teams.read().await.get(team_id).cloned()
     }
 
-    /// Update a team.
-    pub async fn update_team(&self, team: AgentTeam) {
-        self.teams.write().await.insert(team.id.clone(), team);
-    }
-
     /// List all teams.
     pub async fn list_teams(&self) -> Vec<AgentTeam> {
         self.teams.read().await.values().cloned().collect()
-    }
-
-    /// Remove a team.
-    pub async fn remove_team(&self, team_id: &str) -> Option<AgentTeam> {
-        self.teams.write().await.remove(team_id)
     }
 
     /// Abort a team.
@@ -83,25 +54,5 @@ impl TeamManager {
             return Some(team.clone());
         }
         None
-    }
-
-    /// Get the API client.
-    pub fn api_client(&self) -> Arc<UnifiedClient> {
-        Arc::clone(&self.api_client)
-    }
-
-    /// Get the tools.
-    pub fn tools(&self) -> Vec<Arc<dyn Tool>> {
-        self.tools.clone()
-    }
-
-    /// Get the default cwd.
-    pub fn default_cwd(&self) -> PathBuf {
-        self.default_cwd.clone()
-    }
-
-    /// Get the default model.
-    pub fn default_model(&self) -> String {
-        self.default_model.clone()
     }
 }

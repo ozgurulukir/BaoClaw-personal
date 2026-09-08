@@ -46,10 +46,6 @@ impl SandboxConfig {
         }
     }
 
-    fn wrap_bwrap(&self, command: &str, cwd: &Path) -> String {
-        self.build_bwrap_args(command, cwd).join(" ")
-    }
-
     fn build_bwrap_args(&self, command: &str, cwd: &Path) -> Vec<String> {
         let mut args = vec!["bwrap".to_string()];
 
@@ -124,10 +120,6 @@ impl SandboxConfig {
         args.push(command.to_string());
 
         args
-    }
-
-    fn wrap_docker(&self, command: &str, cwd: &Path, image: &str) -> String {
-        self.build_docker_args(command, cwd, image).join(" ")
     }
 
     fn build_docker_args(&self, command: &str, cwd: &Path, image: &str) -> Vec<String> {
@@ -263,24 +255,6 @@ impl SandboxConfig {
 ///
 /// Uses spawn_blocking to avoid blocking the async runtime.
 ///
-/// NOTE: This is a legacy internal helper. Only invoked with hard-coded
-/// program names (e.g. "bwrap", "docker") during backend detection.
-/// Not exposed to LLM output; no whitelist validation needed.
-pub async fn which_exists_async(cmd: &str) -> bool {
-    let cmd = cmd.to_string();
-    tokio::task::spawn_blocking(move || {
-        std::process::Command::new("which")
-            .arg(&cmd)
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false)
-    })
-    .await
-    .unwrap_or(false)
-}
-
 /// Check if a command exists in PATH (synchronous, for non-async contexts).
 ///
 /// NOTE: Legacy internal helper — only called with hard-coded program names.
@@ -296,21 +270,6 @@ fn which_exists(cmd: &str) -> bool {
 }
 
 /// Check if a Docker image exists locally (async version).
-pub async fn docker_image_exists_async(image: &str) -> bool {
-    let image = image.to_string();
-    tokio::task::spawn_blocking(move || {
-        std::process::Command::new("docker")
-            .args(["image", "inspect", &image])
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false)
-    })
-    .await
-    .unwrap_or(false)
-}
-
 /// Check if a Docker image exists locally (synchronous, for non-async contexts).
 pub(crate) fn docker_image_exists(image: &str) -> bool {
     std::process::Command::new("docker")

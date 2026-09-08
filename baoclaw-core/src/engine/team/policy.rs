@@ -407,7 +407,6 @@ impl TeamPolicy {
 pub struct AgentPolicy {
     /// The team policy this is derived from.
     #[serde(skip)]
-    team_policy: Option<TeamPolicy>,
 
     /// Depth of this agent in the nesting hierarchy.
     pub depth: u32,
@@ -457,7 +456,6 @@ impl AgentPolicy {
         };
 
         Self {
-            team_policy: Some(team_policy.clone()),
             depth,
             allowed_tools,
             denied_tools,

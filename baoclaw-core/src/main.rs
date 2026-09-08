@@ -74,8 +74,6 @@ struct SharedState {
     file_cache: Arc<tokio::sync::Mutex<engine::file_cache::FileCache>>,
     /// Tool result store for persisting large outputs to disk.
     tool_result_store: Option<Arc<engine::tool_result_store::ToolResultStore>>,
-    /// Hook manager for event-driven automation.
-    hook_manager: Arc<engine::hooks::HookManager>,
     /// Team executor for managing sub-agent teams.
     team_executor: Arc<engine::team::TeamManager>,
 }
@@ -286,7 +284,6 @@ fn build_shared_engine(
         tool_result_store: Some(Arc::new(
             engine::tool_result_store::ToolResultStore::for_session(&session_id),
         )),
-        hook_manager: Some(Arc::clone(&shared.hook_manager)),
         permission: Some(PermissionBridge {
             manager: Arc::clone(&shared.permission_manager),
             gate: shared.permission_gate.clone(),

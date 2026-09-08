@@ -206,35 +206,11 @@ pub(super) async fn handle_shared_client(
                                 ScmFlow::Continue => continue,
                             }
                         }
-                        ClientMethod::SwitchCwd { cwd: new_cwd } => {
-                            match scm_switch_cwd(
-                                &shared,
-                                &writer,
-                                &mut session,
-                                &mut client_id,
-                                &mut broadcast_handle,
-                                &mut session_id,
-                                &mut work_cwd,
-                                id,
-                                new_cwd,
-                            )
-                            .await
-                            {
-                                ScmFlow::Break => break,
-                                ScmFlow::Continue => continue,
-                            }
-                        }
 
                         ClientMethod::GitCommit { message } => {
                             scm_git_commit(&work_cwd, &writer, id, message).await;
                         }
 
-                        ClientMethod::ListMcpResources => {
-                            scm_list_mcp_resources(&writer, id).await;
-                        }
-                        ClientMethod::ReadMcpResource { server_name, uri } => {
-                            scm_read_mcp_resource(&writer, id, server_name, uri).await;
-                        }
                         ClientMethod::TaskCreate {
                             description,
                             prompt,
@@ -381,34 +357,6 @@ pub(super) async fn handle_shared_client(
                         } => {
                             scm_spec_edit(&work_cwd, &writer, id, feature_name, phase).await;
                         }
-                        ClientMethod::HooksList => {
-                            scm_hooks_list(&shared, &writer, id).await;
-                        }
-                        ClientMethod::HooksAdd {
-                            id: hook_id,
-                            name,
-                            trigger,
-                            filter,
-                            action,
-                            enabled,
-                            priority,
-                        } => {
-                            match scm_hooks_add(
-                                &shared, &writer, id, hook_id, name, trigger, filter, action,
-                                enabled, priority,
-                            )
-                            .await
-                            {
-                                ScmFlow::Break => break,
-                                ScmFlow::Continue => continue,
-                            }
-                        }
-                        ClientMethod::HooksToggle { id: hook_id } => {
-                            scm_hooks_toggle(&shared, &writer, id, hook_id).await;
-                        }
-                        ClientMethod::HooksRemove { id: hook_id } => {
-                            scm_hooks_remove(&shared, &writer, id, hook_id).await;
-                        }
 
                         // ── Team Management RPC ──
                         ClientMethod::TeamSpawn {
@@ -474,17 +422,8 @@ pub(super) async fn handle_shared_client(
                         ClientMethod::GitBranchList => {
                             scm_git_branch_list(&writer, id).await;
                         }
-                        ClientMethod::GitBranchCreate { name } => {
-                            scm_git_branch_create(&writer, id, name).await;
-                        }
                         ClientMethod::GitConflictCheck => {
                             scm_git_conflict_check(&writer, id).await;
-                        }
-                        ClientMethod::GitCommitAmend => {
-                            scm_git_commit_amend(&writer, id).await;
-                        }
-                        ClientMethod::GitUndo => {
-                            scm_git_undo(&writer, id).await;
                         }
 
                         // ── Model Router handlers ──
@@ -496,9 +435,6 @@ pub(super) async fn handle_shared_client(
                         }
                         ClientMethod::ModelBudget => {
                             scm_model_budget(&writer, id).await;
-                        }
-                        ClientMethod::ModelStats => {
-                            scm_model_stats(&writer, id).await;
                         }
 
                         // ── Telemetry handlers ──
@@ -1012,66 +948,6 @@ async fn scm_switch_model(
     ScmFlow::Continue
 }
 
-async fn scm_switch_cwd(
-    shared: &SharedState,
-    writer: WriterRef<'_>,
-    session: &mut Arc<SharedSession>,
-    client_id: &mut ClientId,
-    broadcast_handle: &mut tokio::task::JoinHandle<()>,
-    session_id: &mut String,
-    work_cwd: &mut PathBuf,
-    id: RequestId,
-    new_cwd: PathBuf,
-) -> ScmFlow {
-    let abs_cwd = if new_cwd.is_absolute() {
-        new_cwd
-    } else {
-        work_cwd.join(new_cwd)
-    };
-    if !abs_cwd.is_dir() {
-        let mut conn_guard = writer.lock().await;
-        let _ = conn_guard
-            .send_error(
-                Some(id),
-                -32000,
-                format!("Directory does not exist: {}", abs_cwd.display()),
-            )
-            .await;
-        return ScmFlow::Continue;
-    }
-    match switch_shared_client(
-        shared,
-        writer,
-        session,
-        client_id,
-        broadcast_handle,
-        session_id,
-        work_cwd,
-        abs_cwd.clone(),
-    )
-    .await
-    {
-        Ok(message_count) => {
-            let mut conn_guard = writer.lock().await;
-            let _ = conn_guard
-                .send_response(
-                    id,
-                    serde_json::json!({
-                        "cwd": abs_cwd.display().to_string(),
-                        "session_id": session_id,
-                        "message_count": message_count,
-                    }),
-                )
-                .await;
-        }
-        Err(error) => {
-            let mut conn_guard = writer.lock().await;
-            let _ = conn_guard.send_error(Some(id), -32003, error).await;
-        }
-    }
-    ScmFlow::Continue
-}
-
 async fn scm_git_commit(work_cwd: &PathBuf, writer: WriterRef<'_>, id: RequestId, message: String) {
     let add_result = tokio::process::Command::new("git")
         .args(["add", "-A"])
@@ -1132,29 +1008,6 @@ async fn scm_git_commit(work_cwd: &PathBuf, writer: WriterRef<'_>, id: RequestId
                 .await;
         }
     }
-}
-
-async fn scm_list_mcp_resources(writer: WriterRef<'_>, id: RequestId) {
-    let mut conn_guard = writer.lock().await;
-    let _ = conn_guard
-        .send_response(id, serde_json::json!({"resources": [], "count": 0}))
-        .await;
-}
-
-async fn scm_read_mcp_resource(
-    writer: WriterRef<'_>,
-    id: RequestId,
-    server_name: String,
-    uri: String,
-) {
-    let mut conn_guard = writer.lock().await;
-    let _ = conn_guard
-        .send_error(
-            Some(id),
-            -32000,
-            format!("MCP resource read not yet wired: {}:{}", server_name, uri),
-        )
-        .await;
 }
 
 async fn scm_task_create(
@@ -2107,156 +1960,6 @@ async fn scm_spec_edit(
     }
 }
 
-async fn scm_hooks_list(shared: &SharedState, writer: WriterRef<'_>, id: RequestId) {
-    let hooks = shared.hook_manager.get_hooks().await;
-    let count = hooks.len();
-    let hooks_json: Vec<serde_json::Value> = hooks
-        .iter()
-        .map(|h| serde_json::to_value(h).unwrap_or_default())
-        .collect();
-    let mut conn_guard = writer.lock().await;
-    let _ = conn_guard
-        .send_response(
-            id,
-            serde_json::json!({
-                "hooks": hooks_json,
-                "count": count
-            }),
-        )
-        .await;
-}
-
-async fn scm_hooks_add(
-    shared: &SharedState,
-    writer: WriterRef<'_>,
-    id: RequestId,
-    hook_id: String,
-    name: String,
-    trigger: String,
-    filter: Option<serde_json::Value>,
-    action: serde_json::Value,
-    enabled: bool,
-    priority: i32,
-) -> ScmFlow {
-    use engine::hooks::{Action, Filter, Hook, TriggerType};
-    use std::str::FromStr;
-
-    // Parse trigger type
-    let trigger_type = match TriggerType::from_str(&trigger) {
-        Ok(t) => t,
-        Err(e) => {
-            let mut conn_guard = writer.lock().await;
-            let _ = conn_guard.send_error(Some(id), -32602, e).await;
-            return ScmFlow::Continue;
-        }
-    };
-
-    // Parse action
-    let hook_action: Action = match serde_json::from_value(action) {
-        Ok(a) => a,
-        Err(e) => {
-            let mut conn_guard = writer.lock().await;
-            let _ = conn_guard
-                .send_error(Some(id), -32602, format!("Invalid action: {}", e))
-                .await;
-            return ScmFlow::Continue;
-        }
-    };
-
-    // Parse filter if provided
-    let hook_filter: Option<Filter> = match filter {
-        Some(f) => match serde_json::from_value(f) {
-            Ok(f) => Some(f),
-            Err(e) => {
-                let mut conn_guard = writer.lock().await;
-                let _ = conn_guard
-                    .send_error(Some(id), -32602, format!("Invalid filter: {}", e))
-                    .await;
-                return ScmFlow::Continue;
-            }
-        },
-        None => None,
-    };
-
-    // Create the hook
-    let mut hook = Hook::new(hook_id.clone(), name, trigger_type, hook_action);
-    hook.enabled = enabled;
-    hook.priority = priority;
-    if let Some(f) = hook_filter {
-        hook.filter = Some(f);
-    }
-
-    // Add the hook
-    match shared.hook_manager.add_hook(hook.clone()).await {
-        Ok(()) => {
-            let mut conn_guard = writer.lock().await;
-            let _ = conn_guard
-                .send_response(
-                    id,
-                    serde_json::json!({
-                        "hook": hook,
-                        "message": "Hook added successfully"
-                    }),
-                )
-                .await;
-        }
-        Err(e) => {
-            let mut conn_guard = writer.lock().await;
-            let _ = conn_guard.send_error(Some(id), -32000, e).await;
-        }
-    }
-    ScmFlow::Continue
-}
-
-async fn scm_hooks_toggle(
-    shared: &SharedState,
-    writer: WriterRef<'_>,
-    id: RequestId,
-    hook_id: String,
-) {
-    match shared.hook_manager.toggle_hook(&hook_id).await {
-        Some(new_enabled) => {
-            let mut conn_guard = writer.lock().await;
-            let _ = conn_guard
-                .send_response(
-                    id,
-                    serde_json::json!({
-                        "id": hook_id,
-                        "enabled": new_enabled,
-                        "message": if new_enabled { "Hook enabled" } else { "Hook disabled" }
-                    }),
-                )
-                .await;
-        }
-        None => {
-            let mut conn_guard = writer.lock().await;
-            let _ = conn_guard
-                .send_error(Some(id), -32000, format!("Hook not found: {}", hook_id))
-                .await;
-        }
-    }
-}
-
-async fn scm_hooks_remove(
-    shared: &SharedState,
-    writer: WriterRef<'_>,
-    id: RequestId,
-    hook_id: String,
-) {
-    let removed = shared.hook_manager.remove_hook(&hook_id).await;
-    let mut conn_guard = writer.lock().await;
-    let _ = conn_guard
-        .send_response(
-            id,
-            serde_json::json!({
-                "id": hook_id,
-                "removed": removed,
-                "message": if removed { "Hook removed" } else { "Hook not found" }
-            }),
-        )
-        .await;
-}
-
 async fn scm_team_spawn(
     shared: &SharedState,
     work_cwd: &PathBuf,
@@ -2735,18 +2438,6 @@ async fn scm_git_branch_list(writer: WriterRef<'_>, id: RequestId) {
     let _ = conn_guard.send_response(id, result).await;
 }
 
-async fn scm_git_branch_create(writer: WriterRef<'_>, id: RequestId, name: String) {
-    let result =
-        match engine::git_integration::branch::BranchManager::create_branch(&name, None).await {
-            Ok(()) => serde_json::json!({"success": true, "name": name}),
-            Err(e) => {
-                serde_json::json!({"success": false, "error": format!("{}", e)})
-            }
-        };
-    let mut conn_guard = writer.lock().await;
-    let _ = conn_guard.send_response(id, result).await;
-}
-
 async fn scm_git_conflict_check(writer: WriterRef<'_>, id: RequestId) {
     let result = match engine::git_integration::conflict::ConflictResolver::detect_conflicts().await
     {
@@ -2768,28 +2459,6 @@ async fn scm_git_conflict_check(writer: WriterRef<'_>, id: RequestId) {
     let _ = conn_guard.send_response(id, result).await;
 }
 
-async fn scm_git_commit_amend(writer: WriterRef<'_>, id: RequestId) {
-    let result = match engine::git_integration::commit::CommitManager::amend_commit().await {
-        Ok(()) => serde_json::json!({"success": true}),
-        Err(e) => {
-            serde_json::json!({"success": false, "error": format!("{}", e)})
-        }
-    };
-    let mut conn_guard = writer.lock().await;
-    let _ = conn_guard.send_response(id, result).await;
-}
-
-async fn scm_git_undo(writer: WriterRef<'_>, id: RequestId) {
-    let result = match engine::git_integration::commit::CommitManager::undo_commit().await {
-        Ok(()) => serde_json::json!({"success": true}),
-        Err(e) => {
-            serde_json::json!({"success": false, "error": format!("{}", e)})
-        }
-    };
-    let mut conn_guard = writer.lock().await;
-    let _ = conn_guard.send_response(id, result).await;
-}
-
 async fn scm_model_list(writer: WriterRef<'_>, id: RequestId) {
     let result = ipc::handlers::model::handle_model_list();
     let mut conn_guard = writer.lock().await;
@@ -2804,12 +2473,6 @@ async fn scm_model_route(writer: WriterRef<'_>, id: RequestId, task: String) {
 
 async fn scm_model_budget(writer: WriterRef<'_>, id: RequestId) {
     let result = ipc::handlers::model::handle_model_budget();
-    let mut conn_guard = writer.lock().await;
-    let _ = conn_guard.send_response(id, result).await;
-}
-
-async fn scm_model_stats(writer: WriterRef<'_>, id: RequestId) {
-    let result = ipc::handlers::model::handle_model_stats();
     let mut conn_guard = writer.lock().await;
     let _ = conn_guard.send_response(id, result).await;
 }

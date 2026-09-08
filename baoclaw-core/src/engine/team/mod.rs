@@ -66,7 +66,6 @@
 //! let mut progress_rx = shared_state.subscribe_progress();
 //! ```
 
-pub mod agent;
 pub mod executor;
 pub mod manager;
 pub mod policy;

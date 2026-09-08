@@ -21,16 +21,3 @@ export {
   type ToolHealthData,
   type ToolHealthRecordInfo,
 } from "./toolHealth.js";
-export type {
-  StreamEvent,
-  StatePatch,
-  QueryResult,
-  ErrorInfo,
-} from "./types.js";
-export {
-  setupStreamHandlers,
-  applyStatePatch,
-  applyStatePatches,
-} from "./streamHandler.js";
-export { startRustCore, startRustCoreWithRestart } from "./rustCore.js";
-export type { RustCoreConfig, RustCoreHandle } from "./rustCore.js";

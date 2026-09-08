@@ -120,24 +120,6 @@ impl ToolHealthTracker {
         }
     }
 
-    /// Record a timeout.
-    pub fn record_timeout(&self, tool_name: &str) {
-        let mut records = self.records.lock().unwrap_or_else(|p| p.into_inner());
-        let record = records
-            .entry(tool_name.to_string())
-            .or_insert_with(|| ToolHealthRecord::new(tool_name));
-        record.total_calls += 1;
-        record.timeout_count += 1;
-        record.consecutive_failures += 1;
-        if record.consecutive_failures >= self.disable_threshold {
-            record.status = ToolStatus::Disabled;
-            record.last_status_change = chrono::Utc::now().to_rfc3339();
-        } else if record.consecutive_failures >= self.degrade_threshold {
-            record.status = ToolStatus::Degraded;
-            record.last_status_change = chrono::Utc::now().to_rfc3339();
-        }
-    }
-
     /// Check if a tool is available (not disabled). A Disabled/Degraded
     /// record older than `recovery_minutes` is lazily reset to Healthy —
     /// the tool gets a fresh start and its next failure re-degrades it.
@@ -225,29 +207,6 @@ impl ToolHealthTracker {
             .filter(|(_, r)| r.status == ToolStatus::Degraded)
             .map(|(name, _)| name.clone())
             .collect()
-    }
-
-    /// Build a system prompt fragment warning about tool health.
-    pub fn build_health_prompt(&self) -> Option<String> {
-        let warnings = self.get_warnings();
-        if warnings.is_empty() {
-            None
-        } else {
-            Some(format!(
-                "\n## Tool Health Warnings\n{}\n",
-                warnings.join("\n")
-            ))
-        }
-    }
-
-    /// Force-enable a disabled tool (manual override).
-    pub fn force_enable(&self, tool_name: &str) {
-        let mut records = self.records.lock().unwrap_or_else(|p| p.into_inner());
-        if let Some(record) = records.get_mut(tool_name) {
-            record.status = ToolStatus::Healthy;
-            record.consecutive_failures = 0;
-            record.last_status_change = chrono::Utc::now().to_rfc3339();
-        }
     }
 
     /// Point-in-time view for inspection surfaces (the `toolHealth` RPC):

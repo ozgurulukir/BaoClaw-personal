@@ -144,7 +144,6 @@ impl TaskManager {
                 session_memory: None,
                 file_cache: None,
                 tool_result_store: None,
-                hook_manager: None,
                 permission: None,
                 telemetry: None,
                 evolution: None,

@@ -14,12 +14,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 
 /** Files known to contain buggy relative imports */
-const AFFECTED_FILES = [
-  "cli.ts",
-  "index.ts",
-  "rustCore.ts",
-  "streamHandler.ts",
-];
+const AFFECTED_FILES = ["cli.ts", "index.ts"];
 
 /**
  * Extract all import/export specifiers from a TypeScript source string.
@@ -94,8 +89,6 @@ const ALL_SOURCE_FILES = [
   "client.ts",
   "index.ts",
   "markdownRenderer.ts",
-  "rustCore.ts",
-  "streamHandler.ts",
   "types.ts",
 ];
 
