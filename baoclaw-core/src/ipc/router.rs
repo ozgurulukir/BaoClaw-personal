@@ -233,6 +233,8 @@ pub enum ClientMethod {
     TelemetryTrends { days: u32 },
     #[serde(rename = "telemetryExport")]
     TelemetryExport { format: String },
+    #[serde(rename = "telemetry.setEnabled")]
+    TelemetrySetEnabled { enabled: bool },
 
     // ── Permission Gate RPC ──
     #[serde(rename = "permissionStatus")]
@@ -509,6 +511,18 @@ mod tests {
                 assert_eq!(seconds, 120);
             }
             _ => panic!("Expected PermissionsSetAskTimeout"),
+        }
+    }
+
+    #[test]
+    fn test_parse_telemetry_set_enabled() {
+        let req = make_request("telemetry.setEnabled", json!({"enabled": false}));
+        let method = parse_client_method(&req).unwrap();
+        match method {
+            ClientMethod::TelemetrySetEnabled { enabled } => {
+                assert!(!enabled);
+            }
+            _ => panic!("Expected TelemetrySetEnabled"),
         }
     }
 

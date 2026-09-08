@@ -680,7 +680,7 @@ baoclaw
 | `/task`          | 后台任务：run, list, status, stop             |
 | `/voice`         | 语音输入（需要 whisper.cpp）                  |
 | `/telegram`      | 管理 Telegram 网关                            |
-| `/telemetry`     | 切换遥测                                      |
+| `/telemetry`     | 遥测：status、on/off、stats、trends、export   |
 | `@file.pdf`      | 附加文件进行问答                              |
 | `/abort`         | 取消当前请求（或按 Ctrl+C）                   |
 | `/clear`         | 清屏                                          |

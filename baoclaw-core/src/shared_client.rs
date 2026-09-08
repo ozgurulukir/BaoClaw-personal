@@ -439,7 +439,7 @@ pub(super) async fn handle_shared_client(
 
                         // ── Telemetry handlers ──
                         ClientMethod::TelemetryStats => {
-                            match scm_telemetry_stats(&writer, id).await {
+                            match scm_telemetry_stats(&shared, &writer, id).await {
                                 ScmFlow::Break => break,
                                 ScmFlow::Continue => continue,
                             }
@@ -455,6 +455,9 @@ pub(super) async fn handle_shared_client(
                                 ScmFlow::Break => break,
                                 ScmFlow::Continue => continue,
                             }
+                        }
+                        ClientMethod::TelemetrySetEnabled { enabled } => {
+                            scm_telemetry_set_enabled(&shared, &writer, id, enabled).await;
                         }
 
                         // ── Permission Gate handlers ──
@@ -2503,7 +2506,11 @@ async fn scm_model_budget(writer: WriterRef<'_>, id: RequestId) {
     let _ = conn_guard.send_response(id, result).await;
 }
 
-async fn scm_telemetry_stats(writer: WriterRef<'_>, id: RequestId) -> ScmFlow {
+async fn scm_telemetry_stats(
+    shared: &SharedState,
+    writer: WriterRef<'_>,
+    id: RequestId,
+) -> ScmFlow {
     let collector = match engine::telemetry::collector::TelemetryCollector::new() {
         Ok(c) => c,
         Err(e) => {
@@ -2516,6 +2523,9 @@ async fn scm_telemetry_stats(writer: WriterRef<'_>, id: RequestId) -> ScmFlow {
     };
     match collector.get_stats() {
         Ok(stats) => {
+            // Recording switch lives on the shared collector (None = the DB
+            // never opened, i.e. recording is off).
+            let enabled = shared.telemetry.as_ref().is_some_and(|c| c.is_enabled());
             let mut conn_guard = writer.lock().await;
             let _ = conn_guard
                 .send_response(
@@ -2529,6 +2539,7 @@ async fn scm_telemetry_stats(writer: WriterRef<'_>, id: RequestId) -> ScmFlow {
                         "files_modified": stats.files_modified,
                         "avg_response_time_ms": stats.avg_response_time_ms,
                         "most_used_tool": stats.most_used_tool,
+                        "enabled": enabled,
                     }),
                 )
                 .await;
@@ -2831,7 +2842,7 @@ async fn scm_permissions_set_auto_allow(
     enabled: bool,
 ) {
     // Persisted knob for clients that answer their own
-    // permission prompts (see ToolPermissionContext::
+    // permission prompts (the TUI toggle; see ToolPermissionContext::
     // auto_allow_channels). Enforcement is client-side.
     {
         let mgr = shared.permission_manager.write().await;
@@ -2851,6 +2862,42 @@ async fn scm_permissions_set_auto_allow(
                 "message": format!(
                     "Auto-allow for channel '{}' {}",
                     channel,
+                    if enabled { "enabled" } else { "disabled" }
+                )
+            }),
+        )
+        .await;
+}
+
+async fn scm_telemetry_set_enabled(
+    shared: &SharedState,
+    writer: WriterRef<'_>,
+    id: RequestId,
+    enabled: bool,
+) {
+    // Live switch on the shared collector (both record paths read it
+    // per-event), then persisted to config.json so the choice survives
+    // daemon restarts — same idiom as the permissions.* knobs.
+    if let Some(ref telemetry) = shared.telemetry {
+        telemetry.set_enabled(enabled);
+    }
+    let mut cfg = crate::config::load_config();
+    cfg.telemetry_enabled = enabled;
+    if let Err(e) = cfg.save() {
+        eprintln!(
+            "[telemetry] WARN: could not persist enabled={}: {}",
+            enabled, e
+        );
+    }
+    let mut conn_guard = writer.lock().await;
+    let _ = conn_guard
+        .send_response(
+            id,
+            serde_json::json!({
+                "success": true,
+                "enabled": enabled,
+                "message": format!(
+                    "Telemetry {}",
                     if enabled { "enabled" } else { "disabled" }
                 )
             }),
@@ -3170,38 +3217,58 @@ async fn scm_config_model(shared: &SharedState, writer: WriterRef<'_>, id: Reque
 }
 
 async fn scm_config_show(shared: &SharedState, writer: WriterRef<'_>, id: RequestId) {
-    // Serialize config with api_key masked
-    let mask_key_in_value = |v: &mut serde_json::Value| {
-        if let serde_json::Value::String(s) = v {
-            if s.len() > 8 && !s.contains("****") {
-                let prefix = &s[..4];
-                let suffix = &s[s.len() - 4..];
-                *v = serde_json::Value::String(format!("{}****{}", prefix, suffix));
-            }
-        }
-    };
-
+    // Serialize config with secret values masked
     let mut config_json =
         serde_json::to_value(&shared.baoclaw_config).unwrap_or(serde_json::json!({}));
-
-    // Mask all api_key fields in model_profiles
-    if let Some(profiles) = config_json
-        .get_mut("model_profiles")
-        .and_then(|v| v.as_object_mut())
-    {
-        for (_, profile) in profiles.iter_mut() {
-            if let Some(obj) = profile.as_object_mut() {
-                if let Some(key) = obj.get_mut("api_key") {
-                    mask_key_in_value(key);
-                }
-            }
-        }
-    }
+    mask_secret_values(&mut config_json);
 
     let mut conn_guard = writer.lock().await;
     let _ = conn_guard
         .send_response(id, serde_json::json!({"config": config_json}))
         .await;
+}
+
+/// Recursively mask string values under secret-bearing keys (api_key /
+/// token / secret / password) anywhere in the config tree — including the
+/// flattened `extra` map, where third-party sections like `telegram` keep
+/// their credentials. Numbers and non-secret keys pass through untouched.
+fn mask_secret_values(value: &mut serde_json::Value) {
+    const SHORT_MASK: &str = "****";
+    match value {
+        serde_json::Value::Object(map) => {
+            for (key, v) in map.iter_mut() {
+                let key = key.to_lowercase();
+                let secret_key = key.contains("api_key")
+                    || key.contains("apikey")
+                    || key.contains("api-key")
+                    || key.contains("token")
+                    || key.contains("secret")
+                    || key.contains("password");
+                if secret_key {
+                    if let serde_json::Value::String(s) = v {
+                        if !s.is_empty() && !s.contains(SHORT_MASK) {
+                            *s = if s.chars().count() > 8 {
+                                let chars: Vec<char> = s.chars().collect();
+                                let head: String = chars[..4].iter().collect();
+                                let tail: String = chars[chars.len() - 4..].iter().collect();
+                                format!("{}{}{}", head, SHORT_MASK, tail)
+                            } else {
+                                SHORT_MASK.to_string()
+                            };
+                        }
+                        continue;
+                    }
+                }
+                mask_secret_values(v);
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for item in items.iter_mut() {
+                mask_secret_values(item);
+            }
+        }
+        _ => {}
+    }
 }
 
 async fn scm_evolution_rate_trajectory(
@@ -3238,4 +3305,82 @@ async fn scm_evolution_rate_trajectory(
             }),
         )
         .await;
+}
+
+#[cfg(test)]
+mod mask_tests {
+    use super::mask_secret_values;
+    use serde_json::json;
+
+    #[test]
+    fn test_masks_nested_extra_secrets() {
+        // Configs flatten unknown sections (e.g. telegram) into `extra`;
+        // their credentials must not survive config.show.
+        let mut v = json!({
+            "model": "m",
+            "extra": {
+                "telegram": { "token": "123456:ABC-DEF-GHI", "allowedChatIds": [1] },
+                "feishu": { "app_secret": "supersecret" }
+            }
+        });
+        mask_secret_values(&mut v);
+        assert_eq!(v["extra"]["telegram"]["token"], "1234****-GHI");
+        assert_eq!(v["extra"]["feishu"]["app_secret"], "supe****cret");
+        assert_eq!(v["extra"]["telegram"]["allowedChatIds"][0], 1);
+    }
+
+    #[test]
+    fn test_masks_api_keys_everywhere() {
+        let mut v = json!({
+            "api_key": "sk-ant-verylongkeyvalue",
+            "model_profiles": {
+                "inferx": { "api_key": "ark-live-key-12345678", "model": "gpt" }
+            }
+        });
+        mask_secret_values(&mut v);
+        assert_eq!(v["api_key"], "sk-a****alue");
+        assert_eq!(v["model_profiles"]["inferx"]["api_key"], "ark-****5678");
+        assert_eq!(v["model_profiles"]["inferx"]["model"], "gpt");
+    }
+
+    #[test]
+    fn test_leaves_non_secrets_untouched() {
+        let mut v = json!({
+            "max_tokens": 16384,
+            "model": "claude",
+            "openai_base_url": "https://api.example.com"
+        });
+        mask_secret_values(&mut v);
+        // Numeric token counts are not secrets.
+        assert_eq!(v["max_tokens"], 16384);
+        assert_eq!(v["model"], "claude");
+        assert_eq!(v["openai_base_url"], "https://api.example.com");
+    }
+
+    #[test]
+    fn test_substring_key_match_is_conservative() {
+        // Any key containing "token"/"secret"/... is treated as secret when
+        // the value is a string — over-masking config.show is acceptable,
+        // under-masking is not.
+        let mut v = json!({ "token_count_hint": "aggregate only" });
+        mask_secret_values(&mut v);
+        assert_eq!(v["token_count_hint"], "aggr****only");
+    }
+
+    #[test]
+    fn test_masks_inside_arrays_and_skips_already_masked() {
+        let mut v = json!({
+            "profiles": [ { "password": "hunter2" }, { "password": "correct-horse-battery" } ]
+        });
+        mask_secret_values(&mut v);
+        assert_eq!(v["profiles"][0]["password"], "****");
+        assert_eq!(v["profiles"][1]["password"], "corr****tery");
+
+        let mut twice = json!({ "token": "abcd****wxyz" });
+        mask_secret_values(&mut twice);
+        assert_eq!(
+            twice["token"], "abcd****wxyz",
+            "double-masking must not mangle"
+        );
+    }
 }

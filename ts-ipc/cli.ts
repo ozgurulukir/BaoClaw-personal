@@ -892,6 +892,8 @@ const COMMANDS = [
   "/permission",
   "/permissions",
   "/tokens",
+  "/token",
+  "/verbose",
   "/cost",
   "/rate",
   "/session",
@@ -2444,17 +2446,26 @@ async function main() {
     };
 
     const cmd_verbose = async (args: string): Promise<void> => {
-      const arg = args.trim();
+      const arg = args.trim().toLowerCase();
       type LogLevel = "quiet" | "normal" | "verbose";
       const levels: LogLevel[] = ["quiet", "normal", "verbose"];
-      if (arg === "" || arg === "help") {
-        console.log(`${DIM}Levels: quiet | normal | verbose${RESET}`);
-        console.log(`${DIM}Usage: /verbose <level>${RESET}`);
+      const currentLevel = (): LogLevel =>
+        (globalThis as any).__baoclaw_log_level ?? "verbose";
+      if (arg === "" || arg === "status") {
+        console.log(`${DIM}Log level: ${currentLevel()}${RESET}`);
+        console.log(`${DIM}Usage: /verbose <on|off|status>${RESET}`);
+      } else if (arg === "on") {
+        (globalThis as any).__baoclaw_log_level = "verbose";
+        console.log(`${FG_GREEN}✓ Log level: verbose${RESET}`);
+      } else if (arg === "off") {
+        (globalThis as any).__baoclaw_log_level = "quiet";
+        console.log(`${FG_GREEN}✓ Log level: quiet${RESET}`);
       } else if (levels.includes(arg as LogLevel)) {
         (globalThis as any).__baoclaw_log_level = arg;
         console.log(`${FG_GREEN}✓ Log level: ${arg}${RESET}`);
       } else {
         console.log(`${FG_RED}Unknown level: ${arg}${RESET}`);
+        console.log(`${DIM}Usage: /verbose <on|off|status>${RESET}`);
       }
       rl.prompt();
       return;
@@ -2681,13 +2692,32 @@ async function main() {
           /* use defaults */
         }
 
-        const activeModel = process.env.ANTHROPIC_MODEL || configModel;
+        // The daemon owns the truth about the active model (its env and
+        // config are its own); the CLI process env is only a fallback.
+        let activeModel = configModel;
+        let activeFromDaemon = false;
+        try {
+          const info = await client.request<any>("session.info", {});
+          if (info?.model) {
+            activeModel = info.model;
+            activeFromDaemon = true;
+          }
+        } catch {
+          /* daemon may not expose session.info — fall back to CLI env */
+        }
+        if (!activeFromDaemon && process.env.ANTHROPIC_MODEL) {
+          activeModel = process.env.ANTHROPIC_MODEL;
+        }
 
         console.log(`\n${FG_ORANGE}${BOLD}Model${RESET}\n`);
         console.log(
           `  ${FG_WHITE}Active:${RESET}   ${FG_GREEN}${activeModel}${RESET}`,
         );
-        if (process.env.ANTHROPIC_MODEL) {
+        if (activeFromDaemon && process.env.ANTHROPIC_MODEL) {
+          console.log(
+            `  ${DIM}(daemon session; CLI env: ${process.env.ANTHROPIC_MODEL})${RESET}`,
+          );
+        } else if (!activeFromDaemon && process.env.ANTHROPIC_MODEL) {
           console.log(`  ${DIM}(env override, config: ${configModel})${RESET}`);
         }
         console.log(`  ${FG_WHITE}Retries:${RESET}  ${maxRetries} per model`);
@@ -4237,32 +4267,30 @@ async function main() {
         //   /team spawn --sequence "First analyze, then implement"
         //   /team spawn --dag "Check code style and tests, then generate report"
 
-        let count: number | undefined;
-        let mode: "parallel" | "sequence" | "dag" = "parallel";
-        let task: string = "";
-
         // Parse the remaining arguments
         const rest = teamArgs.slice("spawn".length).trim();
 
-        // Check for --parallel, --sequence, --dag
-        if (rest.includes("--parallel")) {
-          mode = "parallel";
-          // Check if there's a number before --parallel
-          const numMatch = rest.match(/^(\d+)\s+--parallel/);
-          if (numMatch) {
-            count = parseInt(numMatch[1], 10);
+        // First mode flag in token order wins; a count may precede it.
+        // ("--parallel" appearing later inside the task text is ignored.)
+        let count: number | undefined;
+        let mode: "parallel" | "sequence" | "dag" | undefined;
+        const tokens = rest.split(/\s+/).filter(Boolean);
+        for (let i = 0; i < tokens.length; i++) {
+          const t = tokens[i];
+          if (t === "--parallel" || t === "--sequence" || t === "--dag") {
+            mode = t.slice(2) as "parallel" | "sequence" | "dag";
+            const prev = tokens[i - 1];
+            if (prev && /^\d+$/.test(prev)) {
+              count = parseInt(prev, 10);
+            }
+            break;
           }
-        } else if (rest.includes("--sequence")) {
-          mode = "sequence";
-        } else if (rest.includes("--dag")) {
-          mode = "dag";
         }
 
         // Extract task from quotes
         const taskMatch = rest.match(/"([^"]+)"/);
-        if (taskMatch) {
-          task = taskMatch[1];
-        }
+        let task: string = taskMatch ? taskMatch[1] : "";
+        if (!mode) mode = "parallel";
 
         if (!task) {
           console.log(
@@ -4574,19 +4602,43 @@ async function main() {
       const arg = args.trim().toLowerCase();
       // Subcommands (stats|trends|export) live in the extended handler —
       // delegation instead of an unreachable duplicate registry entry.
-      if (["stats", "trends", "export"].includes(arg)) {
+      // Match on the first token so "export json" / "trends 30" pass
+      // their arguments through.
+      if (["stats", "trends", "export"].includes(arg.split(/\s+/)[0])) {
         await cmd_telemetry_extended(arg);
         rl.prompt();
         return;
       }
-      if (arg === "on") {
+      if (arg === "on" || arg === "off") {
+        const enabled = arg === "on";
+        try {
+          const result = await client.request<{
+            success: boolean;
+            enabled: boolean;
+          }>("telemetry.setEnabled", { enabled });
+          console.log(
+            `\n${result.enabled ? FG_GREEN + BOLD : FG_YELLOW + BOLD}Telemetry ${result.enabled ? "enabled" : "disabled"}${RESET} ${DIM}(events ${result.enabled ? "recorded to" : "not recorded to"} ~/.baoclaw/telemetry.db)${RESET}\n`,
+          );
+        } catch (err) {
+          console.error(`${FG_RED}Failed to set telemetry: ${err}${RESET}`);
+        }
+        rl.prompt();
+        return;
+      }
+      // Bare /telemetry (or "status") — show the live recording state.
+      try {
+        const result = await client.request<any>("telemetryStats", {});
         console.log(
-          `\n${FG_GREEN}${BOLD}Telemetry enabled${RESET} ${DIM}(events stored locally in ~/.baoclaw/telemetry/)${RESET}\n`,
+          `\n${FG_ORANGE}${BOLD}Telemetry${RESET} ${DIM}recording: ${result.enabled ? "on" : "off"}${RESET}`,
         );
-      } else if (arg === "off") {
-        console.log(`\n${FG_YELLOW}Telemetry disabled${RESET}\n`);
-      } else {
-        console.log(`\n${FG_YELLOW}Usage: /telemetry on|off${RESET}\n`);
+        console.log(`${DIM}  Storage: ~/.baoclaw/telemetry.db${RESET}`);
+        console.log(
+          `${DIM}  Usage: /telemetry <on|off|stats|trends|export>${RESET}\n`,
+        );
+      } catch (err) {
+        console.error(
+          `${FG_RED}Failed to get telemetry status: ${err}${RESET}`,
+        );
       }
       rl.prompt();
       return;
@@ -4654,7 +4706,10 @@ async function main() {
         try {
           await client.request("templateCreate", { json: templateJson });
           console.log(
-            `\n${FG_GREEN}✓ Template created:${RESET} ${FG_WHITE}${name}${RESET} ${DIM}${trigger}${RESET}\n`,
+            `\n${FG_GREEN}✓ Template created:${RESET} ${FG_WHITE}${name}${RESET} ${DIM}${trigger}${RESET}`,
+          );
+          console.log(
+            `${DIM}  (no workflow steps yet — full workflows come from /template import)${RESET}`,
           );
         } catch (err) {
           console.error(`${FG_RED}${err}${RESET}`);
@@ -5324,6 +5379,15 @@ async function main() {
               : "?";
           const remaining = Math.max(0, ctxWin - result.current_tokens);
           const thrRatio = result.threshold_ratio ?? 0;
+          // Auto-compact fires at ctxWin × threshold_ratio; budget from the
+          // current position to that line, not to the raw window end.
+          const untilCompact =
+            thrRatio > 0
+              ? Math.max(
+                  0,
+                  Math.round(ctxWin * thrRatio) - result.current_tokens,
+                )
+              : remaining;
           console.log(
             `\n${FG_ORANGE}${BOLD}📊 Token Usage${RESET} ${DIM}(session: ${String(result.session_id ?? "").slice(0, 8) || "?"})${RESET}`,
           );
@@ -5332,7 +5396,7 @@ async function main() {
             `  ${FG_WHITE}In use:${RESET}     ${FG_CYAN}${(result.current_tokens ?? 0).toLocaleString()}${RESET} / ${ctxWin.toLocaleString()} tokens ${DIM}(${pct}%)${RESET}`,
           );
           console.log(
-            `  ${FG_WHITE}Until compact:${RESET}     ${FG_YELLOW}${remaining.toLocaleString()}${RESET} tokens ${DIM}(${(thrRatio * 100).toFixed(0)}% threshold)${RESET}`,
+            `  ${FG_WHITE}Until compact:${RESET}     ${FG_YELLOW}${untilCompact.toLocaleString()}${RESET} tokens ${DIM}(${(thrRatio * 100).toFixed(0)}% threshold)${RESET}`,
           );
           console.log(`  ${FG_GRAY}─────────────────────────────────${RESET}`);
           console.log(
@@ -5475,7 +5539,8 @@ async function main() {
     const cmd_config = async (): Promise<void> => {
       try {
         const result = await client.request<any>("config.show", {});
-        // Deep-clone and mask api keys
+        // Deep-clone and mask secrets (api keys, tokens, passwords,
+        // shared secrets) wherever they appear in the config tree.
         const maskKeys = (obj: any): any => {
           if (obj === null || typeof obj !== "object") return obj;
           if (Array.isArray(obj)) return obj.map(maskKeys);
@@ -5483,11 +5548,12 @@ async function main() {
           for (const [k, v] of Object.entries(obj)) {
             if (
               typeof k === "string" &&
-              /api[_-]?key/i.test(k) &&
+              /(api[_-]?key|token|secret|password)/i.test(k) &&
               typeof v === "string" &&
-              v.length > 8
+              v.length > 0
             ) {
-              masked[k] = `${v.slice(0, 4)}****${v.slice(-4)}`;
+              masked[k] =
+                v.length > 8 ? `${v.slice(0, 4)}****${v.slice(-4)}` : "****";
             } else {
               masked[k] = maskKeys(v);
             }
@@ -5509,150 +5575,21 @@ async function main() {
 
     const cmd_help = async (): Promise<void> => {
       console.log(`\n${FG_ORANGE}${BOLD}Commands${RESET}\n`);
-
-      console.log(`  ${FG_GRAY}── Conversation ──${RESET}`);
-      console.log(
-        `  ${FG_WHITE}/compact${RESET}    ${DIM}Compress conversation context${RESET}`,
+      const rows = commands.filter((e) => e.section && e.help);
+      const width = Math.max(
+        ...rows.map((e) => (e.label ?? e.names[0] ?? "").length),
       );
-      console.log(
-        `  ${FG_WHITE}/think${RESET}      ${DIM}Toggle extended thinking mode${RESET}`,
-      );
-      console.log(
-        `  ${FG_WHITE}/model${RESET}      ${DIM}Show or switch model: /model list|route|budget${RESET}`,
-      );
-      console.log(
-        `  ${FG_WHITE}/history${RESET}    ${DIM}Recent conversation: /history [n]${RESET}`,
-      );
-      console.log(
-        `  ${FG_WHITE}/abort${RESET}      ${DIM}Cancel current request${RESET}`,
-      );
-      console.log(
-        `  ${FG_WHITE}/debug${RESET}      ${DIM}Toggle timing debug for next query${RESET}`,
-      );
-      console.log();
-
-      console.log(`  ${FG_GRAY}── Projects & Git ──${RESET}`);
-      console.log(
-        `  ${FG_WHITE}/projects${RESET}   ${DIM}List, switch, create projects${RESET}`,
-      );
-      console.log(
-        `  ${FG_WHITE}/git${RESET}        ${DIM}Git status (branch, changes)${RESET}`,
-      );
-      console.log(
-        `  ${FG_WHITE}/git pr list|create${RESET}   ${DIM}Pull request management${RESET}`,
-      );
-      console.log(
-        `  ${FG_WHITE}/git branch${RESET}  ${DIM}List branches${RESET}`,
-      );
-      console.log(
-        `  ${FG_WHITE}/git conflict${RESET}${DIM} Check for merge conflicts${RESET}`,
-      );
-      console.log(
-        `  ${FG_WHITE}/diff${RESET}       ${DIM}Git diff summary${RESET}`,
-      );
-      console.log(
-        `  ${FG_WHITE}/commit${RESET}     ${DIM}Stage all and commit${RESET}`,
-      );
-      console.log();
-
-      console.log(`  ${FG_GRAY}── Tools & Extensions ──${RESET}`);
-      console.log(
-        `  ${FG_WHITE}/tools${RESET}      ${DIM}List registered tools${RESET}`,
-      );
-      console.log(
-        `  ${FG_WHITE}/mcp${RESET}        ${DIM}List MCP servers${RESET}`,
-      );
-      console.log(
-        `  ${FG_WHITE}/skills${RESET}     ${DIM}List discovered skills${RESET}`,
-      );
-      console.log(
-        `  ${FG_WHITE}/plugins${RESET}    ${DIM}List discovered plugins${RESET}`,
-      );
-      console.log();
-
-      console.log(`  ${FG_GRAY}── Templates & Automation ──${RESET}`);
-      console.log(
-        `  ${FG_WHITE}/template${RESET}   ${DIM}Workflow templates: list, create, delete, export, import${RESET}`,
-      );
-      console.log(
-        `  ${FG_WHITE}/task${RESET}       ${DIM}Background tasks: run, list, status, stop${RESET}`,
-      );
-      console.log(
-        `  ${FG_WHITE}/cron${RESET}       ${DIM}Scheduled tasks: add, list, remove, toggle${RESET}`,
-      );
-      console.log(
-        `  ${FG_WHITE}/memory${RESET}     ${DIM}Long-term memory: list, add, delete, clear${RESET}`,
-      );
-      console.log(
-        `  ${FG_WHITE}/team${RESET}       ${DIM}Sub-agent teams: spawn, list, status, exec${RESET}`,
-      );
-      console.log();
-
-      console.log(`  ${FG_GRAY}── Telemetry & Permissions ──${RESET}`);
-      console.log(
-        `  ${FG_WHITE}/telemetry${RESET}  ${DIM}Telemetry: stats, trends, export, on|off${RESET}`,
-      );
-      console.log(
-        `  ${FG_WHITE}/permission${RESET} ${DIM}Permission gate: status, grant, revoke${RESET}`,
-      );
-      console.log(
-        `  ${FG_WHITE}/permissions${RESET} ${DIM}Permission rules: allow/deny/ask/mode${RESET}`,
-      );
-      console.log();
-
-      console.log(`  ${FG_GRAY}── Input & Integrations ──${RESET}`);
-      console.log(
-        `  ${FG_WHITE}/doc${RESET}        ${DIM}Attach PDF/DOCX document for next message${RESET}`,
-      );
-      console.log(
-        `  ${FG_WHITE}/voice${RESET}      ${DIM}Voice input (requires whisper.cpp)${RESET}`,
-      );
-      console.log(
-        `  ${FG_WHITE}@file.pdf${RESET}   ${DIM}Attach file: @photo.png @doc.pdf @doc.docx${RESET}`,
-      );
-      console.log(
-        `  ${FG_WHITE}/telegram${RESET}   ${DIM}Manage Telegram gateway${RESET}`,
-      );
-      console.log();
-
-      console.log(`  ${FG_GRAY}── Session & Info ──${RESET}`);
-      console.log(
-        `  ${FG_WHITE}/tokens${RESET}    ${DIM}Show token usage stats (/token alias)${RESET}`,
-        `  ${FG_WHITE}/rate${RESET}     ${DIM}Rate the last interaction (good|bad|neutral)${RESET}`,
-      );
-      console.log(
-        `  ${FG_WHITE}/cost${RESET}      ${DIM}Show cost estimate${RESET}`,
-      );
-      console.log(
-        `  ${FG_WHITE}/session${RESET}   ${DIM}Show current session info${RESET}`,
-      );
-      console.log(
-        `  ${FG_WHITE}/health${RESET}    ${DIM}Tool health overview: /health [all]${RESET}`,
-      );
-      console.log(
-        `  ${FG_WHITE}/verbose${RESET}   ${DIM}Verbose output controls: /verbose [on|off|status]${RESET}`,
-      );
-      console.log(
-        `  ${FG_WHITE}/model${RESET}     ${DIM}Show model config (keys masked)${RESET}`,
-      );
-      console.log(
-        `  ${FG_WHITE}/config${RESET}    ${DIM}Show full config JSON (keys masked)${RESET}`,
-      );
-      console.log(
-        `  ${FG_WHITE}/memory${RESET}    ${DIM}Memory system: /memory list|add|delete|clear|archive|restore|archives|cleanup|stats${RESET}`,
-      );
-      console.log(
-        `  ${FG_WHITE}/clear${RESET}      ${DIM}Clear screen${RESET}`,
-      );
-      console.log(
-        `  ${FG_WHITE}/help${RESET}       ${DIM}Show this help${RESET}`,
-      );
-      console.log(
-        `  ${FG_WHITE}/quit${RESET}       ${DIM}Disconnect (daemon keeps running; aliases: /exit, /q)${RESET}`,
-      );
-      console.log(
-        `  ${FG_WHITE}/shutdown${RESET}   ${DIM}Stop the daemon process${RESET}`,
-      );
+      let lastSection = "";
+      for (const entry of rows) {
+        if (entry.section !== lastSection) {
+          lastSection = entry.section!;
+          console.log(`\n  ${FG_GRAY}── ${lastSection} ──${RESET}`);
+        }
+        const label = (entry.label ?? entry.names[0] ?? "").padEnd(width);
+        console.log(
+          `  ${FG_WHITE}${label}${RESET}  ${DIM}${entry.help}${RESET}`,
+        );
+      }
       console.log();
       rl.prompt();
       return;
@@ -5660,62 +5597,282 @@ async function main() {
 
     type CommandEntry = {
       names: string[];
-      prefix?: boolean;
-      handler: (args: string) => Promise<void> | void;
+      /// /help section title; rows render in registry order.
+      section?: string;
+      /// One-line /help description (the display label is names[0] unless
+      /// `label` overrides it).
+      help?: string;
+      /// Display-only label for rows that are not dispatchable commands
+      /// (e.g. "@file.pdf", "/git pr list|create").
+      label?: string;
+      handler?: (args: string) => Promise<void> | void;
     };
 
-    // Ordered registry — first match wins, mirroring the original
-    // sequential if-chain order.
+    // Single source of truth: dispatch AND /help rendering both read this
+    // table. Input is split into a first token (`cmd`) and the rest
+    // (`cmdArgs`) before dispatch, so matching is exact-name only — there
+    // is no prefix matching, and glued input like "/docx" falls through to
+    // the unknown-command path instead of being swallowed.
     const commands: CommandEntry[] = [
-      { names: ["/quit", "/exit", "/q"], handler: cmd_quit },
-      { names: ["/shutdown"], handler: cmd_shutdown },
-      { names: ["/abort"], handler: cmd_abort },
-      { names: ["/verbose"], prefix: true, handler: cmd_verbose },
-      { names: ["/clear"], handler: cmd_clear },
-      { names: ["/tools"], handler: cmd_tools },
-      { names: ["/mcp"], handler: cmd_mcp },
-      { names: ["/skills"], handler: cmd_skills },
-      { names: ["/plugins"], handler: cmd_plugins },
-      { names: ["/model"], handler: cmd_model },
-      { names: ["/think"], handler: cmd_think },
-      { names: ["/projects"], prefix: true, handler: cmd_projects },
-      { names: ["/cron"], prefix: true, handler: cmd_cron },
-      { names: ["/history"], prefix: true, handler: cmd_history },
-      { names: ["/doc"], prefix: true, handler: cmd_doc },
-      { names: ["/debug"], handler: cmd_debug },
-      { names: ["/compact"], handler: cmd_compact },
-      { names: ["/memory"], prefix: true, handler: cmd_memory },
-      { names: ["/diff"], handler: cmd_diff },
-      { names: ["/commit"], prefix: true, handler: cmd_commit },
-      { names: ["/git"], handler: cmd_git },
-      { names: ["/task"], prefix: true, handler: cmd_task },
-      { names: ["/voice"], handler: cmd_voice },
-      { names: ["/telegram"], prefix: true, handler: cmd_telegram },
-      { names: ["/team"], prefix: true, handler: cmd_team },
-      { names: ["/telemetry"], prefix: true, handler: cmd_telemetry },
-      { names: ["/template"], prefix: true, handler: cmd_template },
-      { names: ["/permission"], handler: cmd_permission },
-      { names: ["/permissions"], prefix: true, handler: cmd_permissions },
-      { names: ["/tokens", "/token"], handler: cmd_tokens },
-      { names: ["/cost"], handler: cmd_cost },
-      { names: ["/session"], handler: cmd_session },
-      { names: ["/health"], handler: cmd_health },
-      { names: ["/config"], handler: cmd_config },
-      { names: ["/rate"], handler: cmd_rate },
-      { names: ["/help"], handler: cmd_help },
+      // ── Conversation ──
+      {
+        names: ["/compact"],
+        section: "Conversation",
+        help: "Compress conversation context",
+        handler: cmd_compact,
+      },
+      {
+        names: ["/think"],
+        section: "Conversation",
+        help: "Toggle extended thinking mode",
+        handler: cmd_think,
+      },
+      {
+        names: ["/model"],
+        section: "Conversation",
+        help: "Show or switch model: /model [list|route|budget|<name>]",
+        handler: cmd_model,
+      },
+      {
+        names: ["/history"],
+        section: "Conversation",
+        help: "Recent conversation: /history [n]",
+        handler: cmd_history,
+      },
+      {
+        names: ["/abort"],
+        section: "Conversation",
+        help: "Cancel current request",
+        handler: cmd_abort,
+      },
+      {
+        names: ["/debug"],
+        section: "Conversation",
+        help: "Toggle timing debug for next query",
+        handler: cmd_debug,
+      },
+
+      // ── Projects & Git ──
+      {
+        names: ["/projects"],
+        section: "Projects & Git",
+        help: "List, switch, create: /projects [list|new <path> [desc]|desc <id> <desc>|<id>]",
+        handler: cmd_projects,
+      },
+      {
+        names: ["/git"],
+        section: "Projects & Git",
+        help: "Git status; subcommands below",
+        handler: cmd_git,
+      },
+      {
+        names: [],
+        section: "Projects & Git",
+        label: "/git pr list|create",
+        help: "Pull request management",
+      },
+      {
+        names: [],
+        section: "Projects & Git",
+        label: "/git branch",
+        help: "List branches",
+      },
+      {
+        names: [],
+        section: "Projects & Git",
+        label: "/git conflict",
+        help: "Check for merge conflicts",
+      },
+      {
+        names: ["/diff"],
+        section: "Projects & Git",
+        help: "Git diff summary",
+        handler: cmd_diff,
+      },
+      {
+        names: ["/commit"],
+        section: "Projects & Git",
+        help: "Stage all and commit: /commit <message>",
+        handler: cmd_commit,
+      },
+
+      // ── Tools & Extensions ──
+      {
+        names: ["/tools"],
+        section: "Tools & Extensions",
+        help: "List registered tools",
+        handler: cmd_tools,
+      },
+      {
+        names: ["/mcp"],
+        section: "Tools & Extensions",
+        help: "List MCP servers",
+        handler: cmd_mcp,
+      },
+      {
+        names: ["/skills"],
+        section: "Tools & Extensions",
+        help: "List discovered skills",
+        handler: cmd_skills,
+      },
+      {
+        names: ["/plugins"],
+        section: "Tools & Extensions",
+        help: "List discovered plugins",
+        handler: cmd_plugins,
+      },
+
+      // ── Templates & Automation ──
+      {
+        names: ["/template"],
+        section: "Templates & Automation",
+        help: "Workflow templates: /template list|create|delete|export|import",
+        handler: cmd_template,
+      },
+      {
+        names: ["/task"],
+        section: "Templates & Automation",
+        help: "Background tasks: /task run|list|status|stop",
+        handler: cmd_task,
+      },
+      {
+        names: ["/cron"],
+        section: "Templates & Automation",
+        help: "Scheduled tasks: /cron add|list|remove|toggle",
+        handler: cmd_cron,
+      },
+      {
+        names: ["/memory"],
+        section: "Templates & Automation",
+        help: "Memory system: /memory list|add|delete|clear|archive|restore|archives|cleanup|stats",
+        handler: cmd_memory,
+      },
+      {
+        names: ["/team"],
+        section: "Templates & Automation",
+        help: "Sub-agent teams: /team spawn|list|status|exec|results|abort",
+        handler: cmd_team,
+      },
+
+      // ── Telemetry & Permissions ──
+      {
+        names: ["/telemetry"],
+        section: "Telemetry & Permissions",
+        help: "Telemetry: /telemetry [status|on|off|stats|trends|export]",
+        handler: cmd_telemetry,
+      },
+      {
+        names: ["/permission"],
+        section: "Telemetry & Permissions",
+        help: "Permission gate grants: /permission status|grant|revoke",
+        handler: cmd_permission,
+      },
+      {
+        names: ["/permissions"],
+        section: "Telemetry & Permissions",
+        help: "Permission rules & mode: /permissions [allow|deny|ask|mode|timeout|persist|remove]",
+        handler: cmd_permissions,
+      },
+
+      // ── Input & Integrations ──
+      {
+        names: ["/doc"],
+        section: "Input & Integrations",
+        help: "Attach PDF/DOCX document for next message",
+        handler: cmd_doc,
+      },
+      {
+        names: ["/voice"],
+        section: "Input & Integrations",
+        help: "Voice input (requires whisper.cpp)",
+        handler: cmd_voice,
+      },
+      {
+        names: [],
+        section: "Input & Integrations",
+        label: "@file.pdf",
+        help: "Attach file: @photo.png @doc.pdf @doc.docx",
+      },
+      {
+        names: ["/telegram"],
+        section: "Input & Integrations",
+        help: "Manage Telegram gateway: /telegram start|stop|status",
+        handler: cmd_telegram,
+      },
+
+      // ── Session & Info ──
+      {
+        names: ["/tokens", "/token"],
+        section: "Session & Info",
+        help: "Show token usage stats",
+        handler: cmd_tokens,
+      },
+      {
+        names: ["/rate"],
+        section: "Session & Info",
+        help: "Rate the last interaction: /rate <good|bad|neutral>",
+        handler: cmd_rate,
+      },
+      {
+        names: ["/cost"],
+        section: "Session & Info",
+        help: "Show cost estimate",
+        handler: cmd_cost,
+      },
+      {
+        names: ["/session"],
+        section: "Session & Info",
+        help: "Show current session info",
+        handler: cmd_session,
+      },
+      {
+        names: ["/health"],
+        section: "Session & Info",
+        help: "Tool health overview: /health [all]",
+        handler: cmd_health,
+      },
+      {
+        names: ["/verbose"],
+        section: "Session & Info",
+        help: "Verbose output controls: /verbose [on|off|status]",
+        handler: cmd_verbose,
+      },
+      {
+        names: ["/config"],
+        section: "Session & Info",
+        help: "Show full config JSON (keys masked)",
+        handler: cmd_config,
+      },
+      {
+        names: ["/clear"],
+        section: "Session & Info",
+        help: "Clear screen",
+        handler: cmd_clear,
+      },
+      {
+        names: ["/help"],
+        section: "Session & Info",
+        help: "Show this help",
+        handler: cmd_help,
+      },
+      {
+        names: ["/quit", "/exit", "/q"],
+        section: "Session & Info",
+        help: "Disconnect (daemon keeps running; aliases: /exit, /q)",
+        handler: cmd_quit,
+      },
+      {
+        names: ["/shutdown"],
+        section: "Session & Info",
+        help: "Stop the daemon process",
+        handler: cmd_shutdown,
+      },
     ];
 
     for (const entry of commands) {
-      const matchedName = entry.names.find(
-        (name) =>
-          name === cmd || (entry.prefix === true && cmd.startsWith(name)),
-      );
-      if (matchedName !== undefined) {
-        const handlerArgs = entry.prefix
-          ? cmd.slice(matchedName.length) +
-            (spaceIdx === -1 ? "" : " " + cmdArgs)
-          : cmdArgs;
-        await entry.handler(handlerArgs);
+      if (!entry.handler) continue;
+      if (entry.names.includes(cmd)) {
+        await entry.handler(cmdArgs);
         return;
       }
     }
@@ -5724,11 +5881,20 @@ async function main() {
     const dragDropMatch = input.match(
       /^['"]?(\/[^\s'"]+\.(png|jpg|jpeg|gif|webp))['"]?\s*$/i,
     );
-    if (dragDropMatch) {
-      const imgPath = dragDropMatch[1];
-      if (fs.existsSync(imgPath)) {
-        input = `@${imgPath}`;
-      }
+    const isDragDrop =
+      dragDropMatch !== null && fs.existsSync(dragDropMatch[1]);
+
+    // Unknown slash-commands still go to the model (they may be valid in
+    // other clients), but say so instead of silently dispatching. A pasted
+    // absolute file path only looks like a slash command — it is one.
+    if (cmd.startsWith("/") && cmd.length > 1 && !isDragDrop) {
+      console.log(
+        `${FG_YELLOW}⚠ Unknown command: ${cmd}${RESET} ${DIM}— sending as a message${RESET}`,
+      );
+    }
+
+    if (isDragDrop) {
+      input = `@${dragDropMatch![1]}`;
     }
 
     // Display user message

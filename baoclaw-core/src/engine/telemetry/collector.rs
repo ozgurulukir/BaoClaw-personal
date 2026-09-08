@@ -6,6 +6,7 @@
 
 use rusqlite::{params, Connection};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 
 use super::types::{DailyStats, SessionSnapshot, ToolUsageStat, UsageStats};
@@ -22,6 +23,10 @@ fn default_db_path() -> PathBuf {
 pub struct TelemetryCollector {
     conn: Mutex<Connection>,
     stored_path: PathBuf,
+    /// Master recording switch (default on). Flipped live by the
+    /// `telemetry.setEnabled` RPC; every write path checks it, so toggling
+    /// takes effect without a daemon restart.
+    enabled: AtomicBool,
 }
 
 impl TelemetryCollector {
@@ -52,9 +57,20 @@ impl TelemetryCollector {
         let collector = Self {
             conn: Mutex::new(conn),
             stored_path: path.clone(),
+            enabled: AtomicBool::new(true),
         };
         collector.init_schema()?;
         Ok(collector)
+    }
+
+    /// Enable or disable event recording on this collector.
+    pub fn set_enabled(&self, enabled: bool) {
+        self.enabled.store(enabled, Ordering::Relaxed);
+    }
+
+    /// Whether this collector currently records events.
+    pub fn is_enabled(&self) -> bool {
+        self.enabled.load(Ordering::Relaxed)
     }
 
     /// Initialize the database schema (idempotent).
@@ -109,6 +125,9 @@ impl TelemetryCollector {
         response_time_ms: u64,
         tools: Vec<String>,
     ) -> Result<(), String> {
+        if !self.is_enabled() {
+            return Ok(());
+        }
         let now = chrono::Utc::now().timestamp();
         let tools_json = serde_json::to_string(&tools).unwrap_or_else(|_| "[]".to_string());
 
@@ -144,6 +163,9 @@ impl TelemetryCollector {
         tools_used: u64,
         files_changed: u64,
     ) -> Result<(), String> {
+        if !self.is_enabled() {
+            return Ok(());
+        }
         let conn = self.conn.lock().map_err(|e| format!("Lock error: {}", e))?;
         conn.execute(
             "INSERT INTO sessions (session_id, start_time, end_time, turns, total_tokens, total_cost, tools_used, files_changed)
@@ -453,6 +475,37 @@ mod tests {
         assert_eq!(stats.total_turns, 3);
         assert_eq!(stats.total_tokens, 900);
         assert_eq!(stats.total_tools_called, 4);
+    }
+
+    #[test]
+    fn test_disabled_by_default_is_on() {
+        let (collector, _dir) = test_collector();
+        assert!(collector.is_enabled(), "collectors start enabled");
+    }
+
+    #[test]
+    fn test_disabled_collector_drops_events() {
+        let (collector, _dir) = test_collector();
+        collector.set_enabled(false);
+        assert!(!collector.is_enabled());
+
+        collector
+            .record_turn("s1", 100, 50, 0.001, 1000, vec!["Bash".to_string()])
+            .unwrap();
+        collector
+            .record_session("s1", 0, 10, 1, 150, 0.001, 1, 0)
+            .unwrap();
+
+        let stats = collector.get_stats().unwrap();
+        assert_eq!(stats.total_turns, 0, "disabled collector must not record");
+
+        // Re-enabling takes effect live (no restart).
+        collector.set_enabled(true);
+        collector
+            .record_turn("s1", 10, 5, 0.0001, 100, vec![])
+            .unwrap();
+        let stats = collector.get_stats().unwrap();
+        assert_eq!(stats.total_turns, 1);
     }
 
     #[test]

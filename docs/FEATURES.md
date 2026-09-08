@@ -277,7 +277,7 @@ loop — each carries an inline status note and a tracking issue.
 | `/task`         | Background tasks: run, list, status, stop    |
 | `/voice`        | Voice input (requires whisper.cpp)           |
 | `/telegram`     | Manage Telegram gateway: start, stop, status |
-| `/telemetry`    | Toggle telemetry on/off                      |
+| `/telemetry`    | Telemetry: status, on/off, stats, trends     |
 | `@file.pdf`     | Attach file for Q&A (PDF, DOCX, images)      |
 | `/abort`        | Cancel current request (or press Ctrl+C)     |
 | `/clear`        | Clear screen                                 |

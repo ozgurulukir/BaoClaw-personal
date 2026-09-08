@@ -213,6 +213,7 @@ baoclaw-whatsapp         # long-running process
 /session     Current session info
 /health      Tool health overview (/health all for every tracked tool)
 /rate       Rate the last interaction (good|bad|neutral) for preference data
+/telemetry   Telemetry recording: /telemetry [status|on|off|stats|trends|export]
 /clear       Clear the screen
 /exit        Exit
 ```

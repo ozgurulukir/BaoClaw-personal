@@ -115,6 +115,12 @@ pub struct BaoclawConfig {
     /// turn; excess requests queue on a semaphore (default 8).
     #[serde(default = "default_max_parallel_tools")]
     pub max_parallel_tools: usize,
+    /// Master switch for telemetry recording. When false, the daemon drops
+    /// turn/session events instead of writing them to ~/.baoclaw/telemetry.db.
+    /// Toggled at runtime via the `telemetry.setEnabled` RPC (/telemetry on|off)
+    /// and persisted back to this field.
+    #[serde(default = "default_telemetry_enabled")]
+    pub telemetry_enabled: bool,
 
     // === New: Named model profiles (P1-1) ===
     /// Named model profiles (new format). Each profile has its own api_type,
@@ -135,6 +141,9 @@ pub struct BaoclawConfig {
 
 fn default_api_type() -> String {
     "anthropic".to_string()
+}
+pub fn default_telemetry_enabled() -> bool {
+    true
 }
 pub fn default_tool_output_threshold_chars() -> usize {
     200_000
@@ -209,6 +218,7 @@ impl Default for BaoclawConfig {
             max_tokens: default_max_tokens(),
             bash_max_timeout_ms: default_bash_max_timeout_ms(),
             max_parallel_tools: default_max_parallel_tools(),
+            telemetry_enabled: default_telemetry_enabled(),
             model_profiles: HashMap::new(),
             primary_profile: None,
             fallback_profiles: Vec::new(),
@@ -539,6 +549,7 @@ mod tests {
             max_tokens: 8192,
             bash_max_timeout_ms: 450_000,
             max_parallel_tools: 4,
+            telemetry_enabled: false,
             openai_base_url: None,
             context_window: 200_000,
             auto_compact_threshold_ratio: 0.7,

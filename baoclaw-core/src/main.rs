@@ -1104,7 +1104,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         std::path::Path::new(&opts.cwd_str),
     ));
     let telemetry_collector = match engine::telemetry::collector::TelemetryCollector::new() {
-        Ok(c) => Some(Arc::new(c)),
+        Ok(c) => {
+            c.set_enabled(baoclaw_config.telemetry_enabled);
+            Some(Arc::new(c))
+        }
         Err(e) => {
             eprintln!("Telemetry disabled (DB open failed): {}", e);
             None
