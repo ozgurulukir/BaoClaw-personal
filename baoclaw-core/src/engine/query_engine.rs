@@ -1062,11 +1062,18 @@ impl QueryEngine {
                     }
                 }
                 if let Some(evolution) = &self.config.evolution {
-                    if let Some(frag) = evolution.build_prompt_fragment(&self.config.cwd).await {
-                        prompt = match prompt {
-                            Some(base) => Some(format!("{base}\n\n{frag}")),
-                            None => Some(frag),
-                        };
+                    // Nudges are consumed interactively only: headless
+                    // engines (permission None, by the headless invariant)
+                    // must never steal the user's pending review. The atomic
+                    // rename inside the fragment guards concurrent engines.
+                    if self.config.permission.is_some() {
+                        if let Some(frag) = evolution.build_prompt_fragment(&self.config.cwd).await
+                        {
+                            prompt = match prompt {
+                                Some(base) => Some(format!("{base}\n\n{frag}")),
+                                None => Some(frag),
+                            };
+                        }
                     }
                 }
                 prompt

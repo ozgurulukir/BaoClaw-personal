@@ -1356,7 +1356,7 @@ function handleTabMessage(tab, msg) {
             updateSessionInfo(tab, cwd);
             if (tab.ws?.readyState === 1)
               tab.ws.send(
-                JSON.stringify({ action: "rpc", method: "sessionTokens" }),
+                JSON.stringify({ action: "rpc", method: "session.tokens" }),
               );
           }
           s.currentText = "";

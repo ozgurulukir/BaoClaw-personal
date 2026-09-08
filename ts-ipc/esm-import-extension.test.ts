@@ -89,7 +89,13 @@ const ALL_SOURCE_FILES = [
   "client.ts",
   "index.ts",
   "markdownRenderer.ts",
-  "types.ts",
+  "colors.ts",
+  "controlChannel.ts",
+  "daemon.ts",
+  "images.ts",
+  "logger.ts",
+  "security.ts",
+  "toolHealth.ts",
 ];
 
 /**
@@ -102,9 +108,13 @@ const KNOWN_BARE_SPECIFIERS: Record<string, string[]> = {
   "client.ts": ["net"],
   "index.ts": [],
   "markdownRenderer.ts": [],
-  "rustCore.ts": ["child_process"],
-  "streamHandler.ts": [],
-  "types.ts": [],
+  "colors.ts": [],
+  "controlChannel.ts": [],
+  "daemon.ts": ["fs", "os", "path"],
+  "images.ts": ["fs", "path"],
+  "logger.ts": ["fs"],
+  "security.ts": ["node:fs"],
+  "toolHealth.ts": [],
 };
 
 /**

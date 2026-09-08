@@ -351,7 +351,17 @@ impl MemoryStore {
 
     /// Build a system prompt fragment from all memories.
     /// Returns None if no memories exist.
+    ///
+    /// Re-reads the memory file first: MemoryTool appends to disk directly
+    /// (bypassing this store), so a fresh read is what makes mid-session
+    /// saves reach the model without a daemon restart.
     pub async fn build_prompt_fragment(&self) -> Option<String> {
+        {
+            let path = self.file_path.lock().await.clone();
+            let fresh = Self::read_file(&path);
+            let mut entries = self.entries.lock().await;
+            *entries = fresh;
+        }
         let entries = self.entries.lock().await;
         if entries.is_empty() {
             return None;

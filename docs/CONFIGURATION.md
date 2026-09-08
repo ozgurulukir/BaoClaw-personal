@@ -93,7 +93,7 @@ own API key, base URL, and context window:
 | `whatsapp.enabled`                                                        | boolean       | `false`  | Start the WhatsApp gateway                                                                                                                            |
 | `whatsapp.phoneNumber`                                                    | string        | —        | Bot's own phone number (E.164)                                                                                                                        |
 | `whatsapp.allowFrom`                                                      | string[]      | `[]`     | Allowed sender numbers, E.164 (empty = reject all)                                                                                                    |
-| `whatsapp.dmPolicy` / `whatsapp.groupPolicy`                              | string        | —        | `allow` / `deny` per conversation type                                                                                                                |
+| `whatsapp.dmPolicy` / `whatsapp.groupPolicy`                              | string        | —        | `allow` / `ignore` per conversation type (defaults: dm `allow`, group `ignore`)                                                                       |
 | `whatsapp.maxQueueSize`                                                   | number        | —        | Per-chat message queue bound                                                                                                                          |
 | `whatsapp.mediaEnabled` / `whatsapp.mediaMaxSizeMb`                       | bool / number | —        | Inbound media handling                                                                                                                                |
 | `whatsapp.reconnectMaxMs` / `whatsapp.proxy` / `whatsapp.sharedSessionId` | —             | —        | Reconnect backoff cap, proxy URL, daemon session tag                                                                                                  |
@@ -138,7 +138,7 @@ Environment variables:
 - `BAOCLAW_FEISHU_BOT_OPEN_ID` — Feishu gateway: bot identity used to ignore message echoes (per-deployment override)
 - `TELEGRAM_BOT_TOKEN` — fallback for `telegram.token`
 - `BAOCLAW_TELEGRAM_CWD` — Telegram gateway: project directory override
-- `BAOCLAW_WEB_TOKEN` / `BAOCLAW_WEB_HOST` / `BAOCLAW_WEB_PORT` — Web gateway auth token, bind host and port
+- `BAOCLAW_WEB_TOKEN` / `BAOCLAW_WEB_HOST` — Web gateway auth token and bind host (port comes from the `--port` flag)
 - `BAOCLAW_HOME` — Web gateway: `~/.baoclaw` location override
 - `XDG_RUNTIME_DIR` — daemon socket location on Linux
 

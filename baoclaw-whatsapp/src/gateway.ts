@@ -768,6 +768,11 @@ export class WhatsAppGateway {
       );
       this.ipcClient = client;
       this.daemonInfo = info;
+      setDaemonInfo({
+        pid: info.pid,
+        session_id: info.session_id,
+        cwd: info.cwd,
+      });
       await this.control?.close();
       this.control = await attachControlChannel({
         socketPath: info.socket,

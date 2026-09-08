@@ -443,7 +443,7 @@ pub(super) fn build_engine_tools(
         let mut all = engine_tools;
 
         all.push(Arc::new(ToolSearchTool::new(all.clone())));
-        eprintln!("Total tools registered: {} (including MCP)", all.len());
+        eprintln!("Total tools registered: {}", all.len());
         all
     };
 

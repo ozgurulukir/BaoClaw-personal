@@ -27,7 +27,9 @@ mod tests {
     #[tokio::test]
     async fn test_evolve_tool_create_skill() {
         let dir = tempdir().unwrap();
-        let engine = crate::engine::evolution::EvolutionEngine::new(dir.path());
+        let engine = crate::engine::evolution::EvolutionEngine::with_base_dir_for_test(
+            dir.path().to_path_buf(),
+        );
         let tool = EvolveTool::new(std::sync::Arc::new(engine));
         assert_eq!(tool.name(), "Evolve");
 
@@ -50,7 +52,9 @@ mod tests {
     #[tokio::test]
     async fn test_evolve_tool_rejects_traversal_skill_name() {
         let dir = tempdir().unwrap();
-        let engine = crate::engine::evolution::EvolutionEngine::new(dir.path());
+        let engine = crate::engine::evolution::EvolutionEngine::with_base_dir_for_test(
+            dir.path().to_path_buf(),
+        );
         let tool = EvolveTool::new(std::sync::Arc::new(engine));
         let ctx = make_ctx(dir.path());
         let progress = NoopProgress;
@@ -73,7 +77,9 @@ mod tests {
     #[tokio::test]
     async fn test_evolve_tool_improve_skill_rejects_traversal_skill_name() {
         let dir = tempdir().unwrap();
-        let engine = crate::engine::evolution::EvolutionEngine::new(dir.path());
+        let engine = crate::engine::evolution::EvolutionEngine::with_base_dir_for_test(
+            dir.path().to_path_buf(),
+        );
         let tool = EvolveTool::new(std::sync::Arc::new(engine));
         let ctx = make_ctx(dir.path());
         let progress = NoopProgress;

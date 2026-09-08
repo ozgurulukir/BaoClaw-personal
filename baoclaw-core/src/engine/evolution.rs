@@ -473,12 +473,17 @@ impl EvolutionEngine {
     }
 
     /// Check if there's a pending self-evaluation nudge.
+    ///
+    /// Consumption is atomic: `rename` succeeds for exactly one concurrent
+    /// reader, so parallel engine submissions can never double-consume (or
+    /// both lose) the same nudge.
     pub async fn check_pending_eval(&self) -> Option<Value> {
         let dir = self.base_dir.lock().await;
         let nudge_path = dir.join("pending_eval.json");
-        if nudge_path.exists() {
-            let content = std::fs::read_to_string(&nudge_path).ok()?;
-            let _ = std::fs::remove_file(&nudge_path); // consume the nudge
+        let consumed_path = dir.join("pending_eval.json.consumed");
+        if std::fs::rename(&nudge_path, &consumed_path).is_ok() {
+            let content = std::fs::read_to_string(&consumed_path).ok()?;
+            let _ = std::fs::remove_file(&consumed_path);
             serde_json::from_str(&content).ok()
         } else {
             None
@@ -493,11 +498,12 @@ impl EvolutionEngine {
         // Check for pending session review (from previous session's close hook)
         let dir = self.base_dir.lock().await;
         let review_path = dir.join(PENDING_REVIEW_FILE);
-        if review_path.exists() {
-            if let Ok(content) = std::fs::read_to_string(&review_path) {
+        // Atomic consumption: rename wins for exactly one concurrent reader.
+        let consumed_path = dir.join("pending_review.json.consumed");
+        if std::fs::rename(&review_path, &consumed_path).is_ok() {
+            if let Ok(content) = std::fs::read_to_string(&consumed_path) {
                 if let Ok(review) = serde_json::from_str::<Value>(&content) {
-                    // Consume the review file
-                    let _ = std::fs::remove_file(&review_path);
+                    let _ = std::fs::remove_file(&consumed_path);
 
                     let session_id = review
                         .get("session_id")

@@ -395,16 +395,6 @@ impl Default for PermissionManager {
 }
 
 impl ToolPermissionContext {
-    /// Auto-allow knob for a channel; a missing entry means ON so legacy
-    /// configs and fresh installs keep prompting-free behavior for channels
-    /// that used to auto-allow.
-    pub fn is_channel_auto_allow(&self, channel: &str) -> bool {
-        self.auto_allow_channels
-            .get(channel)
-            .copied()
-            .unwrap_or(true)
-    }
-
     /// The prompt timeout as a Duration, guarding against a hand-edited
     /// zero value (which would deny every prompt instantly).
     pub fn ask_timeout_duration(&self) -> std::time::Duration {
@@ -883,15 +873,14 @@ mod tests {
     #[test]
     fn auto_allow_channel_defaults_on_and_round_trips() {
         let ctx = empty_context();
-        // Missing key => ON (legacy behavior preserved).
-        assert!(ctx.is_channel_auto_allow("tui"));
+        // Missing key => empty map; clients (the TUI, via permissions.info)
+        // treat a missing channel as auto-allow ON (legacy behavior).
+        let serialized = serde_json::to_value(&ctx).expect("serialize");
+        assert_eq!(serialized["auto_allow_channels"], serde_json::json!({}));
 
         let ctx: ToolPermissionContext =
             serde_json::from_value(serde_json::json!({"auto_allow_channels": {"tui": false}}))
                 .expect("knob-only json must deserialize");
-        assert!(!ctx.is_channel_auto_allow("tui"));
-        assert!(ctx.is_channel_auto_allow("slack"));
-
         let serialized = serde_json::to_value(&ctx).expect("serialize");
         assert_eq!(serialized["auto_allow_channels"]["tui"], false);
     }
