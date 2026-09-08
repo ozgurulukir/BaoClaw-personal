@@ -584,6 +584,7 @@ export class WhatsAppGateway {
             input?: unknown;
             description?: string;
             ask_timeout_secs?: number;
+            target_path?: string;
           };
           if (jid) {
             // Mirror the daemon's exact auto-deny window for this ask
@@ -601,6 +602,7 @@ export class WhatsAppGateway {
               pr.tool_name,
               desc,
               timeoutSecs,
+              pr.target_path,
             );
             try {
               await sock.sendMessage(jid, { text });

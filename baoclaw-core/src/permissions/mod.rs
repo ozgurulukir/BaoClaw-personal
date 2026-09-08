@@ -19,6 +19,16 @@ use manager::PermissionManager;
 /// to later calls without a restart.
 pub type GrantedSearchDirs = Arc<std::sync::RwLock<Vec<std::path::PathBuf>>>;
 
+/// Live allow-list of extra directories the FileWrite/FileEdit tools may
+/// write beyond the project cwd — the write twin of [`GrantedSearchDirs`],
+/// kept as a DISTINCT list so a read grant can never become a write grant.
+/// Seeded at startup from `ToolPermissionContext::additional_write_dirs`
+/// (config `extra["permissions"]`) plus the default `~/.baoclaw` parity,
+/// grown by interactive "Always allow" grants in the executor, and read by
+/// the tools themselves on every call. Whole-tool allow rules never extend
+/// this list — only interactive directory grants do.
+pub type GrantedWriteDirs = Arc<std::sync::RwLock<Vec<std::path::PathBuf>>>;
+
 /// The prompt timeout and grant-persistence settings are NOT carried here —
 /// they live on `ToolPermissionContext` (config `extra["permissions"]`) and
 /// are read live from the shared manager at each prompt, so config changes
@@ -30,6 +40,9 @@ pub struct PermissionBridge {
     /// Out-of-cwd directories Glob/Grep are allowed to search (see
     /// [`GrantedSearchDirs`]).
     pub granted_dirs: GrantedSearchDirs,
+    /// Out-of-cwd directories FileWrite/FileEdit are allowed to write (see
+    /// [`GrantedWriteDirs`]).
+    pub granted_write_dirs: GrantedWriteDirs,
 }
 
 /// Write the current permission rules to ~/.baoclaw/config.json

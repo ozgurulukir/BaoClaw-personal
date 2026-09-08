@@ -84,25 +84,38 @@ function escapeHtml(text: string): string {
 }
 
 /**
- * Build the HTML permission prompt: tool name + truncated input preview +
- * keyword hints for the reply fallback.
+ * Build the HTML permission prompt: tool name + optional out-of-boundary
+ * target + truncated input preview + keyword hints for the reply fallback.
  *
  * @param timeoutSecs The daemon's auto-deny window for this ask, rendered in
  *                    the hint so the user sees the real schedule.
+ * @param targetPath  Resolved absolute path when the prompt exists because
+ *                    the target falls outside the project dirs (the daemon's
+ *                    `target_path` event field), shown prominently so the
+ *                    user knows what the decision actually opens up.
  */
 export function formatPermissionRequest(
   toolName: string,
   inputPreview: string,
   timeoutSecs: number,
+  targetPath?: string,
 ): string {
   const preview = inputPreview ? escapeHtml(inputPreview) : "—";
-  return [
+  const lines = [
     "🔐 <b>Permission Request</b>",
     `Tool: <code>${escapeHtml(toolName)}</code>`,
+  ];
+  if (targetPath) {
+    lines.push(
+      `Target: <code>${escapeHtml(targetPath)}</code> (outside project dirs)`,
+    );
+  }
+  lines.push(
     `Input: <code>${preview}</code>`,
     "",
     `Reply <b>y</b> to allow / <b>a</b> to always allow / <b>n</b> to deny (auto-denied after ${timeoutSecs}s)`,
-  ].join("\n");
+  );
+  return lines.join("\n");
 }
 
 /** Build the inline keyboard markup for a fresh prompt. */

@@ -311,6 +311,7 @@ async function main() {
           tool_name: string;
           input?: unknown;
           ask_timeout_secs?: number;
+          target_path?: string;
         };
         const preview = JSON.stringify(pr.input ?? {}).slice(0, PREVIEW_CHARS);
         // Mirror the daemon's exact auto-deny window for this ask (fallback
@@ -323,6 +324,7 @@ async function main() {
               pr.tool_name || "unknown",
               preview,
               timeoutSecs,
+              pr.target_path,
             ),
             {
               parse_mode: "HTML",

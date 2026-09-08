@@ -377,6 +377,7 @@ pub(super) fn build_engine_tools(
     Arc<engine::evolution::EvolutionEngine>,
     Vec<Arc<dyn tools::Tool>>,
     permissions::GrantedSearchDirs,
+    permissions::GrantedWriteDirs,
     engine::tool_health::ToolHealthHandle,
 ) {
     // Daemon-wide tool-health tracker: failure stats accumulate across every
@@ -394,6 +395,12 @@ pub(super) fn build_engine_tools(
     // grants apply without a restart.
     let granted_search_dirs = permissions::GrantedSearchDirs::default();
 
+    // Write twin: shared allow-list of extra directories FileWrite/FileEdit
+    // may write. Kept DISTINCT from the search list so a read grant can
+    // never widen the write boundary; seeded (with ~/.baoclaw parity) after
+    // the permission context loads.
+    let granted_write_dirs = permissions::GrantedWriteDirs::default();
+
     // Create evolution engine for self-improvement
     let evolution_engine = Arc::new(engine::evolution::EvolutionEngine::new(
         std::path::Path::new(cwd_str),
@@ -408,8 +415,8 @@ pub(super) fn build_engine_tools(
     let core_tools: Vec<Arc<dyn tools::Tool>> = vec![
         Arc::new(bash_tool),
         Arc::new(FileReadTool::new(additional_dirs.clone())),
-        Arc::new(FileWriteTool::new(additional_dirs.clone())),
-        Arc::new(FileEditTool::new(additional_dirs.clone())),
+        Arc::new(FileWriteTool::new(vec![]).with_granted_dirs(Arc::clone(&granted_write_dirs))),
+        Arc::new(FileEditTool::new(vec![]).with_granted_dirs(Arc::clone(&granted_write_dirs))),
         Arc::new(tools::builtins::GlobTool::with_granted_dirs(Arc::clone(
             &granted_search_dirs,
         ))),
@@ -509,6 +516,7 @@ pub(super) fn build_engine_tools(
         evolution_engine,
         engine_tools,
         granted_search_dirs,
+        granted_write_dirs,
         tool_health,
     )
 }
@@ -621,6 +629,7 @@ pub(super) async fn assemble_shared_state(
     api_client: Arc<UnifiedClient>,
     engine_tools: Vec<Arc<dyn tools::Tool>>,
     granted_search_dirs: permissions::GrantedSearchDirs,
+    granted_write_dirs: permissions::GrantedWriteDirs,
     tool_health: engine::tool_health::ToolHealthHandle,
     evolution_engine: Arc<engine::evolution::EvolutionEngine>,
     memory_store: Arc<engine::memory::MemoryStore>,
@@ -687,6 +696,20 @@ pub(super) async fn assemble_shared_state(
             }
         }
     }
+    // Seed the write-dir allow-list the same way: ~/.baoclaw parity (the
+    // static roots FileWrite/FileEdit used to get) plus config
+    // (`permissions.additional_write_dirs`). Grown live by interactive
+    // "Always allow" grants in the executor.
+    {
+        let home_dir = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
+        let mut dirs = granted_write_dirs.write().unwrap();
+        dirs.push(std::path::PathBuf::from(home_dir).join(".baoclaw"));
+        if let Ok(ctx) = permission_manager.try_read() {
+            for d in &ctx.get_context().additional_write_dirs {
+                dirs.push(std::path::PathBuf::from(d));
+            }
+        }
+    }
 
     // Create TaskManager for background task execution
     let task_manager = Arc::new(TaskManager::new(
@@ -720,6 +743,7 @@ pub(super) async fn assemble_shared_state(
         permission_gate,
         permission_manager,
         granted_dirs,
+        granted_write_dirs,
         tool_health,
         task_manager,
         state_manager,

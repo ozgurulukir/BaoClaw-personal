@@ -73,20 +73,27 @@ export function parsePermissionReply(text: string): PermissionDecision | null {
  *
  * @param timeoutSecs The daemon's auto-deny window for this ask, rendered in
  *                    the hint so the user sees the real schedule.
+ * @param targetPath  Resolved absolute path when the prompt exists because
+ *                    the target falls outside the project dirs (the daemon's
+ *                    `target_path` event field).
  */
 export function formatPermissionRequest(
   toolName: string,
   inputPreview: string,
   timeoutSecs: number,
+  targetPath?: string,
 ): string {
   const preview = inputPreview || "—";
-  return [
-    "🔐 Permission Request",
-    `Tool: ${toolName}`,
+  const lines = ["🔐 Permission Request", `Tool: ${toolName}`];
+  if (targetPath) {
+    lines.push(`Target: ${targetPath} (outside project dirs)`);
+  }
+  lines.push(
     `Input: ${preview}`,
     "",
     `Reply yes to allow / always to always allow this tool / no to deny (auto-denied after ${timeoutSecs}s)`,
-  ].join("\n");
+  );
+  return lines.join("\n");
 }
 
 /**
@@ -99,8 +106,12 @@ export function buildPermissionCard(
   toolName: string,
   inputPreview: string,
   timeoutSecs: number,
+  targetPath?: string,
 ): Record<string, unknown> {
   const preview = inputPreview || "—";
+  const targetLine = targetPath
+    ? `**Target:** ${targetPath} (outside project dirs)\n`
+    : "";
   return {
     config: { wide_screen_mode: false },
     header: {
@@ -112,7 +123,7 @@ export function buildPermissionCard(
         tag: "div",
         text: {
           tag: "lark_md",
-          content: `**Tool:** ${toolName}\n**Input:** ${preview}`,
+          content: `**Tool:** ${toolName}\n${targetLine}**Input:** ${preview}`,
         },
       },
       { tag: "hr" },

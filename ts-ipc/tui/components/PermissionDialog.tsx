@@ -52,6 +52,11 @@ export const PermissionDialog: React.FC<PermissionDialogProps> = ({
       <Text color={colors.text.primary} bold>
         {request.toolName}
       </Text>
+      {request.targetPath && (
+        <Text color={colors.status.warning} wrap="truncate-end">
+          ⚠ Outside project dirs: {request.targetPath}
+        </Text>
+      )}
       {request.inputPreview && (
         <Text color={colors.text.dim} wrap="truncate-end">
           {request.inputPreview}

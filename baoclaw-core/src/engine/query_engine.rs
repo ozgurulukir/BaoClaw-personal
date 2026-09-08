@@ -117,6 +117,12 @@ pub enum EngineEvent {
         /// The auto-deny window the daemon itself will enforce for THIS ask —
         /// read live per prompt, so clients can mirror the same schedule.
         ask_timeout_secs: u64,
+        /// Resolved absolute target when the prompt exists because it falls
+        /// outside the tool's boundary (Glob/Grep search or FileWrite/FileEdit
+        /// write). Optional; lets gateways show the real path instead of the
+        /// raw input JSON blob.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        target_path: Option<String>,
     },
     #[serde(rename = "progress")]
     Progress { tool_use_id: String, data: Value },
@@ -1409,6 +1415,7 @@ mod tests {
             input: json!({"path": "/tmp/test.txt"}),
             tool_use_id: "tu_2".to_string(),
             ask_timeout_secs: 300,
+            target_path: None,
         };
         let json = serde_json::to_value(&event).unwrap();
         assert_eq!(json["type"], "permission_request");

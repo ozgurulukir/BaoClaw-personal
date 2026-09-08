@@ -53,6 +53,9 @@ export interface PendingPermission {
   inputPreview: string;
   /** Daemon's auto-deny window (seconds) for THIS ask, when the event carried it. */
   askTimeoutSecs?: number;
+  /** Resolved out-of-boundary target (daemon `target_path`), when the prompt
+   * exists because the target falls outside the project dirs. */
+  targetPath?: string;
 }
 
 export type ActionType =

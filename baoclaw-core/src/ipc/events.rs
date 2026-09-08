@@ -98,12 +98,14 @@ mod tests {
             input: json!({"path": "/tmp/test.txt", "content": "hello"}),
             tool_use_id: "tu_004".to_string(),
             ask_timeout_secs: 300,
+            target_path: Some("/tmp/test.txt".to_string()),
         };
         let notif = engine_event_to_notification(&event);
         assert_eq!(notif.method, "stream/event");
         assert_eq!(notif.params["type"], "permission_request");
         assert_eq!(notif.params["tool_name"], "FileWrite");
         assert_eq!(notif.params["ask_timeout_secs"], 300);
+        assert_eq!(notif.params["target_path"], "/tmp/test.txt");
     }
 
     #[test]

@@ -369,22 +369,35 @@ class DaemonBridge {
           1,
           (event as { ask_timeout_secs?: number }).ask_timeout_secs ?? 300,
         );
+        // Resolved out-of-boundary target, when the prompt exists because of
+        // one (the daemon's `target_path` event field).
+        const targetPath = (event as { target_path?: string }).target_path;
         // Card-first (rich buttons); an older lark-cli that rejects
         // interactive content degrades to the plain-text prompt with the
         // same reply keywords.
         const promptSend: Promise<void> = cardActionSupport
           ? sendFeishuCard(
               chatId,
-              buildPermissionCard(toolName, preview, timeoutSecs),
+              buildPermissionCard(toolName, preview, timeoutSecs, targetPath),
             ).catch(() =>
               sendFeishuMessage(
                 chatId,
-                formatPermissionRequest(toolName, preview, timeoutSecs),
+                formatPermissionRequest(
+                  toolName,
+                  preview,
+                  timeoutSecs,
+                  targetPath,
+                ),
               ),
             )
           : sendFeishuMessage(
               chatId,
-              formatPermissionRequest(toolName, preview, timeoutSecs),
+              formatPermissionRequest(
+                toolName,
+                preview,
+                timeoutSecs,
+                targetPath,
+              ),
             );
         promptSend.catch(() => {});
         this.permissionManager.registerRequest(

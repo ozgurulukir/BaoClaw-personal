@@ -550,7 +550,7 @@ function addStatsBar(result) {
   scrollToBottom();
 }
 
-function addPermissionRequest(toolName, input, toolUseId) {
+function addPermissionRequest(toolName, input, toolUseId, targetPath) {
   const s3 = getActiveState();
   if (s3._currentTextEl) s3._currentTextEl = null;
   const body = ensureAssistantMessage(),
@@ -563,7 +563,13 @@ function addPermissionRequest(toolName, input, toolUseId) {
   div.innerHTML =
     '<div class="perm-title">\u26A0 Permission: ' +
     esc(toolName) +
-    '</div><div style="color:var(--text-dim);margin-bottom:8px;font-size:12px">' +
+    "</div>" +
+    (targetPath
+      ? '<div style="color:var(--warning,#f0ad4e);margin-bottom:4px;font-size:12px">\uD83C\uDFAF ' +
+        esc(targetPath) +
+        " (outside project dirs)</div>"
+      : "") +
+    '<div style="color:var(--text-dim);margin-bottom:8px;font-size:12px">' +
     esc(ps) +
     '</div><button class="allow" data-d="allow">Allow</button> <button class="allow" data-d="allow_always">Always</button> <button class="deny" data-d="deny">Deny</button>';
   div.querySelectorAll("button").forEach((b) => {
@@ -1377,7 +1383,12 @@ function handleTabMessage(tab, msg) {
         }
         case "permission_request":
           if (isActive())
-            addPermissionRequest(e.tool_name, e.input, e.tool_use_id);
+            addPermissionRequest(
+              e.tool_name,
+              e.input,
+              e.tool_use_id,
+              e.target_path,
+            );
           break;
         case "result":
           if (e.total_cost_usd !== undefined) s.totalCost = e.total_cost_usd;

@@ -458,6 +458,32 @@ allow" buttons map to the same directory-scoped grant — never a whole-tool
 opening. Headless contexts (cron, sub-agents) have no one to ask: they get
 cwd + config dirs only, and anything else fails closed as before.
 
+### FileWrite/FileEdit out-of-cwd writes (`additional_write_dirs`)
+
+The write twin of the search flow above. The file-write tools can only write
+inside the project cwd **plus** `permissions.additional_write_dirs` (and the
+default `~/.baoclaw`). A write to any other path used to be a trap: the
+permission layer asked, the user allowed, and the tool's path validator then
+rejected the path anyway. Now a write whose target falls outside the boundary
+triggers a prompt that carries the resolved target path (the `target_path`
+field on the `permission_request` event; every gateway renders it, e.g.
+`Target: /tmp/x (outside project dirs)`):
+
+- **Allow** grants that exact target for the single call (one-shot, removed
+  when the call finishes).
+- **Always allow** grants the target's **parent directory** — recorded live
+  in `additional_write_dirs` and persisted to config when `persist_grants`
+  is on. Never the whole tool.
+- Whole-tool allow rules (`FileWrite → *`) still skip the prompt but can
+  **never** extend the write boundary: without an interactive grant the
+  validator rejects the path as before.
+- Write grants live in a list **distinct** from `additional_search_dirs`
+  (`GrantedWriteDirs`), so a read grant can never widen the write boundary,
+  and the tools re-run the full validation (including the symlink-escape
+  check) at call time. Headless contexts stay cwd + config dirs only.
+- `FileRead`/`NotebookEdit` are not part of this flow yet: they keep their
+  static boundaries (out-of-cwd reads still fail without a prompt).
+
 ### The permissions field in ~/.baoclaw/config.json
 
 ```json
@@ -465,6 +491,7 @@ cwd + config dirs only, and anything else fails closed as before.
   "permissions": {
     "mode": "Default",
     "additional_search_dirs": ["/opt/shared-data"],
+    "additional_write_dirs": ["/tmp/build-output"],
     "always_allow_rules": {
       "builtin": [
         { "tool_name": "Read", "rule_content": null },

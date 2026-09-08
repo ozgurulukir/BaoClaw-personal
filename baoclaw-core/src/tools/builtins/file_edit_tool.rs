@@ -12,11 +12,25 @@ const MAX_FILE_BYTES: u64 = 10 * 1024 * 1024;
 /// FileEditTool - finds and replaces a unique string in a file
 pub struct FileEditTool {
     additional_dirs: Vec<PathBuf>,
+    /// Live out-of-cwd write grants (config seed + interactive approvals);
+    /// consulted on every call so grants apply without a restart. The write
+    /// twin of Glob/Grep's granted-dirs sharing.
+    granted_dirs: Option<crate::permissions::GrantedWriteDirs>,
 }
 
 impl FileEditTool {
     pub fn new(additional_dirs: Vec<PathBuf>) -> Self {
-        Self { additional_dirs }
+        Self {
+            additional_dirs,
+            granted_dirs: None,
+        }
+    }
+
+    /// Builder: share the daemon-wide granted-write-dirs list so interactive
+    /// out-of-cwd write grants apply to later calls without a restart.
+    pub fn with_granted_dirs(mut self, granted_dirs: crate::permissions::GrantedWriteDirs) -> Self {
+        self.granted_dirs = Some(granted_dirs);
+        self
     }
 }
 
@@ -121,9 +135,14 @@ impl Tool for FileEditTool {
             .and_then(|v| v.as_str())
             .ok_or_else(|| ToolError::ExecutionFailed("Missing 'new_string' field".to_string()))?;
 
-        let resolved =
-            resolve_and_validate_path(file_path_str, &context.cwd, &self.additional_dirs)
-                .map_err(ToolError::ExecutionFailed)?;
+        let mut extra_dirs = self.additional_dirs.clone();
+        if let Some(granted) = &self.granted_dirs {
+            if let Ok(dirs) = granted.read() {
+                extra_dirs.extend(dirs.iter().cloned());
+            }
+        }
+        let resolved = resolve_and_validate_path(file_path_str, &context.cwd, &extra_dirs)
+            .map_err(ToolError::ExecutionFailed)?;
         let size = tokio::fs::metadata(&resolved)
             .await
             .map_err(|e| ToolError::ExecutionFailed(format!("Failed to inspect file: {}", e)))?

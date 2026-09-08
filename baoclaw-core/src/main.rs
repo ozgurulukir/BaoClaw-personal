@@ -47,6 +47,9 @@ struct SharedState {
     permission_manager: Arc<tokio::sync::RwLock<permissions::manager::PermissionManager>>,
     /// Out-of-cwd directories Glob/Grep may search (config seed + live grants).
     granted_dirs: permissions::GrantedSearchDirs,
+    /// Out-of-cwd directories FileWrite/FileEdit may write (config seed +
+    /// live grants). Distinct list: read grants never widen the write boundary.
+    granted_write_dirs: permissions::GrantedWriteDirs,
     /// Daemon-wide tool-health tracker (failure accumulation + Disabled blocking).
     tool_health: std::sync::Arc<engine::tool_health::ToolHealthTracker>,
     task_manager: Arc<TaskManager>,
@@ -287,6 +290,7 @@ fn build_shared_engine(
             manager: Arc::clone(&shared.permission_manager),
             gate: shared.permission_gate.clone(),
             granted_dirs: Arc::clone(&shared.granted_dirs),
+            granted_write_dirs: Arc::clone(&shared.granted_write_dirs),
         }),
     })
 }
@@ -1087,7 +1091,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (baoclaw_config, api_client) = startup::load_config_and_api_client();
 
     // Build engine tools (core tools + AgentTool + ToolSearchTool)
-    let (evolution_engine, engine_tools, granted_search_dirs, tool_health) =
+    let (evolution_engine, engine_tools, granted_search_dirs, granted_write_dirs, tool_health) =
         startup::build_engine_tools(&opts.cwd_str, &opts.sandbox_config, &api_client);
 
     // Load skill prompt + long-term memory, combine into append_system_prompt
@@ -1108,6 +1112,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         api_client,
         engine_tools,
         granted_search_dirs,
+        granted_write_dirs,
         tool_health,
         evolution_engine,
         memory_store,

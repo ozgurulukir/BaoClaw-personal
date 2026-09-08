@@ -141,6 +141,7 @@ proptest! {
             let ctx = ToolPermissionContext {
                 mode: PermissionMode::Default,
                 additional_search_dirs: Vec::new(),
+                additional_write_dirs: Vec::new(),
                 always_allow_rules: HashMap::new(),
                 always_deny_rules: deny_rules,
                 always_ask_rules: HashMap::new(),
@@ -169,6 +170,7 @@ proptest! {
                 manager: Arc::new(tokio::sync::RwLock::new(permission_manager)),
                 gate: permission_gate,
                 granted_dirs: std::sync::Arc::new(std::sync::RwLock::new(Vec::new())),
+                granted_write_dirs: std::sync::Arc::new(std::sync::RwLock::new(Vec::new())),
             };
             let permission_channels = PermissionChannels::new(bridge, event_tx);
 

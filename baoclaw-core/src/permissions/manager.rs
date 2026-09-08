@@ -32,6 +32,14 @@ pub struct ToolPermissionContext {
     /// the executor consults the same list before deciding to prompt.
     #[serde(default)]
     pub additional_search_dirs: Vec<String>,
+    /// Extra directories the FileWrite/FileEdit tools may WRITE beyond the
+    /// project cwd — the write twin of `additional_search_dirs`. Grown only
+    /// by interactive "Always allow" grants on out-of-cwd write prompts
+    /// (live, and persisted when `persist_grants`); whole-tool allow rules
+    /// never extend it, so an auto-allowed tool still cannot escape the
+    /// write boundary.
+    #[serde(default)]
+    pub additional_write_dirs: Vec<String>,
     pub always_allow_rules: ToolPermissionRulesBySource,
     pub always_deny_rules: ToolPermissionRulesBySource,
     pub always_ask_rules: ToolPermissionRulesBySource,
@@ -368,6 +376,7 @@ impl Default for ToolPermissionContext {
         Self {
             mode: PermissionMode::Default,
             additional_search_dirs: Vec::new(),
+            additional_write_dirs: Vec::new(),
             always_allow_rules: HashMap::new(),
             always_deny_rules: HashMap::new(),
             always_ask_rules: HashMap::new(),
@@ -411,6 +420,7 @@ mod tests {
         ToolPermissionContext {
             mode: PermissionMode::Default,
             additional_search_dirs: Vec::new(),
+            additional_write_dirs: Vec::new(),
             always_allow_rules: HashMap::new(),
             always_deny_rules: HashMap::new(),
             always_ask_rules: HashMap::new(),
@@ -853,8 +863,21 @@ mod tests {
         .expect("partial context must deserialize");
         assert_eq!(ctx.mode, PermissionMode::Default);
         assert!(ctx.additional_search_dirs.is_empty());
+        assert!(ctx.additional_write_dirs.is_empty());
         assert_eq!(ctx.always_allow_rules["user"].len(), 1);
         assert!(!ctx.is_bypass_permissions_mode_available);
+    }
+
+    #[test]
+    fn additional_write_dirs_round_trip() {
+        let ctx: ToolPermissionContext = serde_json::from_value(serde_json::json!({
+            "additional_write_dirs": ["/tmp/build-output"]
+        }))
+        .expect("write dirs must deserialize");
+        assert_eq!(
+            ctx.additional_write_dirs,
+            vec!["/tmp/build-output".to_string()]
+        );
     }
 
     #[test]

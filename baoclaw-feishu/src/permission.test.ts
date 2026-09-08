@@ -245,3 +245,18 @@ test("handleResponse returns 'late' for a keyword after an explicit decision", a
   assert.equal(await pm.handleResponse("chat1", "yes", control), "late");
   pm.cleanup();
 });
+
+test("formatPermissionRequest shows the out-of-boundary target", () => {
+  const text = formatPermissionRequest(
+    "FileWrite",
+    "{}",
+    300,
+    "/tmp/pr-review-228.md",
+  );
+  assert.match(
+    text,
+    /Target: \/tmp\/pr-review-228\.md \(outside project dirs\)/,
+  );
+  const plain = formatPermissionRequest("Bash", "{}", 300);
+  assert.ok(!plain.includes("outside project dirs"));
+});

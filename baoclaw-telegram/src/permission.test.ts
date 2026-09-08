@@ -133,3 +133,19 @@ test("isRecentlyResolved tracks resolution from expiry and explicit resolve", as
   mgr.cleanup();
   assert.equal(mgr.isRecentlyResolved(1), false); // shutdown wipes history
 });
+
+test("formatPermissionRequest highlights the out-of-boundary target", () => {
+  const text = formatPermissionRequest(
+    "FileWrite",
+    '{"file_path":"/tmp/x"}',
+    300,
+    "/tmp/pr-review-228.md",
+  );
+  assert.match(
+    text,
+    /Target: <code>\/tmp\/pr-review-228\.md<\/code> \(outside project dirs\)/,
+  );
+  // No target → no target line.
+  const plain = formatPermissionRequest("Bash", "{}", 300);
+  assert.ok(!plain.includes("outside project dirs"));
+});

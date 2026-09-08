@@ -106,16 +106,20 @@ export class PermissionManager {
     toolName: string,
     description?: string,
     timeoutSecs: number = PERMISSION_TIMEOUT_MS / 1000,
+    targetPath?: string,
   ): string {
     const desc = description?.trim() || "None";
-    return [
-      "🔐 *Permission Request*",
-      `Tool: ${toolName}`,
+    const lines = ["🔐 *Permission Request*", `Tool: ${toolName}`];
+    if (targetPath) {
+      lines.push(`Target: ${targetPath} (outside project dirs)`);
+    }
+    lines.push(
       `Description: ${desc}`,
       "",
       "Reply *yes* to allow, *always* to always allow this tool, or *no* to deny",
       `(auto-denied after ${timeoutSecs} seconds)`,
-    ].join("\n");
+    );
+    return lines.join("\n");
   }
 
   // ── Registration ──────────────────────────────────────────────────────────

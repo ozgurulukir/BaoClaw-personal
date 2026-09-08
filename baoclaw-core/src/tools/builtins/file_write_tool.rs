@@ -12,11 +12,25 @@ const MAX_FILE_BYTES: usize = 10 * 1024 * 1024;
 /// FileWriteTool - writes content to a file, creating parent dirs if needed
 pub struct FileWriteTool {
     additional_dirs: Vec<PathBuf>,
+    /// Live out-of-cwd write grants (config seed + interactive approvals);
+    /// consulted on every call so grants apply without a restart. The write
+    /// twin of Glob/Grep's granted-dirs sharing.
+    granted_dirs: Option<crate::permissions::GrantedWriteDirs>,
 }
 
 impl FileWriteTool {
     pub fn new(additional_dirs: Vec<PathBuf>) -> Self {
-        Self { additional_dirs }
+        Self {
+            additional_dirs,
+            granted_dirs: None,
+        }
+    }
+
+    /// Builder: share the daemon-wide granted-write-dirs list so interactive
+    /// out-of-cwd write grants apply to later calls without a restart.
+    pub fn with_granted_dirs(mut self, granted_dirs: crate::permissions::GrantedWriteDirs) -> Self {
+        self.granted_dirs = Some(granted_dirs);
+        self
     }
 }
 
@@ -104,9 +118,14 @@ impl Tool for FileWriteTool {
             )));
         }
 
-        let resolved =
-            resolve_and_validate_path(file_path_str, &context.cwd, &self.additional_dirs)
-                .map_err(ToolError::ExecutionFailed)?;
+        let mut extra_dirs = self.additional_dirs.clone();
+        if let Some(granted) = &self.granted_dirs {
+            if let Ok(dirs) = granted.read() {
+                extra_dirs.extend(dirs.iter().cloned());
+            }
+        }
+        let resolved = resolve_and_validate_path(file_path_str, &context.cwd, &extra_dirs)
+            .map_err(ToolError::ExecutionFailed)?;
 
         // Backup existing file before overwriting
         if let Err(e) = backup_file_before_write(&resolved, &context.cwd).await {
@@ -181,6 +200,61 @@ mod tests {
 
         assert!(!result.is_error);
         assert_eq!(std::fs::read_to_string(&file_path).unwrap(), "hello world");
+    }
+
+    #[tokio::test]
+    async fn test_write_accepts_granted_dir() {
+        let cwd = TempDir::new().unwrap();
+        let granted_root = TempDir::new().unwrap();
+        let granted: crate::permissions::GrantedWriteDirs =
+            Arc::new(std::sync::RwLock::new(vec![granted_root
+                .path()
+                .to_path_buf()]));
+        let tool = FileWriteTool::new(vec![]).with_granted_dirs(granted);
+        let ctx = make_context(cwd.path());
+        let progress = NoopProgress;
+
+        let target = granted_root.path().join("granted.txt");
+        let result = tool
+            .call(
+                json!({
+                    "file_path": target.to_str().unwrap(),
+                    "content": "granted write"
+                }),
+                &ctx,
+                &progress,
+            )
+            .await
+            .unwrap();
+
+        assert!(!result.is_error);
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "granted write");
+    }
+
+    #[tokio::test]
+    async fn test_write_rejects_out_of_cwd_without_grant() {
+        let cwd = TempDir::new().unwrap();
+        let outside = TempDir::new().unwrap();
+        let tool = FileWriteTool::new(vec![]);
+        let ctx = make_context(cwd.path());
+        let progress = NoopProgress;
+
+        let target = outside.path().join("denied.txt");
+        let err = tool
+            .call(
+                json!({
+                    "file_path": target.to_str().unwrap(),
+                    "content": "nope"
+                }),
+                &ctx,
+                &progress,
+            )
+            .await
+            .unwrap_err();
+
+        assert!(err
+            .to_string()
+            .contains("outside the allowed working directories"));
     }
 
     #[tokio::test]

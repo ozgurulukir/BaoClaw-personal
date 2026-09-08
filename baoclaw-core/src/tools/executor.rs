@@ -230,6 +230,7 @@ pub async fn execute_tool_with_permission(
             // MUST prompt — reads through those tools are how an agent
             // looks around the rest of the filesystem.
             let mut search_grant: Option<std::path::PathBuf> = None;
+            let mut write_grant: Option<std::path::PathBuf> = None;
             if tool.is_read_only(&request.input) {
                 match out_of_cwd_search_target(&tool_name, &request.input, &context.cwd) {
                     None => {
@@ -250,6 +251,20 @@ pub async fn execute_tool_with_permission(
                         // Fall through to the interactive prompt below.
                     }
                 }
+            } else if let Some(target) =
+                out_of_cwd_write_target(&tool_name, &request.input, &context.cwd)
+            {
+                // The write validator would reject this target. Pre-approved
+                // (config knob or a prior Always grant) → the tool accepts
+                // it; skip the prompt.
+                if dir_granted(&permission.bridge.granted_write_dirs, &target) {
+                    return call_tool_and_wrap(tool, request, context, progress).await;
+                }
+                write_grant = Some(target);
+                // Fall through to the interactive prompt below — an
+                // out-of-boundary write needs an explicit human decision,
+                // which is also the only thing that can extend the write
+                // boundary (whole-tool allow rules never do).
             }
 
             // Live knob read: every prompt uses the current config values
@@ -261,6 +276,13 @@ pub async fn execute_tool_with_permission(
                 (ctx.ask_timeout_duration(), ctx.persist_grants)
             };
 
+            // Resolved out-of-boundary target (when the prompt exists because
+            // of one) so gateways can show the real path.
+            let target_path = search_grant
+                .as_ref()
+                .or(write_grant.as_ref())
+                .map(|p| p.to_string_lossy().to_string());
+
             // Send PermissionRequest event to clients — carrying the exact
             // auto-deny window this ask is parked under, so gateway prompts
             // can mirror the daemon's schedule instead of guessing.
@@ -271,6 +293,7 @@ pub async fn execute_tool_with_permission(
                     input: request.input.clone(),
                     tool_use_id: tool_use_id.clone(),
                     ask_timeout_secs: ask_timeout.as_secs().max(1),
+                    target_path,
                 })
                 .await;
 
@@ -289,8 +312,17 @@ pub async fn execute_tool_with_permission(
                     // concurrent one-shot grants (tools run in parallel) can
                     // never pop each other's entry, and a dropped future still
                     // cleans up after itself.
-                    let _grant_guard = search_grant
-                        .map(|dir| OneShotGrantGuard::push(&permission.bridge.granted_dirs, dir));
+                    let _grant_guard = match (search_grant, write_grant) {
+                        (Some(dir), _) => Some(OneShotGrantGuard::push(
+                            &permission.bridge.granted_dirs,
+                            dir,
+                        )),
+                        (None, Some(dir)) => Some(OneShotGrantGuard::push(
+                            &permission.bridge.granted_write_dirs,
+                            dir,
+                        )),
+                        (None, None) => None,
+                    };
                     call_tool_and_wrap(tool, request, context, progress).await
                 }
                 PermissionDecision::AllowAlways { rule } => {
@@ -310,6 +342,30 @@ pub async fn execute_tool_with_permission(
                             // The write guard doubles as the serialization point
                             // against the permission.* RPC handlers that save
                             // the same file.
+                            if persist_grants {
+                                crate::permissions::persist_context_to_config(
+                                    &manager.get_context(),
+                                );
+                            }
+                        }
+                    } else if let Some(dir) = write_grant.clone() {
+                        // Directory-scoped "Always allow" for writes: open the
+                        // target's PARENT directory (never the whole tool) in
+                        // the write-grant list, so an approved location keeps
+                        // working while the boundary stays intact elsewhere.
+                        let grant_dir = dir
+                            .parent()
+                            .map(|p| p.to_path_buf())
+                            .unwrap_or_else(|| dir.clone());
+                        push_granted_dir(&permission.bridge.granted_write_dirs, grant_dir.clone());
+                        let dir_str = grant_dir.to_string_lossy().to_string();
+                        {
+                            let manager = permission.bridge.manager.write().await;
+                            manager.update_context(|c| {
+                                if !c.additional_write_dirs.contains(&dir_str) {
+                                    c.additional_write_dirs.push(dir_str.clone());
+                                }
+                            });
                             if persist_grants {
                                 crate::permissions::persist_context_to_config(
                                     &manager.get_context(),
@@ -358,6 +414,37 @@ fn out_of_cwd_search_target(
     // The tools' validator rejects anything outside cwd + granted dirs, so
     // "the validator would fail" is exactly the prompt condition. (An `Ok`
     // here means the path is already inside the boundary.)
+    match super::builtins::path_utils::resolve_and_validate_path(path, cwd, &[]) {
+        Ok(_) => None,
+        Err(_) => {
+            // Lexical resolve for the grant record; the tool re-runs the full
+            // validation (including symlink canonicalization) after approval.
+            let joined = cwd.join(path);
+            Some(crate::tools::builtins::path_utils::normalize_path(&joined))
+        }
+    }
+}
+
+/// If `input` asks the FileWrite/FileEdit tools to write outside the project
+/// cwd, return the lexically-resolved target that a grant would cover.
+/// `None` = not an out-of-cwd write (no boundary reason to prompt). The
+/// write twin of [`out_of_cwd_search_target`]; pre-approved dirs (config
+/// knob / prior Always grants) are filtered by the caller's `dir_granted`
+/// check, exactly like the search flow.
+fn out_of_cwd_write_target(
+    tool_name: &str,
+    input: &Value,
+    cwd: &std::path::Path,
+) -> Option<std::path::PathBuf> {
+    if tool_name != "FileWrite" && tool_name != "FileEdit" {
+        return None;
+    }
+    let path = input.get("file_path")?.as_str()?.trim();
+    if path.is_empty() {
+        return None;
+    }
+    // The tools' validator rejects anything outside cwd + granted write
+    // dirs, so "the validator would fail" is exactly the prompt condition.
     match super::builtins::path_utils::resolve_and_validate_path(path, cwd, &[]) {
         Ok(_) => None,
         Err(_) => {
@@ -1105,6 +1192,7 @@ mod tests {
         ToolPermissionContext {
             mode: PermissionMode::Default,
             additional_search_dirs: Vec::new(),
+            additional_write_dirs: Vec::new(),
             always_allow_rules: std::collections::HashMap::new(),
             always_deny_rules: std::collections::HashMap::new(),
             always_ask_rules: std::collections::HashMap::new(),
@@ -1126,6 +1214,7 @@ mod tests {
             manager: Arc::new(tokio::sync::RwLock::new(manager)),
             gate,
             granted_dirs: crate::permissions::GrantedSearchDirs::default(),
+            granted_write_dirs: crate::permissions::GrantedWriteDirs::default(),
         };
         (PermissionChannels::new(bridge, event_tx), event_rx)
     }
@@ -1504,6 +1593,194 @@ mod tests {
         assert_eq!(tool.call_count.load(Ordering::SeqCst), 0);
         // A denial grants nothing.
         assert!(channels.bridge.granted_dirs.read().unwrap().is_empty());
+    }
+
+    // ── Out-of-cwd write grants (FileWrite/FileEdit twin of the search flow) ──
+
+    #[tokio::test]
+    async fn test_out_of_cwd_write_prompts_and_allow_once_executes() {
+        let tool = MockTool::new("FileWrite");
+        let ctx = make_context(); // cwd = /tmp
+        let progress = MockProgressSender;
+        let mut request = make_request("req-write-1", "FileWrite");
+        request.input = json!({"file_path": "/etc/baoclaw-write-smoke.txt", "content": "hi"});
+
+        let (channels, mut event_rx) =
+            make_channels(manager_ctx_with_timeout(5), PermissionGate::new());
+
+        let gate = channels.bridge.gate.clone();
+        let responder = tokio::spawn(async move {
+            let event = tokio::time::timeout(Duration::from_secs(2), event_rx.recv())
+                .await
+                .expect("timed out waiting for PermissionRequest")
+                .expect("event channel closed");
+            match event {
+                EngineEvent::PermissionRequest {
+                    tool_use_id,
+                    target_path,
+                    ..
+                } => {
+                    // The prompt carries the resolved out-of-boundary target.
+                    assert_eq!(target_path.as_deref(), Some("/etc/baoclaw-write-smoke.txt"));
+                    gate.respond(&tool_use_id, PermissionDecision::Allow);
+                }
+                other => panic!("unexpected event: {other:?}"),
+            }
+        });
+
+        let result =
+            execute_tool_with_permission(&tool, &request, &ctx, &channels, &progress).await;
+        responder.await.unwrap();
+
+        assert!(!result.is_error);
+        assert_eq!(tool.call_count.load(Ordering::SeqCst), 1);
+        // The one-shot write grant is popped after the call.
+        assert!(channels
+            .bridge
+            .granted_write_dirs
+            .read()
+            .unwrap()
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_out_of_cwd_write_granted_runs_without_prompt() {
+        let tool = MockTool::new("FileEdit");
+        let ctx = make_context();
+        let progress = MockProgressSender;
+        let mut request = make_request("req-write-2", "FileEdit");
+        request.input = json!({"file_path": "/etc/app.conf", "old_string": "a", "new_string": "b"});
+
+        let (channels, mut event_rx) =
+            make_channels(manager_ctx_with_timeout(5), PermissionGate::new());
+        channels
+            .bridge
+            .granted_write_dirs
+            .write()
+            .unwrap()
+            .push(PathBuf::from("/etc"));
+
+        let result =
+            execute_tool_with_permission(&tool, &request, &ctx, &channels, &progress).await;
+
+        // Pre-approved directory: no prompt, tool just runs.
+        assert!(event_rx.try_recv().is_err());
+        assert!(!result.is_error);
+        assert_eq!(tool.call_count.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn test_out_of_cwd_write_allow_always_records_parent_dir() {
+        let tool = MockTool::new("FileWrite");
+        let ctx = make_context();
+        let progress = MockProgressSender;
+        let mut request = make_request("req-write-3", "FileWrite");
+        request.input = json!({"file_path": "/etc/conf/app.conf", "content": "hi"});
+
+        let (channels, mut event_rx) =
+            make_channels(manager_ctx_with_timeout(5), PermissionGate::new());
+
+        let gate = channels.bridge.gate.clone();
+        let responder = tokio::spawn(async move {
+            let event = tokio::time::timeout(Duration::from_secs(2), event_rx.recv())
+                .await
+                .expect("timed out waiting for PermissionRequest")
+                .expect("event channel closed");
+            if let EngineEvent::PermissionRequest { tool_use_id, .. } = event {
+                gate.respond(&tool_use_id, PermissionDecision::AllowAlways { rule: None });
+            }
+        });
+
+        let result =
+            execute_tool_with_permission(&tool, &request, &ctx, &channels, &progress).await;
+        responder.await.unwrap();
+
+        assert!(!result.is_error);
+        // The target's PARENT dir is granted (not the whole tool)...
+        assert!(channels
+            .bridge
+            .granted_write_dirs
+            .read()
+            .unwrap()
+            .contains(&PathBuf::from("/etc/conf")));
+        // ...and recorded in the context. (persist_grants=false in this
+        // fixture, so nothing touches the real config.)
+        let ctx_now = channels.bridge.manager.read().await.get_context();
+        assert!(ctx_now
+            .additional_write_dirs
+            .iter()
+            .any(|d| d == "/etc/conf"));
+        // Directory scoping means NO whole-tool rule is recorded — an
+        // "always allow" on one directory must not open every path.
+        assert!(ctx_now.always_allow_rules.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_out_of_cwd_write_deny_blocks_tool() {
+        let tool = MockTool::new("FileWrite");
+        let ctx = make_context();
+        let progress = MockProgressSender;
+        let mut request = make_request("req-write-4", "FileWrite");
+        request.input = json!({"file_path": "/etc/baoclaw-denied.txt", "content": "hi"});
+
+        let (channels, mut event_rx) =
+            make_channels(manager_ctx_with_timeout(5), PermissionGate::new());
+
+        let gate = channels.bridge.gate.clone();
+        let responder = tokio::spawn(async move {
+            let event = tokio::time::timeout(Duration::from_secs(2), event_rx.recv())
+                .await
+                .expect("timed out waiting for PermissionRequest")
+                .expect("event channel closed");
+            if let EngineEvent::PermissionRequest { tool_use_id, .. } = event {
+                gate.respond(&tool_use_id, PermissionDecision::Deny);
+            }
+        });
+
+        let result =
+            execute_tool_with_permission(&tool, &request, &ctx, &channels, &progress).await;
+        responder.await.unwrap();
+
+        assert!(result.is_error);
+        assert_eq!(tool.call_count.load(Ordering::SeqCst), 0);
+        // A denial grants nothing.
+        assert!(channels
+            .bridge
+            .granted_write_dirs
+            .read()
+            .unwrap()
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_write_allow_rule_never_expands_the_boundary() {
+        // A whole-tool allow rule skips the PROMPT, but must not open the
+        // write boundary: no interactive decision happened, so nothing may
+        // be added to the granted write dirs. (In production the real
+        // FileWriteTool then rejects the path at its own validator — the
+        // mock here has no validator, so the call itself runs.)
+        let tool = MockTool::new("FileWrite");
+        let ctx = make_context();
+        let progress = MockProgressSender;
+        let mut request = make_request("req-write-5", "FileWrite");
+        request.input = json!({"file_path": "/etc/baoclaw-rule-write.txt", "content": "hi"});
+
+        let manager = manager_ctx_with_timeout(5);
+        manager.add_allow_always_rule("user", "FileWrite", None);
+        let (channels, mut event_rx) = make_channels(manager, PermissionGate::new());
+
+        let result =
+            execute_tool_with_permission(&tool, &request, &ctx, &channels, &progress).await;
+
+        assert!(event_rx.try_recv().is_err());
+        assert!(channels
+            .bridge
+            .granted_write_dirs
+            .read()
+            .unwrap()
+            .is_empty());
+        assert_eq!(tool.call_count.load(Ordering::SeqCst), 1);
+        assert!(!result.is_error);
     }
 
     #[tokio::test]
