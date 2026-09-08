@@ -1220,9 +1220,21 @@ async function executeOneShot(
 
   let fullResponse = "";
   const toolsUsed: Array<{ name: string; input?: unknown }> = [];
+  // Terminal failure carried by the daemon's `error` event — the submitMessage
+  // RPC resolves even on failed turns, so success is decided HERE too.
+  let lastError: { code?: string; message?: string } | null = null;
 
   client.onNotification("stream/event", async (params: any) => {
     if (!params) return;
+    if (params.type === "error") {
+      lastError = { code: params.code, message: params.message };
+      if (!jsonMode) {
+        process.stderr.write(
+          `${FG_RED}[error] ${params.code || "error"}: ${params.message || ""}${RESET}\n`,
+        );
+      }
+      return;
+    }
     if (params.type === "assistant_chunk" && params.content) {
       // Current stream vocabulary (same as the interactive REPL and TUI).
       fullResponse += params.content;
@@ -1255,11 +1267,13 @@ async function executeOneShot(
       prompt,
     });
 
+    const failed = Boolean(lastError && !fullResponse);
     if (jsonMode) {
       console.log(
         JSON.stringify(
           {
-            success: true,
+            success: !failed,
+            ...(failed ? { error: lastError } : {}),
             response: fullResponse,
             tools_used: toolsUsed,
             raw_result: result,
@@ -1275,7 +1289,7 @@ async function executeOneShot(
     }
     await control.close().catch(() => {});
     await client.disconnect().catch(() => {});
-    process.exit(0);
+    process.exit(failed ? 1 : 0);
   } catch (err: any) {
     if (jsonMode) {
       console.error(

@@ -22,7 +22,7 @@ use api::client::ApiClientConfig;
 use api::unified::UnifiedClient;
 use config::BaoclawConfig;
 use engine::query_engine::{
-    EngineEvent, QueryEngine, QueryEngineConfig, ThinkingConfig, EMPTY_USAGE,
+    EngineEvent, QueryEngine, QueryEngineConfig, QueryStatus, ThinkingConfig, EMPTY_USAGE,
 };
 use engine::task_manager::TaskManager;
 use ipc::server::IpcServer;
@@ -754,6 +754,7 @@ pub(super) async fn start_cron_scheduler(shared: &SharedState) {
 
                 let mut rx = engine.submit_message(prompt).await;
                 let mut result = String::new();
+                let mut error_msg: Option<String> = None;
                 while let Some(event) = rx.recv().await {
                     match event {
                         EngineEvent::AssistantChunk { content, .. } => result.push_str(&content),
@@ -763,14 +764,29 @@ pub(super) async fn start_cron_scheduler(shared: &SharedState) {
                                     result = text;
                                 }
                             }
+                            // Terminal Result can now carry the failure
+                            // (status Error with a structured error) — a
+                            // failed cron run must not broadcast "(no
+                            // output)" as if it succeeded.
+                            if qr.status == QueryStatus::Error {
+                                if let Some(err) = &qr.error {
+                                    error_msg = Some(format!("{}: {}", err.code, err.message));
+                                }
+                            }
                             break;
                         }
-                        EngineEvent::Error(_) => break,
+                        EngineEvent::Error(err) => {
+                            error_msg = Some(format!("{}: {}", err.code, err.message));
+                            break;
+                        }
                         _ => {}
                     }
                 }
                 if result.is_empty() {
-                    result = "(no output)".to_string();
+                    result = match error_msg {
+                        Some(msg) => format!("(failed: {msg})"),
+                        None => "(no output)".to_string(),
+                    };
                 }
                 result
             })

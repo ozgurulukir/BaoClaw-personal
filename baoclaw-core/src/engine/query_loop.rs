@@ -173,6 +173,7 @@ pub async fn run_query_loop(
             .await;
             let _ = tx
                 .send(EngineEvent::Result(QueryResult {
+                    error: None,
                     status: QueryStatus::Aborted,
                     text: None,
                     stop_reason: None,
@@ -227,6 +228,7 @@ pub async fn run_query_loop(
                     .await;
                     let _ = tx
                         .send(EngineEvent::Result(QueryResult {
+                            error: None,
                             status: QueryStatus::MaxTurns,
                             text: None,
                             stop_reason: None,
@@ -291,6 +293,21 @@ pub async fn run_query_loop(
                     start_time.elapsed().as_millis() as u64,
                 )
                 .await;
+                // Terminal Result mirroring the Error event — downstream
+                // layers key off Result to report failure (an Error event
+                // alone used to end the turn as an empty success).
+                let _ = tx
+                    .send(EngineEvent::Result(QueryResult {
+                        error: Some(err.clone()),
+                        status: QueryStatus::Error,
+                        text: None,
+                        stop_reason: None,
+                        total_cost_usd: cost_tracker.total_cost(),
+                        usage: total_usage.clone(),
+                        num_turns: turn_count,
+                        duration_ms: start_time.elapsed().as_millis() as u64,
+                    }))
+                    .await;
                 return;
             }
         };
@@ -334,6 +351,20 @@ pub async fn run_query_loop(
                     start_time.elapsed().as_millis() as u64,
                 )
                 .await;
+                // Terminal Result mirroring the Error event (see the
+                // ApiCallOutcome::Fatal arm above).
+                let _ = tx
+                    .send(EngineEvent::Result(QueryResult {
+                        error: Some(err.clone()),
+                        status: QueryStatus::Error,
+                        text: None,
+                        stop_reason: None,
+                        total_cost_usd: cost_tracker.total_cost(),
+                        usage: total_usage.clone(),
+                        num_turns: turn_count,
+                        duration_ms: start_time.elapsed().as_millis() as u64,
+                    }))
+                    .await;
                 return;
             }
         };
@@ -405,6 +436,7 @@ pub async fn run_query_loop(
             .await;
             let _ = tx
                 .send(EngineEvent::Result(QueryResult {
+                    error: None,
                     status: QueryStatus::Complete,
                     text,
                     stop_reason,
@@ -932,6 +964,7 @@ async fn ingest_stream_events(
                 eprintln!("Cleaned up {} orphan tool_use block(s) after stream abort", fixed);
             }
             let _ = tx.send(EngineEvent::Result(QueryResult {
+                error: None,
                 status: QueryStatus::Aborted, text: None, stop_reason: None,
                 total_cost_usd: cost_tracker.total_cost(), usage: total_usage.clone(),
                 num_turns: turn_count, duration_ms: start_time.elapsed().as_millis() as u64,

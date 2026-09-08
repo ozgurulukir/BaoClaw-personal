@@ -164,6 +164,11 @@ pub enum EngineEvent {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct QueryResult {
     pub status: QueryStatus,
+    /// Structured failure info when `status` is `Error` (e.g. the fallback
+    /// chain was exhausted); error-first consumers keep using the separate
+    /// `EngineEvent::Error`, this mirrors it on the terminal Result.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<EngineError>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub text: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1449,6 +1454,7 @@ mod tests {
     #[test]
     fn test_serialize_result_event() {
         let event = EngineEvent::Result(QueryResult {
+            error: None,
             status: QueryStatus::Complete,
             text: Some("Done!".to_string()),
             stop_reason: Some("end_turn".to_string()),
@@ -1568,6 +1574,7 @@ mod tests {
     #[test]
     fn test_query_result_without_optional_fields() {
         let result = QueryResult {
+            error: None,
             status: QueryStatus::Aborted,
             text: None,
             stop_reason: None,

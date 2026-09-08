@@ -639,6 +639,10 @@ async fn scm_submit_message(
 
         let mut disconnected = false;
         let mut turn_finished = false;
+        // Structured failure of the terminal event, if any — the RPC reply
+        // below reports the turn as an error instead of an unconditional
+        // "complete" (an Error event alone used to be replied as success).
+        let mut terminal_error: Option<(String, String)> = None;
         while let Some(event) = rx.recv().await {
             // Render Loop Headers to TUI on turn events
             match &event {
@@ -661,6 +665,17 @@ async fn scm_submit_message(
             }
 
             let terminal_event = matches!(&event, EngineEvent::Result(_) | EngineEvent::Error(_));
+            // Capture a structured failure so the RPC reply reports the
+            // turn as an error instead of an unconditional "complete"
+            // (an Error event alone used to be replied as success).
+            terminal_error = match &event {
+                EngineEvent::Error(err) => Some((err.code.clone(), err.message.clone())),
+                EngineEvent::Result(result) => result
+                    .error
+                    .as_ref()
+                    .map(|e| (e.code.clone(), e.message.clone())),
+                _ => None,
+            };
             // Broadcast to all clients
             task_session.broadcast(event.clone());
 
@@ -709,9 +724,24 @@ async fn scm_submit_message(
         }
 
         let mut conn_guard = task_writer.lock().await;
-        let _ = conn_guard
-            .send_response(id, serde_json::json!({"status": "complete"}))
-            .await;
+        match terminal_error {
+            Some((code, message)) => {
+                let _ = conn_guard
+                    .send_response(
+                        id,
+                        serde_json::json!({
+                            "status": "error",
+                            "error": {"code": code, "message": message}
+                        }),
+                    )
+                    .await;
+            }
+            None => {
+                let _ = conn_guard
+                    .send_response(id, serde_json::json!({"status": "complete"}))
+                    .await;
+            }
+        }
     });
     ScmFlow::Continue
 }

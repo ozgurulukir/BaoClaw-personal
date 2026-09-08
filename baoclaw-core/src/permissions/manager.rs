@@ -158,7 +158,10 @@ fn matches_rule(rule: &PermissionRule, tool_name: &str, input_description: Optio
 }
 
 fn is_read_only_tool(tool_name: &str) -> bool {
-    let read_only_patterns = ["Read", "Grep", "Glob", "Search"];
+    // "Read" is deliberately NOT a pattern: it would match FileRead, whose
+    // out-of-cwd reads must reach the interactive prompt even in Plan mode
+    // (a name-based Plan-mode allow cannot see the path).
+    let read_only_patterns = ["Grep", "Glob", "Search"];
     read_only_patterns.iter().any(|p| tool_name.contains(p))
 }
 
@@ -583,11 +586,7 @@ mod tests {
 
         let manager = PermissionManager::new(ctx);
 
-        // Read-only tools should be allowed
-        assert_eq!(
-            manager.check_permission("FileRead", None),
-            PermissionResult::Allow
-        );
+        // Grep/Glob/WebSearch are auto-allowed in Plan mode...
         assert_eq!(
             manager.check_permission("GrepTool", None),
             PermissionResult::Allow
@@ -599,6 +598,17 @@ mod tests {
         assert_eq!(
             manager.check_permission("WebSearch", None),
             PermissionResult::Allow
+        );
+        // ...but FileRead deliberately is NOT: the Plan-mode allow is
+        // name-based and cannot see the path, so an out-of-cwd read would
+        // fail silently at the validator. FileRead goes to Ask instead —
+        // the executor's read-only branch auto-proceeds for in-cwd paths
+        // and prompts for out-of-cwd ones.
+        assert_eq!(
+            manager.check_permission("FileRead", None),
+            PermissionResult::Ask {
+                message: "Tool 'FileRead' requires permission in Plan mode".to_string()
+            }
         );
 
         // Write tools should ask

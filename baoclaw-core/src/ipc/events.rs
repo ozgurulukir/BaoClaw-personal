@@ -131,6 +131,7 @@ mod tests {
     #[test]
     fn test_result_notification() {
         let event = EngineEvent::Result(QueryResult {
+            error: None,
             status: QueryStatus::Complete,
             text: Some("Done!".to_string()),
             stop_reason: Some("end_turn".to_string()),
