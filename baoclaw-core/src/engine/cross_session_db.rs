@@ -65,14 +65,27 @@ pub struct CrossSessionDb {
 }
 
 impl CrossSessionDb {
-    /// Open (or create) the database and ensure all tables exist.
+    /// Open (or create) the database at the default path and ensure all tables exist.
     pub fn new() -> Result<Self, String> {
-        let path = db_path();
-        let conn = Connection::open(&path)
+        Self::with_path(&db_path())
+    }
+
+    /// Open (or create) the database at a custom path (tests use this for
+    /// hermetic temp dirs). Initializes the schema if needed.
+    pub fn with_path(path: &PathBuf) -> Result<Self, String> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| format!("Failed to create cross-session directory: {}", e))?;
+        }
+        let conn = Connection::open(path)
             .map_err(|e| format!("Failed to open cross_session.db at {:?}: {}", path, e))?;
 
-        conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;")
-            .map_err(|e| format!("PRAGMA failed: {}", e))?;
+        // busy_timeout: the CLI and the daemon can hold this file open at the
+        // same time; brief write contention should wait, not error.
+        conn.execute_batch(
+            "PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=2000;",
+        )
+        .map_err(|e| format!("PRAGMA failed: {}", e))?;
 
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS sessions (
@@ -122,13 +135,23 @@ impl CrossSessionDb {
         })
     }
 
-    /// Index a full session: insert the session row then each message (into FTS via trigger).
+    /// Index a full session: insert or update the session row. A real upsert
+    /// (not INSERT OR REPLACE): with foreign_keys=ON, REPLACE would delete
+    /// the parent row and fail once any message references the session.
+    /// MIN(started_at) preserves the original start across re-stubs.
     pub fn index_session(&self, summary: SessionIndex) -> Result<(), String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
 
         conn.execute(
-            "INSERT OR REPLACE INTO sessions (id, cwd, model, started_at, ended_at, turn_count, cost_usd)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            "INSERT INTO sessions (id, cwd, model, started_at, ended_at, turn_count, cost_usd)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+             ON CONFLICT(id) DO UPDATE SET
+                 cwd = excluded.cwd,
+                 model = excluded.model,
+                 started_at = MIN(sessions.started_at, excluded.started_at),
+                 ended_at = excluded.ended_at,
+                 turn_count = excluded.turn_count,
+                 cost_usd = excluded.cost_usd",
             params![
                 summary.id,
                 summary.cwd,
@@ -174,7 +197,7 @@ impl CrossSessionDb {
 
         let sql = format!(
             "SELECT m.session_id,
-                    snippet(messages_fts, '[', ']', '...', 1, 32) AS snippet,
+                    snippet(messages_fts, 0, '[', ']', '...', 32) AS snippet,
                     bm25(messages_fts) AS rank,
                     m.timestamp,
                     s.cwd
@@ -346,5 +369,145 @@ impl CrossSessionDb {
             Ok(iter) => iter.filter_map(|r| r.ok()).collect(),
             Err(_) => vec![],
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    fn test_db() -> (CrossSessionDb, tempfile::TempDir) {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("cross_session_test.db");
+        (CrossSessionDb::with_path(&path).unwrap(), dir)
+    }
+
+    fn summary(id: &str) -> SessionIndex {
+        SessionIndex {
+            id: id.to_string(),
+            cwd: "/tmp/proj".to_string(),
+            model: "test-model".to_string(),
+            started_at: "2026-09-09T10:00:00Z".to_string(),
+            ended_at: "2026-09-09T10:05:00Z".to_string(),
+            turn_count: 2,
+            cost_usd: 0.01,
+        }
+    }
+
+    #[test]
+    fn test_message_without_session_row_is_rejected() {
+        // Regression guard for the FK gap: with foreign_keys=ON, message
+        // inserts MUST fail until the session row exists — silently
+        // dropping them left the search index empty.
+        let (db, _dir) = test_db();
+        let err = db
+            .index_message("ghost-session", "user", "hello", "2026-09-09T10:00:00Z")
+            .unwrap_err();
+        assert!(err.to_lowercase().contains("foreign key"), "got: {}", err);
+        assert!(db.search("hello", 10).is_empty());
+    }
+
+    #[test]
+    fn test_session_then_message_then_search_flow() {
+        let (db, _dir) = test_db();
+        db.index_session(summary("s-1")).unwrap();
+        db.index_message(
+            "s-1",
+            "user",
+            "how does the FTS indexer work",
+            "2026-09-09T10:00:10Z",
+        )
+        .unwrap();
+        db.index_message(
+            "s-1",
+            "assistant",
+            "It uses SQLite FTS5 with bm25 ranking",
+            "2026-09-09T10:00:12Z",
+        )
+        .unwrap();
+
+        let hits = db.search_with_context("FTS indexer", 10);
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].session_id, "s-1");
+        assert_eq!(hits[0].cwd, "/tmp/proj");
+        // snippet() column/markers must render cleanly: match wrapped in [ ].
+        assert!(
+            hits[0].snippet.contains("[FTS"),
+            "unexpected snippet: {}",
+            hits[0].snippet
+        );
+
+        let recent = db.get_recent_sessions(10);
+        assert_eq!(recent.len(), 1);
+        assert_eq!(recent[0].id, "s-1");
+        assert_eq!(recent[0].turn_count, 2);
+    }
+
+    #[test]
+    fn test_index_session_is_an_idempotent_upsert() {
+        let (db, _dir) = test_db();
+        db.index_session(summary("s-1")).unwrap();
+        let mut closed = summary("s-1");
+        closed.turn_count = 7;
+        closed.cost_usd = 0.42;
+        closed.ended_at = "2026-09-09T10:20:00Z".to_string();
+        db.index_session(closed).unwrap();
+
+        let recent = db.get_recent_sessions(10);
+        assert_eq!(recent.len(), 1, "upsert must not duplicate session rows");
+        assert_eq!(recent[0].turn_count, 7);
+        assert_eq!(recent[0].cost_usd, 0.42);
+    }
+
+    #[test]
+    fn test_reupsert_with_child_messages_succeeds() {
+        // Production sequence: the query loop stubs the session row, then
+        // indexes messages, then stubs again on the next query, and the
+        // close handler upserts final metadata. INSERT OR REPLACE would
+        // fail every re-upsert here (FK on the implicit delete).
+        let (db, _dir) = test_db();
+        db.index_session(summary("s-1")).unwrap();
+        db.index_message(
+            "s-1",
+            "user",
+            "how does the FTS indexer work",
+            "2026-09-09T10:00:10Z",
+        )
+        .unwrap();
+
+        let mut again = summary("s-1");
+        again.started_at = "2026-09-09T10:03:00Z".to_string();
+        db.index_session(again).unwrap();
+
+        let mut closed = summary("s-1");
+        closed.turn_count = 9;
+        closed.ended_at = "2026-09-09T10:20:00Z".to_string();
+        db.index_session(closed).unwrap();
+
+        let recent = db.get_recent_sessions(10);
+        assert_eq!(recent.len(), 1);
+        assert_eq!(recent[0].turn_count, 9);
+        // MIN(started_at) must keep the ORIGINAL stub start.
+        assert_eq!(recent[0].started_at, "2026-09-09T10:00:00Z");
+
+        // The indexed message must survive every re-upsert.
+        let hits = db.search("indexer", 10);
+        assert_eq!(hits.len(), 1, "messages must survive session upserts");
+    }
+
+    #[test]
+    fn test_html_is_stripped_from_indexed_content() {
+        let (db, _dir) = test_db();
+        db.index_session(summary("s-1")).unwrap();
+        db.index_message(
+            "s-1",
+            "user",
+            "check <b>bold</b> tags",
+            "2026-09-09T10:00:10Z",
+        )
+        .unwrap();
+        let hits = db.search("\"check bold tags\"", 10);
+        assert_eq!(hits.len(), 1, "stripped text must be searchable");
     }
 }

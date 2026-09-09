@@ -152,6 +152,26 @@ pub async fn run_query_loop(
     // Open cross-session DB for indexing (errors are non-fatal)
     let cross_db = crate::engine::cross_session_db::CrossSessionDb::new().ok();
 
+    // Stub the session row before message indexing: index_message has a
+    // foreign key on sessions(id), so without this row every insert is
+    // silently rejected. The full summary is upserted (INSERT OR REPLACE)
+    // again when the session closes.
+    if let (Some(ref db), Some(ref sid)) = (&cross_db, &config.session_id) {
+        let now = chrono::Utc::now().to_rfc3339();
+        let summary = crate::engine::cross_session_db::SessionIndex {
+            id: sid.clone(),
+            cwd: config.cwd.to_string_lossy().to_string(),
+            model: config.model.clone(),
+            started_at: now.clone(),
+            ended_at: now,
+            turn_count: 0,
+            cost_usd: 0.0,
+        };
+        if let Err(e) = db.index_session(summary) {
+            eprintln!("[cross-session] WARNING: session not indexed: {}", e);
+        }
+    }
+
     // Write the user message that was just added (last message in the vec)
     if let Some(last_msg) = messages.last() {
         append_transcript(

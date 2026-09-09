@@ -90,23 +90,28 @@ interface GitDiffResult {
 }
 interface SearchResult {
   timestamp?: string;
-  entry_type: string;
   snippet?: string;
-  context?: string;
+  /** Present in the active-session fallback shape (DB unavailable). */
+  role?: string;
+  text?: string;
+  session_id?: string;
+  cwd?: string;
 }
 interface HistoryEntry {
   role: string;
-  content: string;
+  text: string;
   timestamp?: string;
 }
 interface ExportResult {
-  path: string;
-  size?: number;
+  file_path: string;
+  message_count: number;
+  size_bytes: number;
 }
 interface TaskInfo {
   id: string;
   description: string;
-  status: string;
+  /** Daemon serializes failures as { Failed: "..." }, the rest as plain strings. */
+  status: string | { Failed: string };
   created_at?: string;
 }
 interface CronEntry {
@@ -121,11 +126,16 @@ interface ProjectInfo {
   path: string;
   description?: string;
 }
-interface SpecInfo {
-  name: string;
+interface SpecSummary {
+  feature_name: string;
+  workflow: string;
   phase: string;
-  total_tasks: number;
-  completed_tasks: number;
+  spec_type: string;
+  task_progress: {
+    total: number;
+    completed: number;
+    in_progress: number;
+  } | null;
 }
 
 // ── Formatting Helpers ──
@@ -230,11 +240,11 @@ function formatHistory(entries: HistoryEntry[]): string {
   let out = `📜 Recent Conversation (${entries.length})\n\n`;
   for (const e of entries) {
     const role = e.role === "user" ? "👤" : "🤖";
-    const content =
-      e.content.length > TOOL_CONTENT_PREVIEW_CHARS
-        ? e.content.slice(0, TOOL_CONTENT_PREVIEW_CHARS) + "…"
-        : e.content;
-    out += `${role} ${content}\n\n`;
+    const text =
+      e.text.length > TOOL_CONTENT_PREVIEW_CHARS
+        ? e.text.slice(0, TOOL_CONTENT_PREVIEW_CHARS) + "…"
+        : e.text;
+    out += `${role} ${text}\n\n`;
     if (out.length > MAX_OUTPUT) {
       out += "…";
       break;
@@ -247,7 +257,10 @@ function formatSearchResults(results: SearchResult[], query: string): string {
   if (!results?.length) return `No matches found for "${query}"`;
   let out = `🔍 Search Results: "${query}" (${results.length})\n\n`;
   for (const r of results) {
-    out += `${r.snippet || r.context || ""}\n\n`;
+    const ts = r.timestamp?.slice(0, 19).replace("T", " ") || "";
+    const role = r.role === "user" ? "👤" : "🤖";
+    const body = r.snippet || r.text || "";
+    out += `[${ts}] ${role}\n${body}\n\n`;
     if (out.length > MAX_OUTPUT) {
       out += "…";
       break;
@@ -257,7 +270,13 @@ function formatSearchResults(results: SearchResult[], query: string): string {
 }
 
 function formatExport(result: ExportResult): string {
-  return `📤 Exported\n\nPath: ${result.path}${result.size ? `\nSize: ${(result.size / 1024).toFixed(1)} KB` : ""}`;
+  const size = result.size_bytes
+    ? `\nSize: ${(result.size_bytes / 1024).toFixed(1)} KB`
+    : "";
+  const count = result.message_count
+    ? `\nMessages: ${result.message_count}`
+    : "";
+  return `📤 Exported\n\nPath: ${result.file_path}${size}${count}`;
 }
 
 function formatProjects(projects: ProjectInfo[]): string {
@@ -269,19 +288,29 @@ function formatProjects(projects: ProjectInfo[]): string {
   return truncate(out);
 }
 
+/** Render a TaskInfo status regardless of its serialized shape. */
+function taskStatusLabel(status: TaskInfo["status"]): string {
+  if (typeof status === "string") return status;
+  if (status && typeof status === "object" && "Failed" in status) {
+    return `Failed: ${status.Failed}`;
+  }
+  return JSON.stringify(status);
+}
+
 function formatTasks(tasks: TaskInfo[]): string {
   if (!tasks?.length) return "📋 Background Tasks (0)";
   let out = `📋 Background Tasks (${tasks.length})\n\n`;
   for (const t of tasks) {
-    const emoji =
-      t.status === "running"
-        ? "🟢"
-        : t.status === "completed"
-          ? "✅"
-          : t.status === "failed"
-            ? "🔴"
-            : "⚪";
-    out += `${emoji} [${t.id}] ${t.description}\n  Status: ${t.status}\n\n`;
+    const label = taskStatusLabel(t.status);
+    const lower = label.toLowerCase();
+    const emoji = lower.startsWith("running")
+      ? "🟢"
+      : lower.startsWith("completed")
+        ? "✅"
+        : lower.startsWith("failed")
+          ? "🔴"
+          : "⚪";
+    out += `${emoji} [${t.id}] ${t.description}\n  Status: ${label}\n\n`;
   }
   return truncate(out);
 }
@@ -296,41 +325,52 @@ function formatCronList(crons: CronEntry[]): string {
   return truncate(out);
 }
 
-function formatSpecList(specs: SpecInfo[]): string {
+function formatSpecList(specs: SpecSummary[]): string {
   if (!specs?.length) return "📋 Specs (0)";
   let out = `📋 Specs (${specs.length})\n\n`;
   for (const s of specs) {
-    out += `• ${s.name} [${s.phase}] (${s.completed_tasks}/${s.total_tasks})\n`;
+    const progress = s.task_progress
+      ? ` (${s.task_progress.completed}/${s.task_progress.total} tasks)`
+      : "";
+    out += `• ${s.feature_name} [${s.phase}]${progress}\n`;
   }
   return out;
 }
 
-function formatSpecShow(spec: {
-  name: string;
-  content: string;
-  phase: string;
-}): string {
-  return truncate(
-    `📋 Spec: ${spec.name}\nPhase: ${spec.phase}\n\n${spec.content}`,
+function formatSpecShow(spec: SpecSummary): string {
+  let out = `📋 Spec: ${spec.feature_name}\n`;
+  out += `Workflow: ${spec.workflow}\nPhase: ${spec.phase}\nType: ${spec.spec_type}\n`;
+  if (spec.task_progress) {
+    out += `Tasks: ${spec.task_progress.completed}/${spec.task_progress.total} (${spec.task_progress.in_progress} in progress)\n`;
+  }
+  return truncate(out);
+}
+
+function formatSpecStatus(
+  name: string,
+  progress: { total: number; completed: number; in_progress: number },
+): string {
+  return (
+    `📊 Spec Status: ${name}\n\n` +
+    `Total: ${progress.total}\n` +
+    `✅ Completed: ${progress.completed}\n` +
+    `🔄 In progress: ${progress.in_progress}`
   );
 }
 
-function formatSpecStatus(spec: {
-  name: string;
-  phase: string;
-  tasks: { name: string; status: string }[];
+function formatSpecRun(result: {
+  task_id?: string;
+  task_description?: string;
+  status: string;
+  message?: string;
 }): string {
-  let out = `📊 Spec Status: ${spec.name}\nPhase: ${spec.phase}\n\n`;
-  for (const t of spec.tasks) {
-    const e =
-      t.status === "completed"
-        ? "✅"
-        : t.status === "in_progress"
-          ? "🔄"
-          : "⬜";
-    out += `${e} ${t.name}\n`;
+  if (result.message) {
+    return `🚀 Spec Execution\n\n${result.message}`;
   }
-  return truncate(out);
+  const description = result.task_description
+    ? `\n\n${result.task_description}`
+    : "";
+  return `🚀 Next Task\n\nTask ID: ${result.task_id || "N/A"}${description}`;
 }
 
 function formatError(title: string, detail: string): string {
@@ -382,21 +422,22 @@ async function handleModel(ctx: CommandContext): Promise<string> {
 }
 
 async function handleHistory(ctx: CommandContext): Promise<string> {
-  const n = parseInt(ctx.args.trim(), 10) || 10;
-  const result = await ctx.ipcClient.request<{ entries: HistoryEntry[] }>(
+  const count = parseInt(ctx.args.trim(), 10) || 10;
+  const result = await ctx.ipcClient.request<{ messages: HistoryEntry[] }>(
     "talkTail",
-    { n },
+    { count },
   );
-  return formatHistory(result.entries ?? (result as unknown as HistoryEntry[]));
+  return formatHistory(result.messages ?? []);
 }
 
 async function handleSearch(ctx: CommandContext): Promise<string> {
   if (!ctx.args.trim())
     return formatError("Missing argument", "Usage: /search <query>");
-  const result = await ctx.ipcClient.request<SearchResult[]>("searchHistory", {
-    query: ctx.args.trim(),
-  });
-  return formatSearchResults(result, ctx.args.trim());
+  const result = await ctx.ipcClient.request<{
+    results: SearchResult[];
+    count: number;
+  }>("searchHistory", { query: ctx.args.trim() });
+  return formatSearchResults(result.results ?? [], ctx.args.trim());
 }
 
 async function handleExport(ctx: CommandContext): Promise<string> {
@@ -484,11 +525,13 @@ async function handleProjects(ctx: CommandContext): Promise<string> {
 async function handleTask(ctx: CommandContext): Promise<string> {
   if (!ctx.args.trim())
     return formatError("Missing argument", "Usage: /task <description>");
-  const result = await ctx.ipcClient.request<{ id: string; status: string }>(
+  const description = ctx.args.trim();
+  const result = await ctx.ipcClient.request<{ task_id: string }>(
     "taskCreate",
-    { description: ctx.args.trim() },
+    // Both fields are required by the daemon; the prompt is the same text.
+    { description, prompt: description },
   );
-  return `🚀 Task created\n\nID: ${result.id}\nStatus: ${result.status}`;
+  return `🚀 Task created\n\nID: ${result.task_id}`;
 }
 
 async function handleTasks(ctx: CommandContext): Promise<string> {
@@ -500,10 +543,15 @@ async function handleTasks(ctx: CommandContext): Promise<string> {
 }
 
 async function handleTaskStop(ctx: CommandContext): Promise<string> {
-  if (!ctx.args.trim())
+  const taskId = ctx.args.trim();
+  if (!taskId)
     return formatError("Missing argument", "Usage: /task_stop <task-id>");
-  await ctx.ipcClient.request("taskStop", { id: ctx.args.trim() });
-  return `⏹️ Task stopped\n\nID: ${ctx.args.trim()}`;
+  const result = await ctx.ipcClient.request<{ stopped: boolean }>("taskStop", {
+    task_id: taskId,
+  });
+  return result?.stopped
+    ? `⏹️ Task stopped\n\nID: ${taskId}`
+    : `⚠️ Task ${taskId} was not running or not found.`;
 }
 
 async function handleCron(ctx: CommandContext): Promise<string> {
@@ -586,12 +634,11 @@ async function handleThink(_ctx: CommandContext): Promise<string> {
 async function handleSpec(ctx: CommandContext): Promise<string> {
   const parts = ctx.args.trim().split(/\s+/);
   const sub = parts[0] || "";
-  const rest = parts.slice(1).join(" ");
 
   switch (sub) {
     case "list": {
       const result = await ctx.ipcClient.request<
-        { specs: SpecInfo[] } | SpecInfo[]
+        { specs: SpecSummary[] } | SpecSummary[]
       >("specList");
       const specs = Array.isArray(result)
         ? result
@@ -599,33 +646,41 @@ async function handleSpec(ctx: CommandContext): Promise<string> {
       return formatSpecList(specs);
     }
     case "new": {
-      if (!rest)
-        return formatError("Missing argument", "Usage: /spec new <name>");
+      const name = parts[1];
+      if (!name)
+        return formatError(
+          "Missing argument",
+          "Usage: /spec new <name> [design] [bugfix]",
+        );
+      // Optional flag tokens, mirroring the CLI: [design] [bugfix].
+      const params: Record<string, string> = { feature_name: name };
+      if (parts.slice(1).includes("design")) params.workflow = "design";
+      if (parts.slice(1).includes("bugfix")) params.spec_type = "bugfix";
       const result = await ctx.ipcClient.request<{
-        name: string;
-        phase: string;
-      }>("specNew", { name: rest });
-      return `✅ Spec created\n\nName: ${result.name}\nPhase: ${result.phase}`;
+        feature_name: string;
+        config: { workflow: string; phase: string };
+      }>("specNew", params);
+      return `✅ Spec created\n\nName: ${result.feature_name}\nWorkflow: ${result.config?.workflow}\nPhase: ${result.config?.phase}`;
     }
     case "show": {
-      if (!rest)
+      const name = parts[1];
+      if (!name)
         return formatError("Missing argument", "Usage: /spec show <name>");
-      const result = await ctx.ipcClient.request<{
-        name: string;
-        content: string;
-        phase: string;
-      }>("specShow", { name: rest });
+      const result = await ctx.ipcClient.request<SpecSummary>("specShow", {
+        feature_name: name,
+      });
       return formatSpecShow(result);
     }
     case "status": {
-      if (!rest)
+      const name = parts[1];
+      if (!name)
         return formatError("Missing argument", "Usage: /spec status <name>");
       const result = await ctx.ipcClient.request<{
-        name: string;
-        phase: string;
-        tasks: { name: string; status: string }[];
-      }>("specStatus", { name: rest });
-      return formatSpecStatus(result);
+        total: number;
+        completed: number;
+        in_progress: number;
+      }>("specStatus", { feature_name: name });
+      return formatSpecStatus(name, result);
     }
     case "run": {
       const name = parts[1];
@@ -635,19 +690,18 @@ async function handleSpec(ctx: CommandContext): Promise<string> {
           "Missing argument",
           "Usage: /spec run <name> [task_id]",
         );
-      const params: Record<string, string> = { name };
+      const params: Record<string, string> = { feature_name: name };
       if (taskId) params.task_id = taskId;
       const result = await ctx.ipcClient.request<{
         task_id?: string;
+        task_description?: string;
         status: string;
         message?: string;
       }>("specRun", params);
-      return result.message
-        ? `🚀 Spec execution\n\n${result.message}`
-        : `🚀 Spec started\n\nTask ID: ${result.task_id || "N/A"}\nStatus: ${result.status}`;
+      return formatSpecRun(result);
     }
     default:
-      return "📋 Spec Commands\n\n• /spec list — list all\n• /spec new <name> — create\n• /spec show <name> — details\n• /spec status <name> — status\n• /spec run <name> — run";
+      return "📋 Spec Commands\n\n• /spec list — list all\n• /spec new <name> [design] [bugfix] — create\n• /spec show <name> — summary\n• /spec status <name> — task progress counts\n• /spec run <name> [task_id] — show next pending task";
   }
 }
 

@@ -923,7 +923,10 @@ const specCommand: Command = {
       case "new": {
         const name = parts[1];
         if (!name) {
-          return formatError("Missing argument", "Usage: /spec new <name>");
+          return formatError(
+            "Missing argument",
+            "Usage: /spec new <name> [design] [bugfix]",
+          );
         }
         // Optional flag tokens, mirroring the CLI: [design] [bugfix].
         const params: Record<string, string> = { feature_name: name };

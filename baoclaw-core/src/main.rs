@@ -942,6 +942,32 @@ async fn lc_session_close(
                         eprintln!("Telemetry record_session failed: {}", e);
                     }
                 }
+
+                // Finalize the cross-session search index: the query loop
+                // stubbed this row (foreign key for message indexing); the
+                // upsert here fills in the final turn count, cost and end
+                // time.
+                let now_rfc3339 = chrono::Utc::now().to_rfc3339();
+                let started_rfc3339 = (chrono::Utc::now()
+                    - chrono::Duration::seconds(duration_secs as i64))
+                .to_rfc3339();
+                if let Ok(db) = engine::cross_session_db::CrossSessionDb::new() {
+                    let summary = engine::cross_session_db::SessionIndex {
+                        id: session_id.to_string(),
+                        cwd: hook_cwd.to_string(),
+                        model,
+                        started_at: started_rfc3339,
+                        ended_at: now_rfc3339,
+                        turn_count: turns as i32,
+                        cost_usd: estimated_cost,
+                    };
+                    if let Err(e) = db.index_session(summary) {
+                        eprintln!(
+                            "[cross-session] WARNING: session summary not indexed: {}",
+                            e
+                        );
+                    }
+                }
             }
         }
 
