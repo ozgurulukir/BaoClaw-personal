@@ -23,6 +23,7 @@
 ├── models/                          # Local model files (whisper etc.)
 │   └── ggml-base.bin
 ├── telemetry.db                    # Local telemetry (SQLite; turns + sessions)
+├── cross_session.db                # Cross-session search index (SQLite FTS5; backfilled from session snapshots at startup)
 ├── evolution/                       # Self-evolution data
 │   ├── trajectories.jsonl           # Interaction history for RLHF
 │   ├── candidates/                  # Auto-extracted skill candidates

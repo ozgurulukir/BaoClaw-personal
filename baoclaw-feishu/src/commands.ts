@@ -258,7 +258,7 @@ function formatSearchResults(results: SearchResult[], query: string): string {
   let out = `🔍 Search Results: "${query}" (${results.length})\n\n`;
   for (const r of results) {
     const ts = r.timestamp?.slice(0, 19).replace("T", " ") || "";
-    const role = r.role === "user" ? "👤" : "🤖";
+    const role = r.role === "user" ? "👤" : r.role === "assistant" ? "🤖" : "";
     const body = r.snippet || r.text || "";
     out += `[${ts}] ${role}\n${body}\n\n`;
     if (out.length > MAX_OUTPUT) {

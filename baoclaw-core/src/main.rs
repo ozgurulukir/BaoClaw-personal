@@ -896,7 +896,9 @@ async fn lc_session_close(
                 let mut tool_counts: BTreeMap<String, u32> = BTreeMap::new();
                 for msg in &messages_clone {
                     match &msg.content {
-                        MessageContent::User { .. } => turns += 1,
+                        // Synthetic tool-result/system injections are not
+                        // turns — same semantics as the search backfill.
+                        MessageContent::User { is_meta, .. } if !*is_meta => turns += 1,
                         MessageContent::Assistant { message, .. } => {
                             for block in &message.content {
                                 if let crate::models::message::ContentBlock::ToolUse {
@@ -1123,6 +1125,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Reuse existing project session or create a new one
     let session_id = startup::resolve_session_id(&opts.cwd_str);
+
+    // Backfill historical session snapshots into the cross-session search
+    // index. Idempotent (already-indexed sessions are skipped) and runs in
+    // the background so startup never waits on it; daemon mode only —
+    // one-shot CLI runs must not pay the scan.
+    if opts.is_daemon {
+        tokio::task::spawn_blocking(|| match engine::cross_session_db::CrossSessionDb::new() {
+            Ok(db) => {
+                let (sessions, messages) = db
+                    .backfill_from_snapshots(&engine::session_persistence::default_sessions_dir());
+                if sessions > 0 {
+                    eprintln!(
+                        "[cross-session] backfill: imported {} historical session(s) ({} messages)",
+                        sessions, messages
+                    );
+                }
+            }
+            Err(e) => eprintln!("[cross-session] backfill skipped: {}", e),
+        });
+    }
 
     // Daemon-wide singletons shared by the kit, the tools and SharedState
     let tool_health = engine::tool_health::ToolHealthHandle::default();

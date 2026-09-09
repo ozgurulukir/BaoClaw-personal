@@ -68,9 +68,12 @@ export interface GitDiffResult {
 
 export interface SearchResult {
   timestamp?: string;
-  entry_type: string;
   snippet?: string;
-  context?: string;
+  /** Present in the active-session fallback shape (DB unavailable). */
+  role?: string;
+  text?: string;
+  session_id?: string;
+  cwd?: string;
 }
 
 export interface InitializeResult {
@@ -502,12 +505,18 @@ export function formatSearchResults(
   results: SearchResult[],
   query: string,
 ): string {
-  if (!results.length) return "No matching results found.";
+  if (!results.length) return `No matching results found for "${query}"`;
   let out = `🔍 Search results: "${query}" (${results.length})\n\n`;
   for (const r of results) {
     const ts = r.timestamp?.slice(0, 19).replace("T", " ") || "";
-    const role = r.entry_type === "UserMessage" ? "User" : "Assistant";
-    out += `[${ts}] ${role}\n${r.snippet || r.context || ""}\n\n`;
+    const role =
+      r.role === "user"
+        ? "👤 User"
+        : r.role === "assistant"
+          ? "🤖 Assistant"
+          : "";
+    const body = r.snippet || r.text || "";
+    out += `[${ts}]${role ? ` ${role}` : ""}\n${body}\n\n`;
     if (out.length > 3800) {
       out += "…(more results truncated)";
       break;

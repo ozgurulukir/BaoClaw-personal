@@ -1,7 +1,9 @@
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+
+use crate::models::message::{ContentBlock, MessageContent};
 
 // ── Data Structures ──────────────────────────────────────────────────────────
 
@@ -186,6 +188,141 @@ impl CrossSessionDb {
         .map_err(|e| format!("Insert message failed: {}", e))?;
 
         Ok(())
+    }
+
+    /// Whether any message is indexed for this session. Backfill uses this
+    /// to skip sessions that are already indexed — the live indexer writes
+    /// the session row before its messages, so row-presence alone would
+    /// double-count live sessions.
+    pub fn has_messages(&self, session_id: &str) -> bool {
+        let Ok(conn) = self.conn.lock() else {
+            return false;
+        };
+        conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM messages WHERE session_id = ?1)",
+            params![session_id],
+            |row| row.get::<_, i64>(0),
+        )
+        .map(|v| v != 0)
+        .unwrap_or(false)
+    }
+
+    /// Backfill historical session snapshots into the search index.
+    ///
+    /// Scans `<sessions_dir>/*.json` (skipping `registry.json`); for every
+    /// session with no indexed messages yet, upserts the session row and
+    /// indexes its real user prompts and assistant text (meta user messages
+    /// — synthetic tool results and system injections — are skipped, and
+    /// non-text assistant blocks carry no searchable prose). Idempotent:
+    /// already-indexed sessions are skipped, so restarts never duplicate
+    /// messages. Returns (sessions imported, messages indexed).
+    pub fn backfill_from_snapshots(&self, sessions_dir: &Path) -> (usize, usize) {
+        use crate::engine::session_persistence::PersistedSession;
+
+        let entries = match std::fs::read_dir(sessions_dir) {
+            Ok(e) => e,
+            Err(_) => return (0, 0),
+        };
+        let mut sessions = 0usize;
+        let mut messages = 0usize;
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("json") {
+                continue;
+            }
+            if path.file_name().and_then(|n| n.to_str()) == Some("registry.json") {
+                continue;
+            }
+            let Ok(raw) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            // Corrupt or foreign JSON is skipped, like rebuild_registry.
+            let Ok(snapshot) = serde_json::from_str::<PersistedSession>(&raw) else {
+                continue;
+            };
+            if self.has_messages(&snapshot.session_id) {
+                continue;
+            }
+            // Never guess at a future snapshot shape — same rule as
+            // rebuild_registry.
+            if snapshot.schema_version > crate::engine::session_persistence::CURRENT_SCHEMA_VERSION
+            {
+                continue;
+            }
+
+            // One extraction pass first: the session row must exist before
+            // its messages (foreign key).
+            let mut turn_count = 0i32;
+            let mut cost_usd = 0.0f64;
+            let mut extracted: Vec<(&str, String, &str)> = Vec::new();
+            for msg in &snapshot.messages {
+                match &msg.content {
+                    MessageContent::User {
+                        message, is_meta, ..
+                    } => {
+                        if *is_meta {
+                            continue;
+                        }
+                        turn_count += 1;
+                        let text = match &message.content {
+                            serde_json::Value::String(s) => s.clone(),
+                            other => serde_json::to_string(other).unwrap_or_default(),
+                        };
+                        if !text.is_empty() {
+                            extracted.push(("user", text, msg.timestamp.as_str()));
+                        }
+                    }
+                    MessageContent::Assistant {
+                        message,
+                        cost_usd: c,
+                        ..
+                    } => {
+                        cost_usd += c;
+                        let text = message
+                            .content
+                            .iter()
+                            .filter_map(|b| match b {
+                                ContentBlock::Text { text } => Some(text.clone()),
+                                _ => None,
+                            })
+                            .collect::<Vec<_>>()
+                            .join(" ");
+                        if !text.is_empty() {
+                            extracted.push(("assistant", text, msg.timestamp.as_str()));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+
+            let summary = SessionIndex {
+                id: snapshot.session_id.clone(),
+                cwd: snapshot.cwd.clone(),
+                model: snapshot.model.clone(),
+                started_at: snapshot.created_at.clone(),
+                ended_at: snapshot.last_active.clone(),
+                turn_count,
+                cost_usd,
+            };
+            if self.index_session(summary).is_err() {
+                continue;
+            }
+            let mut indexed_here = 0usize;
+            for (role, text, ts) in &extracted {
+                match self.index_message(&snapshot.session_id, role, text, ts) {
+                    Ok(()) => indexed_here += 1,
+                    // A dropped message must be visible, or the
+                    // has_messages guard would hide the gap forever.
+                    Err(e) => eprintln!(
+                        "[cross-session] WARNING: backfill message not indexed for {}: {}",
+                        snapshot.session_id, e
+                    ),
+                }
+            }
+            sessions += 1;
+            messages += indexed_here;
+        }
+        (sessions, messages)
     }
 
     /// Full-text search using FTS5 with bm25 ranking.
@@ -494,6 +631,105 @@ mod tests {
         // The indexed message must survive every re-upsert.
         let hits = db.search("indexer", 10);
         assert_eq!(hits.len(), 1, "messages must survive session upserts");
+    }
+
+    #[test]
+    fn test_backfill_from_snapshots_imports_and_is_idempotent() {
+        use serde_json::json;
+        let dir = tempdir().unwrap();
+        let sessions_dir = dir.path().join("sessions");
+        std::fs::create_dir_all(&sessions_dir).unwrap();
+
+        // One valid historical snapshot (user + assistant turn).
+        let snap = json!({
+            "schema_version": 1,
+            "session_id": "hist-1",
+            "cwd": "/tmp/proj",
+            "model": "test-model",
+            "created_at": "2026-08-01T10:00:00Z",
+            "last_active": "2026-08-01T10:05:00Z",
+            "messages": [
+                { "uuid": "u1", "timestamp": "2026-08-01T10:00:10Z",
+                  "type": "user",
+                  "message": { "role": "user", "content": "what is the backfill budget" },
+                  "is_meta": false, "tool_use_result": null },
+                { "uuid": "u2", "timestamp": "2026-08-01T10:00:11Z",
+                  "type": "user",
+                  "message": { "role": "user", "content": [{"type":"tool_result"}] },
+                  "is_meta": true, "tool_use_result": null },
+                { "uuid": "a1", "timestamp": "2026-08-01T10:00:12Z",
+                  "type": "assistant",
+                  "message": { "role": "assistant",
+                               "content": [ { "type": "text", "text": "the budget is small" } ],
+                               "stop_reason": "end_turn", "usage": null },
+                  "cost_usd": 0.02, "duration_ms": 0 }
+            ]
+        });
+        std::fs::write(
+            sessions_dir.join("hist-1.json"),
+            serde_json::to_string(&snap).unwrap(),
+        )
+        .unwrap();
+        // Corrupt JSON and the registry index must both be skipped.
+        std::fs::write(sessions_dir.join("broken.json"), "{not json").unwrap();
+        std::fs::write(sessions_dir.join("registry.json"), "{}").unwrap();
+
+        let (db, _dir) = test_db();
+        let (s, m) = db.backfill_from_snapshots(&sessions_dir);
+        assert_eq!((s, m), (1, 2), "meta user messages are not indexed");
+
+        let hits = db.search("backfill budget", 10);
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].session_id, "hist-1");
+
+        let recent = db.get_recent_sessions(10);
+        assert_eq!(recent.len(), 1);
+        assert_eq!(recent[0].turn_count, 1, "meta messages are not turns");
+        assert_eq!(recent[0].cost_usd, 0.02);
+        assert_eq!(recent[0].started_at, "2026-08-01T10:00:00Z");
+
+        // Second run: already indexed — must not duplicate anything.
+        let (s2, m2) = db.backfill_from_snapshots(&sessions_dir);
+        assert_eq!((s2, m2), (0, 0));
+        assert_eq!(db.get_session_messages("hist-1").len(), 2);
+    }
+
+    #[test]
+    fn test_backfill_skips_sessions_that_were_live_indexed() {
+        use serde_json::json;
+        let dir = tempdir().unwrap();
+        let sessions_dir = dir.path().join("sessions");
+        std::fs::create_dir_all(&sessions_dir).unwrap();
+        let snap = json!({
+            "schema_version": 1,
+            "session_id": "live-1",
+            "cwd": "/tmp/proj",
+            "model": "test-model",
+            "created_at": "2026-08-01T10:00:00Z",
+            "last_active": "2026-08-01T10:05:00Z",
+            "messages": [
+                { "uuid": "u1", "timestamp": "2026-08-01T10:00:10Z",
+                  "type": "user",
+                  "message": { "role": "user", "content": "snapshot copy" },
+                  "is_meta": false, "tool_use_result": null }
+            ]
+        });
+        std::fs::write(
+            sessions_dir.join("live-1.json"),
+            serde_json::to_string(&snap).unwrap(),
+        )
+        .unwrap();
+
+        let (db, _dir) = test_db();
+        // The live indexer already wrote this session (row + messages).
+        db.index_session(summary("live-1")).unwrap();
+        db.index_message("live-1", "user", "live copy", "2026-08-01T11:00:00Z")
+            .unwrap();
+
+        let (s, m) = db.backfill_from_snapshots(&sessions_dir);
+        assert_eq!((s, m), (0, 0), "live-indexed sessions must be skipped");
+        assert_eq!(db.get_session_messages("live-1").len(), 1);
+        assert!(db.search("snapshot copy", 10).is_empty());
     }
 
     #[test]

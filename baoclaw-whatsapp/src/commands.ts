@@ -117,7 +117,7 @@ interface SearchResult {
 
 interface HistoryEntry {
   role: string;
-  content: string;
+  text: string;
   timestamp?: string;
 }
 
@@ -292,16 +292,16 @@ function formatGitCommit(result: GitCommitResult): string {
   return `✅ *Committed*\n\nHash: \`${result.hash}\`\nMessage: ${result.message}`;
 }
 
-function formatHistory(entries: HistoryEntry[], count: number): string {
+function formatHistory(entries: HistoryEntry[]): string {
   if (!entries || entries.length === 0) return "No conversation history.";
   let out = `📜 *Recent Conversation* (${entries.length})\n\n`;
   for (const e of entries) {
     const role = e.role === "user" ? "👤" : "🤖";
-    const content =
-      e.content.length > TOOL_CONTENT_PREVIEW_CHARS
-        ? e.content.slice(0, TOOL_CONTENT_PREVIEW_CHARS) + "…"
-        : e.content;
-    out += `${role} ${content}\n\n`;
+    const text =
+      e.text.length > TOOL_CONTENT_PREVIEW_CHARS
+        ? e.text.slice(0, TOOL_CONTENT_PREVIEW_CHARS) + "…"
+        : e.text;
+    out += `${role} ${text}\n\n`;
     if (out.length > MAX_OUTPUT) {
       out += "…(more truncated)";
       break;
@@ -316,9 +316,9 @@ function formatSearchResults(results: SearchResult[], query: string): string {
   let out = `🔍 *Search Results*: "${query}" (${results.length})\n\n`;
   for (const r of results) {
     const ts = r.timestamp?.slice(0, 19).replace("T", " ") || "";
-    const role = r.role === "user" ? "👤" : "🤖";
+    const role = r.role === "user" ? "👤" : r.role === "assistant" ? "🤖" : "";
     const body = r.snippet || r.text || "";
-    out += `[${ts}] ${role}\n${body}\n\n`;
+    out += `[${ts}]${role ? ` ${role}` : ""}\n${body}\n\n`;
     if (out.length > MAX_OUTPUT) {
       out += "…(more results truncated)";
       break;
@@ -526,15 +526,12 @@ const historyCommand: Command = {
   description: "Show recent conversation",
   usage: "/history [n]",
   async handler(ctx) {
-    const n = parseInt(ctx.args.trim(), 10) || 10;
-    const result = await ctx.ipcClient.request<{ entries: HistoryEntry[] }>(
+    const count = parseInt(ctx.args.trim(), 10) || 10;
+    const result = await ctx.ipcClient.request<{ messages: HistoryEntry[] }>(
       "talkTail",
-      { n },
+      { count },
     );
-    return formatHistory(
-      result.entries ?? (result as unknown as HistoryEntry[]),
-      n,
-    );
+    return formatHistory(result.messages ?? []);
   },
 };
 

@@ -1688,8 +1688,17 @@ async fn scm_search_history(
                 if text.to_lowercase().contains(&query_lower) {
                     let lower = text.to_lowercase();
                     let idx = lower.find(&query_lower).unwrap_or(0);
-                    let start = idx.saturating_sub(50);
-                    let end = (idx + query.len() + 100).min(text.len());
+                    // Byte offsets from the lowercased copy can land
+                    // mid-character in the original (multibyte text,
+                    // case-expanding lowercase) — clamp to boundaries.
+                    let mut start = idx.saturating_sub(50);
+                    while start > 0 && !text.is_char_boundary(start) {
+                        start -= 1;
+                    }
+                    let mut end = (idx + query.len() + 100).min(text.len());
+                    while end < text.len() && !text.is_char_boundary(end) {
+                        end += 1;
+                    }
                     let snippet = &text[start..end];
                     results.push(serde_json::json!({
                         "role": role,

@@ -153,9 +153,9 @@ pub async fn run_query_loop(
     let cross_db = crate::engine::cross_session_db::CrossSessionDb::new().ok();
 
     // Stub the session row before message indexing: index_message has a
-    // foreign key on sessions(id), so without this row every insert is
-    // silently rejected. The full summary is upserted (INSERT OR REPLACE)
-    // again when the session closes.
+    // foreign key on sessions(id), so without this row every insert fails.
+    // The full summary is upserted again (ON CONFLICT, preserving the
+    // original started_at) when the session closes.
     if let (Some(ref db), Some(ref sid)) = (&cross_db, &config.session_id) {
         let now = chrono::Utc::now().to_rfc3339();
         let summary = crate::engine::cross_session_db::SessionIndex {

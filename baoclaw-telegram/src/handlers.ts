@@ -445,10 +445,10 @@ export function createCommandHandlers(
     if (!args.trim()) return "Usage: /search <query>";
     if (!ipcClient.connected) return formatDisconnected();
     try {
-      const result = await ipcClient.request<{ results: SearchResult[] }>(
-        "searchHistory",
-        { query: args.trim(), max_results: 10 },
-      );
+      const result = await ipcClient.request<{
+        results: SearchResult[];
+        count: number;
+      }>("searchHistory", { query: args.trim(), max_results: 10 });
       return formatSearchResults(result.results || [], args.trim());
     } catch (err) {
       return formatError(err);

@@ -54,7 +54,7 @@ A quick annotated tour of the repository, grouped by area. Verify paths locally 
 
 ### User state at runtime (not in the repo)
 
-- **~/.baoclaw/** — per-user daemon state: `config.json`, `sessions/`, memories (`memory.jsonl`), the user profile (`USER.md`), `evolution/`, `telemetry.db`, and `cron.json`.
+- **~/.baoclaw/** — per-user daemon state: `config.json`, `sessions/`, memories (`memory.jsonl`), the user profile (`USER.md`), `evolution/`, `telemetry.db`, `cross_session.db` (search index, backfilled from `sessions/` snapshots at daemon startup), and `cron.json`.
 
 ---
 

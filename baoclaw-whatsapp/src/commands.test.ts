@@ -1,5 +1,6 @@
-/** Contract tests for the automation command family (/task, /tasks, /task_stop)
- * against the daemon's taskCreate/taskStop/taskList RPC shapes. */
+/** Contract tests for the automation command family (/task, /tasks,
+ * /task_stop, /history) against the daemon's taskCreate/taskStop/taskList/
+ * talkTail RPC shapes. */
 import test from "node:test";
 import assert from "node:assert/strict";
 import { dispatchCommand, type CommandContext } from "./commands.js";
@@ -93,6 +94,25 @@ test("/tasks renders Failed enum objects from the daemon", async () => {
   assert.match(out!, /Completed/);
   assert.match(out!, /Failed: boom/);
   assert.doesNotMatch(out!, /\[object Object\]/);
+});
+
+test("/history sends count and unwraps the {messages} envelope (text field)", async () => {
+  const ipc = mockIpcClient(() => ({
+    messages: [
+      {
+        role: "user",
+        text: "fix the login flow",
+        timestamp: "2026-09-09T10:00:00Z",
+      },
+    ],
+    count: 1,
+    total: 9,
+  }));
+  const out = await dispatchCommand(makeCtx("/history", ipc));
+  assert.equal(ipc.calls[0].method, "talkTail");
+  assert.deepEqual(ipc.calls[0].params, { count: 10 });
+  assert.match(out!, /fix the login flow/);
+  assert.doesNotMatch(out!, /undefined/);
 });
 
 test("/task with no args shows usage, no RPC", async () => {
