@@ -5,8 +5,10 @@
  */
 import {
   IpcClient,
+  formatSearchResults as formatSearchResultsShared,
   formatToolHealth,
   type ControlChannel,
+  type SearchResult,
   type ToolHealthData,
 } from "baoclaw-ipc";
 import { logger } from "./log.js";
@@ -88,15 +90,7 @@ interface GitCommitResult {
 interface GitDiffResult {
   diff: string;
 }
-interface SearchResult {
-  timestamp?: string;
-  snippet?: string;
-  /** Present in the active-session fallback shape (DB unavailable). */
-  role?: string;
-  text?: string;
-  session_id?: string;
-  cwd?: string;
-}
+
 interface HistoryEntry {
   role: string;
   text: string;
@@ -254,19 +248,13 @@ function formatHistory(entries: HistoryEntry[]): string {
 }
 
 function formatSearchResults(results: SearchResult[], query: string): string {
-  if (!results?.length) return `No matches found for "${query}"`;
-  let out = `🔍 Search Results: "${query}" (${results.length})\n\n`;
-  for (const r of results) {
-    const ts = r.timestamp?.slice(0, 19).replace("T", " ") || "";
-    const role = r.role === "user" ? "👤" : r.role === "assistant" ? "🤖" : "";
-    const body = r.snippet || r.text || "";
-    out += `[${ts}] ${role}\n${body}\n\n`;
-    if (out.length > MAX_OUTPUT) {
-      out += "…";
-      break;
-    }
-  }
-  return out;
+  return formatSearchResultsShared(results, query, {
+    maxChars: MAX_OUTPUT,
+    emptyMessage: (q) => `No matches found for "${q}"`,
+    header: (q, n) => `🔍 Search Results: "${q}" (${n})\n\n`,
+    userLabel: "👤",
+    assistantLabel: "🤖",
+  });
 }
 
 function formatExport(result: ExportResult): string {

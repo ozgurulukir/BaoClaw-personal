@@ -13,12 +13,12 @@ import {
   formatToolHealth,
   type ControlChannel,
   type DaemonInfo,
+  type SearchResult,
   type ToolHealthData,
 } from "baoclaw-ipc";
 import { createLogger } from "baoclaw-ipc/logger";
 import {
   SessionState,
-  SearchResult,
   COMMAND_REGISTRY,
   formatTools,
   formatSkills,

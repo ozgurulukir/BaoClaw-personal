@@ -21,3 +21,8 @@ export {
   type ToolHealthData,
   type ToolHealthRecordInfo,
 } from "./toolHealth.js";
+export {
+  formatSearchResults,
+  type FormatSearchResultsOptions,
+  type SearchResult,
+} from "./search.js";

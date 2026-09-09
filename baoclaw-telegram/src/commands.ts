@@ -4,6 +4,11 @@
  * Format functions and handlers are added in later tasks.
  */
 
+import {
+  formatSearchResults as formatSearchResultsShared,
+  type SearchResult,
+} from "baoclaw-ipc";
+
 // ═══════════════════════════════════════════════════════════════
 // RPC Response Type Interfaces
 // ═══════════════════════════════════════════════════════════════
@@ -64,16 +69,6 @@ export interface GitCommitResult {
 
 export interface GitDiffResult {
   diff: string;
-}
-
-export interface SearchResult {
-  timestamp?: string;
-  snippet?: string;
-  /** Present in the active-session fallback shape (DB unavailable). */
-  role?: string;
-  text?: string;
-  session_id?: string;
-  cwd?: string;
 }
 
 export interface InitializeResult {
@@ -505,22 +500,12 @@ export function formatSearchResults(
   results: SearchResult[],
   query: string,
 ): string {
-  if (!results.length) return `No matching results found for "${query}"`;
-  let out = `🔍 Search results: "${query}" (${results.length})\n\n`;
-  for (const r of results) {
-    const ts = r.timestamp?.slice(0, 19).replace("T", " ") || "";
-    const role =
-      r.role === "user"
-        ? "👤 User"
-        : r.role === "assistant"
-          ? "🤖 Assistant"
-          : "";
-    const body = r.snippet || r.text || "";
-    out += `[${ts}]${role ? ` ${role}` : ""}\n${body}\n\n`;
-    if (out.length > 3800) {
-      out += "…(more results truncated)";
-      break;
-    }
-  }
-  return out;
+  return formatSearchResultsShared(results, query, {
+    maxChars: 3800,
+    emptyMessage: (q) => `No matching results found for "${q}"`,
+    header: (q, n) => `🔍 Search results: "${q}" (${n})\n\n`,
+    userLabel: "👤 User",
+    assistantLabel: "🤖 Assistant",
+    truncatedMarker: "…(more results truncated)",
+  });
 }

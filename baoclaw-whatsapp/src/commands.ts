@@ -5,8 +5,10 @@
  */
 import { IpcClient } from "baoclaw-ipc/client";
 import {
+  formatSearchResults as formatSearchResultsShared,
   formatToolHealth,
   type ControlChannel,
+  type SearchResult,
   type ToolHealthData,
 } from "baoclaw-ipc";
 import * as fs from "fs";
@@ -103,16 +105,6 @@ interface GitCommitResult {
 
 interface GitDiffResult {
   diff: string;
-}
-
-interface SearchResult {
-  timestamp?: string;
-  snippet?: string;
-  /** Present in the active-session fallback shape (DB unavailable). */
-  role?: string;
-  text?: string;
-  session_id?: string;
-  cwd?: string;
 }
 
 interface HistoryEntry {
@@ -311,20 +303,14 @@ function formatHistory(entries: HistoryEntry[]): string {
 }
 
 function formatSearchResults(results: SearchResult[], query: string): string {
-  if (!results || results.length === 0)
-    return `No results found for "${query}"`;
-  let out = `🔍 *Search Results*: "${query}" (${results.length})\n\n`;
-  for (const r of results) {
-    const ts = r.timestamp?.slice(0, 19).replace("T", " ") || "";
-    const role = r.role === "user" ? "👤" : r.role === "assistant" ? "🤖" : "";
-    const body = r.snippet || r.text || "";
-    out += `[${ts}]${role ? ` ${role}` : ""}\n${body}\n\n`;
-    if (out.length > MAX_OUTPUT) {
-      out += "…(more results truncated)";
-      break;
-    }
-  }
-  return out;
+  return formatSearchResultsShared(results, query, {
+    maxChars: MAX_OUTPUT,
+    emptyMessage: (q) => `No results found for "${q}"`,
+    header: (q, n) => `🔍 *Search Results*: "${q}" (${n})\n\n`,
+    userLabel: "👤",
+    assistantLabel: "🤖",
+    truncatedMarker: "…(more results truncated)",
+  });
 }
 
 function formatExport(result: ExportResult): string {

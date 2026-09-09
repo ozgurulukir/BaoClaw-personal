@@ -17,6 +17,7 @@ import {
   type DaemonInfo,
 } from "./daemon.js";
 import { formatToolHealth, type ToolHealthData } from "./toolHealth.js";
+import type { SearchResult } from "./search.js";
 import * as fs from "fs";
 import * as os from "os";
 // @ts-ignore — pdf-parse and mammoth loaded dynamically for CJS compat
@@ -5595,14 +5596,7 @@ async function main() {
       startSpinner("Searching history...");
       try {
         const result = await client.request<{
-          results: Array<{
-            snippet?: string;
-            text?: string;
-            timestamp?: string;
-            session_id?: string;
-            cwd?: string;
-            role?: string;
-          }>;
+          results: SearchResult[];
           count: number;
         }>("searchHistory", { query, max_results: limit });
         stopSpinner();

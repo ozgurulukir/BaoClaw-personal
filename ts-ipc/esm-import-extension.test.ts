@@ -96,6 +96,7 @@ const ALL_SOURCE_FILES = [
   "logger.ts",
   "security.ts",
   "toolHealth.ts",
+  "search.ts",
 ];
 
 /**
@@ -115,6 +116,7 @@ const KNOWN_BARE_SPECIFIERS: Record<string, string[]> = {
   "logger.ts": ["fs"],
   "security.ts": ["node:fs"],
   "toolHealth.ts": [],
+  "search.ts": [],
 };
 
 /**
