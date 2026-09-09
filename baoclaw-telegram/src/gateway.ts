@@ -155,9 +155,8 @@ async function main() {
     logger.info(`Telegram bot @${botInfo.username} ready.`);
 
     // Keep the server-side command menu in sync with the registry. The menu
-    // persists per-bot at Telegram; without this, entries set by whatever
-    // previously used this bot token (e.g. stale "update hermes agent")
-    // would linger forever.
+    // persists per-bot at Telegram; without this, stale entries left by
+    // whatever previously used this bot token would linger forever.
     try {
       await bot.api.setMyCommands({
         commands: Object.entries(COMMAND_REGISTRY).map(([name, def]) => ({

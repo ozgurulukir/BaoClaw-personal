@@ -1,6 +1,6 @@
 //! Self-evolution engine — learns from interactions to create and improve skills.
 //!
-//! Inspired by Hermes Agent's learning loop:
+//! The learning loop:
 //! 1. After complex tasks, extract reusable patterns as skills
 //! 2. Track skill usage and outcomes for refinement
 //! 3. Periodically self-evaluate and improve skills

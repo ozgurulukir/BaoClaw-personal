@@ -116,7 +116,7 @@ pub async fn run_query_loop(
     let mut cost_tracker = CostTracker::new();
     cost_tracker.reset_query();
 
-    // Iteration budget pressure tracking (Hermes-style 70/90/100 gradient)
+    // Iteration budget pressure tracking (70/90/100 gradient)
     let mut budget_warned_70: bool = false;
     let mut budget_warned_90: bool = false;
 

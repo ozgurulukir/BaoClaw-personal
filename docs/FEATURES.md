@@ -23,7 +23,7 @@
 
 ### 🔄 Self-Evolution Engine (Experimental)
 
-Inspired by [Hermes Agent](https://github.com/NousResearch/hermes-agent)'s learning loop:
+A closed learning loop:
 
 - **Trajectory recording** — each query logs its prompt, tool actions, outcome (completed/max-turns/aborted), and duration
 - **Skill auto-generation** — complex successful tasks are extracted as reusable skill candidates

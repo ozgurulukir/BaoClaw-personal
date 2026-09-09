@@ -30,7 +30,7 @@ BaoClaw 是一个开源 AI 编程 Agent，基于 Rust 核心引擎，具备持�
 
 ### 🔄 自我进化引擎（实验性）
 
-参考 [Hermes Agent](https://github.com/NousResearch/hermes-agent) 的学习循环：
+一个闭环学习循环：
 
 - 轨迹记录 — 每次交互自动记录工具调用、结果和耗时
 - Skill 自动生成 — 复杂的成功任务自动提取为可复用的 skill 候选
