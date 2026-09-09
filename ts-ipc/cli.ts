@@ -894,6 +894,11 @@ const COMMANDS = [
   "/tokens",
   "/token",
   "/verbose",
+  "/search",
+  "/export",
+  "/spec",
+  "/status",
+  "/tasks",
   "/cost",
   "/rate",
   "/session",
@@ -5573,6 +5578,253 @@ async function main() {
       return;
     };
 
+    const cmd_search = async (args: string): Promise<void> => {
+      const trimmed = args.trim();
+      if (!trimmed) {
+        console.log(`\n${FG_YELLOW}Usage: /search <query> [limit]${RESET}\n`);
+        rl.prompt();
+        return;
+      }
+      const tokens = trimmed.split(/\s+/);
+      let limit = 10;
+      if (tokens.length > 1 && /^\d+$/.test(tokens[tokens.length - 1])) {
+        limit = Math.min(50, parseInt(tokens[tokens.length - 1], 10));
+        tokens.pop();
+      }
+      const query = tokens.join(" ");
+      startSpinner("Searching history...");
+      try {
+        const result = await client.request<{
+          results: Array<{
+            snippet?: string;
+            text?: string;
+            timestamp?: string;
+            session_id?: string;
+            cwd?: string;
+            role?: string;
+          }>;
+          count: number;
+        }>("searchHistory", { query, max_results: limit });
+        stopSpinner();
+        if (!result.results || result.results.length === 0) {
+          console.log(`\n${DIM}No results for "${query}"${RESET}\n`);
+        } else {
+          console.log(
+            `\n${FG_ORANGE}${BOLD}Search${RESET} ${DIM}"${query}" (${result.results.length})${RESET}\n`,
+          );
+          for (const r of result.results) {
+            const ts = (r.timestamp || "").slice(0, 19).replace("T", " ");
+            const sid = (r.session_id || "").slice(0, 8);
+            const raw = r.snippet || r.text || "";
+            const oneLine = raw.replace(/\s+/g, " ").trim();
+            const preview =
+              oneLine.length > 120 ? oneLine.slice(0, 120) + "…" : oneLine;
+            console.log(
+              `  ${DIM}[${ts}]${RESET} ${FG_CYAN}${sid}${RESET}  ${preview}`,
+            );
+            if (r.cwd) console.log(`    ${DIM}${r.cwd}${RESET}`);
+          }
+          console.log();
+        }
+      } catch (err) {
+        stopSpinner();
+        console.error(`${FG_RED}Search failed: ${err}${RESET}`);
+      }
+      rl.prompt();
+      return;
+    };
+
+    const cmd_export = async (args: string): Promise<void> => {
+      const outputPath = args.trim();
+      startSpinner("Exporting conversation...");
+      try {
+        const result = await client.request<{
+          file_path: string;
+          message_count: number;
+          size_bytes: number;
+        }>("export", outputPath ? { output_path: outputPath } : {});
+        stopSpinner();
+        console.log(`\n${FG_GREEN}${BOLD}Exported${RESET}`);
+        console.log(`  ${FG_WHITE}File:${RESET}     ${result.file_path}`);
+        console.log(`  ${FG_WHITE}Messages:${RESET} ${result.message_count}`);
+        console.log(
+          `  ${FG_WHITE}Size:${RESET}     ${(result.size_bytes / 1024).toFixed(1)} KB\n`,
+        );
+      } catch (err: any) {
+        stopSpinner();
+        console.error(`${FG_RED}${err?.message || err}${RESET}\n`);
+      }
+      rl.prompt();
+      return;
+    };
+
+    const cmd_status = async (): Promise<void> => {
+      const connected = client.connected
+        ? `${FG_GREEN}connected${RESET}`
+        : `${FG_RED}disconnected${RESET}`;
+      console.log(`\n${FG_ORANGE}${BOLD}Status${RESET}`);
+      console.log(`  ${FG_WHITE}Daemon:${RESET}  ${connected}`);
+      try {
+        const info = await client.request<any>("session.info", {});
+        console.log(
+          `  ${FG_WHITE}Session:${RESET} ${FG_CYAN}${String(info.session_id ?? "?").slice(0, 8)}${RESET}`,
+        );
+        console.log(`  ${FG_WHITE}CWD:${RESET}     ${info.cwd ?? "?"}`);
+        console.log(`  ${FG_WHITE}Model:${RESET}   ${info.model ?? "?"}`);
+        console.log(`  ${FG_WHITE}Turns:${RESET}   ${info.message_count ?? 0}`);
+        console.log(
+          `  ${FG_WHITE}Active:${RESET}  ${info.last_active ? timeSince(info.last_active) : "now"}`,
+        );
+      } catch (err) {
+        console.error(`${FG_RED}Failed to get session info: ${err}${RESET}`);
+      }
+      console.log();
+      rl.prompt();
+      return;
+    };
+
+    const cmd_spec = async (args: string): Promise<void> => {
+      const specArgs = args.trim();
+      const parts = specArgs.split(/\s+/).filter(Boolean);
+      const sub = parts[0] || "";
+      const rest = parts.slice(1).join(" ");
+
+      if (sub === "list" || sub === "") {
+        try {
+          const result = await client.request<{ specs: any[] }>("specList", {});
+          const specs = result.specs ?? [];
+          if (specs.length === 0) {
+            console.log(
+              `\n${DIM}No specs. Use /spec new <name> to create one.${RESET}\n`,
+            );
+          } else {
+            console.log(
+              `\n${FG_ORANGE}${BOLD}Specs${RESET} ${DIM}(${specs.length})${RESET}\n`,
+            );
+            for (const s of specs) {
+              const p = s.task_progress;
+              const prog = p
+                ? `  ${DIM}(${p.completed}/${p.total} tasks)${RESET}`
+                : "";
+              console.log(
+                `  ${FG_WHITE}${s.feature_name}${RESET}  ${DIM}[${s.phase}${s.spec_type ? "/" + s.spec_type : ""}]${RESET}${prog}`,
+              );
+            }
+            console.log();
+          }
+        } catch (err) {
+          console.error(`${FG_RED}${err}${RESET}`);
+        }
+        rl.prompt();
+        return;
+      }
+
+      if (sub === "new") {
+        const name = rest.split(/\s+/)[0];
+        if (!name) {
+          console.log(
+            `\n${FG_YELLOW}Usage: /spec new <name> [design] [bugfix]${RESET}\n`,
+          );
+          rl.prompt();
+          return;
+        }
+        const params: Record<string, unknown> = { feature_name: name };
+        const flags = parts.slice(1);
+        if (flags.includes("design")) params.workflow = "design";
+        if (flags.includes("bugfix")) params.spec_type = "bugfix";
+        try {
+          const result = await client.request<{
+            feature_name: string;
+            config: { workflow: string; phase: string; spec_type: string };
+          }>("specNew", params);
+          console.log(
+            `\n${FG_GREEN}✓ Spec created:${RESET} ${FG_WHITE}${result.feature_name}${RESET}  ${DIM}[${result.config?.workflow} · ${result.config?.phase}]${RESET}\n`,
+          );
+        } catch (err: any) {
+          console.error(`${FG_RED}${err?.message || err}${RESET}\n`);
+        }
+        rl.prompt();
+        return;
+      }
+
+      if (sub === "show" || sub === "status" || sub === "run") {
+        const name = rest.split(/\s+/)[0];
+        if (!name) {
+          console.log(`\n${FG_YELLOW}Usage: /spec ${sub} <name>${RESET}\n`);
+          rl.prompt();
+          return;
+        }
+        try {
+          if (sub === "show") {
+            const s = await client.request<any>("specShow", {
+              feature_name: name,
+            });
+            console.log(
+              `\n${FG_ORANGE}${BOLD}Spec${RESET} ${FG_WHITE}${s.feature_name}${RESET}`,
+            );
+            console.log(
+              `  ${FG_WHITE}Workflow:${RESET} ${s.workflow}   ${FG_WHITE}Phase:${RESET} ${s.phase}   ${FG_WHITE}Type:${RESET} ${s.spec_type}`,
+            );
+            if (s.task_progress) {
+              console.log(
+                `  ${FG_WHITE}Progress:${RESET} ${s.task_progress.completed}/${s.task_progress.total} tasks (${s.task_progress.in_progress} in progress)`,
+              );
+            }
+            console.log();
+          } else if (sub === "status") {
+            const p = await client.request<any>("specStatus", {
+              feature_name: name,
+            });
+            console.log(
+              `\n${FG_ORANGE}${BOLD}Spec Status${RESET} ${FG_WHITE}${name}${RESET}`,
+            );
+            console.log(
+              `  ${FG_WHITE}Total:${RESET} ${p.total}  ${FG_GREEN}Completed:${RESET} ${p.completed}  ${FG_YELLOW}In progress:${RESET} ${p.in_progress}\n`,
+            );
+          } else {
+            const runParams: Record<string, unknown> = { feature_name: name };
+            const taskId = rest.split(/\s+/)[1];
+            if (taskId) runParams.task_id = taskId;
+            const r = await client.request<any>("specRun", runParams);
+            if (r.status === "all_complete") {
+              console.log(
+                `\n${FG_GREEN}✓ ${r.message ?? "All tasks are completed"}${RESET}\n`,
+              );
+            } else {
+              console.log(
+                `\n${FG_ORANGE}${BOLD}Next task${RESET} ${DIM}[${r.task_id}]${RESET}`,
+              );
+              console.log(`  ${r.task_description}\n`);
+            }
+          }
+        } catch (err: any) {
+          console.error(`${FG_RED}${err?.message || err}${RESET}\n`);
+        }
+        rl.prompt();
+        return;
+      }
+
+      // Unknown /spec subcommand — show usage
+      console.log(`\n${FG_ORANGE}${BOLD}Spec Commands${RESET}\n`);
+      console.log(
+        `  ${FG_WHITE}/spec list${RESET}                    ${DIM}List specs${RESET}`,
+      );
+      console.log(
+        `  ${FG_WHITE}/spec new <name> [design] [bugfix]${RESET}  ${DIM}Create a spec${RESET}`,
+      );
+      console.log(
+        `  ${FG_WHITE}/spec show <name>${RESET}             ${DIM}Show spec summary${RESET}`,
+      );
+      console.log(
+        `  ${FG_WHITE}/spec status <name>${RESET}           ${DIM}Task progress counts${RESET}`,
+      );
+      console.log(
+        `  ${FG_WHITE}/spec run <name>${RESET}              ${DIM}Show next pending task${RESET}\n`,
+      );
+      rl.prompt();
+      return;
+    };
+
     const cmd_help = async (): Promise<void> => {
       console.log(`\n${FG_ORANGE}${BOLD}Commands${RESET}\n`);
       const rows = commands.filter((e) => e.section && e.help);
@@ -5730,10 +5982,16 @@ async function main() {
         handler: cmd_template,
       },
       {
-        names: ["/task"],
+        names: ["/task", "/tasks"],
         section: "Templates & Automation",
-        help: "Background tasks: /task run|list|status|stop",
+        help: "Background tasks: /task run|list|status|stop (/tasks = full alias)",
         handler: cmd_task,
+      },
+      {
+        names: ["/spec"],
+        section: "Templates & Automation",
+        help: "Spec workflow: /spec list|new|show|status|run",
+        handler: cmd_spec,
       },
       {
         names: ["/cron"],
@@ -5806,6 +6064,24 @@ async function main() {
         section: "Session & Info",
         help: "Show token usage stats",
         handler: cmd_tokens,
+      },
+      {
+        names: ["/search"],
+        section: "Session & Info",
+        help: "Search conversation history: /search <query> [limit]",
+        handler: cmd_search,
+      },
+      {
+        names: ["/export"],
+        section: "Session & Info",
+        help: "Export session transcript to Markdown: /export [path]",
+        handler: cmd_export,
+      },
+      {
+        names: ["/status"],
+        section: "Session & Info",
+        help: "Daemon connection & session overview",
+        handler: cmd_status,
       },
       {
         names: ["/rate"],

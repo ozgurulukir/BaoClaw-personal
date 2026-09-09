@@ -275,6 +275,11 @@ loop — each carries an inline status note and a tracking issue.
 | `/commit <msg>` | Stage all and commit                         |
 | `/git`          | Git status (branch, changes)                 |
 | `/task`         | Background tasks: run, list, status, stop    |
+| `/tasks`        | Full alias of `/task`                        |
+| `/spec`         | Spec workflow: list, new, show, status, run  |
+| `/search`       | Search conversation history: /search <query> |
+| `/export [p]`   | Export transcript to Markdown                |
+| `/status`       | Daemon connection & session overview         |
 | `/voice`        | Voice input (requires whisper.cpp)           |
 | `/telegram`     | Manage Telegram gateway: start, stop, status |
 | `/telemetry`    | Telemetry: status, on/off, stats, trends     |

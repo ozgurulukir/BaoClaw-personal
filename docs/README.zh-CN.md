@@ -678,6 +678,11 @@ baoclaw
 | `/commit <消息>` | 暂存并提交                                    |
 | `/git`           | 查看 git 状态                                 |
 | `/task`          | 后台任务：run, list, status, stop             |
+| `/tasks`         | `/task` 的完整别名                            |
+| `/spec`          | 规格工作流：list、new、show、status、run      |
+| `/search`        | 搜索对话历史：/search <查询>                  |
+| `/export`        | 导出会话记录为 Markdown                       |
+| `/status`        | 守护进程连接与会话概览                        |
 | `/voice`         | 语音输入（需要 whisper.cpp）                  |
 | `/telegram`      | 管理 Telegram 网关                            |
 | `/telemetry`     | 遥测：status、on/off、stats、trends、export   |

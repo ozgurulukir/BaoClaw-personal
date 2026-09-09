@@ -214,6 +214,11 @@ baoclaw-whatsapp         # long-running process
 /health      Tool health overview (/health all for every tracked tool)
 /rate       Rate the last interaction (good|bad|neutral) for preference data
 /telemetry   Telemetry recording: /telemetry [status|on|off|stats|trends|export]
+/search      Search conversation history: /search <query> [limit]
+/export      Export transcript to Markdown: /export [path]
+/spec        Spec workflow: /spec list|new|show|status|run
+/status      Daemon connection & session overview
+/tasks       Full alias of /task (run|list|status|stop)
 /clear       Clear the screen
 /exit        Exit
 ```
