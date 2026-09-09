@@ -58,6 +58,8 @@ pub enum ClientMethod {
     ListPlugins,
     #[serde(rename = "compact")]
     Compact,
+    #[serde(rename = "clearSession")]
+    ClearSession,
     #[serde(rename = "switchModel")]
     SwitchModel { model: String },
     #[serde(rename = "gitDiff")]

@@ -797,9 +797,20 @@ const startCommand: Command = {
 
 const clearCommand: Command = {
   name: "/clear",
-  description: "Clear local cache",
-  async handler(_ctx) {
-    return "🧹 Local cache cleared";
+  description: "Clear the conversation history",
+  async handler(ctx) {
+    if (!ctx.ipcClient.connected) {
+      return "🔴 Daemon not connected";
+    }
+    try {
+      const result = await ctx.ipcClient.request<{
+        cleared: boolean;
+        messages_removed: number;
+      }>("clearSession");
+      return `🧹 Conversation cleared (${result.messages_removed} messages removed). Starting fresh.`;
+    } catch (err) {
+      return `⚠️ Clear failed: ${err instanceof Error ? err.message : String(err)}`;
+    }
   },
 };
 

@@ -305,6 +305,7 @@ The following CLI commands are also available in Telegram:
 | `/projects`                          | Project management: list, switch, new, desc |
 | `/task`                              | Manage background tasks                     |
 | `/diff` `/commit` `/git`             | Git operations                              |
+| `/clear`                             | Clear the conversation history              |
 | `/abort`                             | Cancel current task                         |
 | `/status`                            | Gateway status                              |
 | `/help`                              | Show all commands                           |

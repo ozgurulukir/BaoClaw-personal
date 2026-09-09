@@ -21,6 +21,15 @@ pub struct SharedSession {
     engine: Arc<RwLock<QueryEngine>>,
     /// The currently active message submitter (at most one at a time).
     active_submitter: Mutex<Option<ClientId>>,
+    /// The client whose turn drain will hand-deliver the next terminal
+    /// event. Armed right before the drain broadcasts the event and
+    /// consumed by the receiving broadcast task, so the terminal event is
+    /// written to the submitting connection exactly once (the drain writes
+    /// it directly). Without this, the broadcast task races
+    /// `release_submitter`: once the release wins, its submitter check no
+    /// longer skips the event and the submitting client receives the
+    /// Result/Error twice — chat gateways show the assistant answer twice.
+    terminal_handoff: Mutex<Option<ClientId>>,
     /// Broadcast sender for engine events.
     event_tx: broadcast::Sender<EngineEvent>,
     /// Set of currently connected client IDs.
@@ -51,6 +60,7 @@ impl SharedSession {
         Self {
             engine: Arc::new(RwLock::new(engine)),
             active_submitter: Mutex::new(None),
+            terminal_handoff: Mutex::new(None),
             event_tx,
             connected_clients: Mutex::new(HashSet::new()),
             next_client_id: AtomicU64::new(1),
@@ -104,6 +114,12 @@ impl SharedSession {
             *submitter = None;
         }
 
+        // Drop any terminal hand-off armed for this client
+        let mut handoff = self.terminal_handoff.lock().await;
+        if *handoff == Some(client_id) {
+            *handoff = None;
+        }
+
         Some(self.connected_clients.lock().await.is_empty())
     }
 
@@ -125,6 +141,31 @@ impl SharedSession {
         let mut submitter = self.active_submitter.lock().await;
         if *submitter == Some(client_id) {
             *submitter = None;
+        }
+    }
+
+    /// Arm the terminal hand-off for `client_id`.
+    ///
+    /// The turn drain calls this immediately before broadcasting a terminal
+    /// event (`Result`/`Error`). Because the flag is always set before the
+    /// event enters the broadcast channel, every receiver observes it armed
+    /// — the delivery decision is deterministic, not a timing race.
+    pub async fn arm_terminal_handoff(&self, client_id: ClientId) {
+        *self.terminal_handoff.lock().await = Some(client_id);
+    }
+
+    /// Consume the terminal hand-off if it belongs to `client_id`.
+    ///
+    /// Returns `true` when the caller must not write the terminal event —
+    /// the submitting client's turn drain already delivered it directly.
+    /// A `false` for a foreign client leaves the armed flag untouched.
+    pub async fn take_terminal_handoff(&self, client_id: ClientId) -> bool {
+        let mut slot = self.terminal_handoff.lock().await;
+        if *slot == Some(client_id) {
+            *slot = None;
+            true
+        } else {
+            false
         }
     }
 
@@ -549,6 +590,33 @@ impl SessionRegistry {
         }
     }
 
+    /// Reset a session's persisted conversation: empty the in-memory
+    /// messages, truncate the JSONL transcript, and write a fresh snapshot.
+    /// Long-term memory files (`{id}.memory.md`, the shared memory store)
+    /// are intentionally kept — clearing is about the conversation, not the
+    /// project's knowledge. Returns the number of messages removed.
+    pub async fn clear_conversation(&self, session_id: &str) -> Result<usize, String> {
+        let sessions = self.sessions.lock().await;
+        let session = match sessions.get(session_id) {
+            Some(s) => Arc::clone(s),
+            None => return Err(format!("session {} not found in registry", session_id)),
+        };
+        drop(sessions); // release registry lock before acquiring engine write lock
+
+        let removed = {
+            let mut engine = session.engine_write().await;
+            let removed = engine.get_messages().len();
+            engine.set_messages(Vec::new());
+            removed
+        };
+
+        session_persistence::reset_transcript(&self.persistence_dir, session_id)
+            .map_err(|e| format!("could not reset transcript for {}: {}", session_id, e))?;
+        self.persist_session(session_id).await?;
+
+        Ok(removed)
+    }
+
     /// Persist all currently in-memory sessions to disk.
     /// Useful for graceful shutdown (SIGTERM/SIGINT handlers).
     pub async fn persist_all(&self) {
@@ -864,5 +932,95 @@ mod tests {
 
         assert!(registry.load_persisted_session("s1").is_some());
         assert!(registry.load_persisted_session("s2").is_some());
+    }
+
+    #[tokio::test]
+    async fn clear_conversation_empties_messages_and_resets_disk() {
+        let (_dir, registry, cwd, _) = make_registry();
+        let (session, _) = registry
+            .get_or_create("clear-me", || make_engine(cwd, "clear-me"))
+            .await;
+        session
+            .engine_write()
+            .await
+            .set_messages(vec![crate::models::message::Message {
+                uuid: uuid::Uuid::new_v4().to_string(),
+                timestamp: chrono::Utc::now().to_rfc3339(),
+                content: crate::models::message::MessageContent::User {
+                    message: crate::models::message::ApiUserMessage {
+                        role: "user".to_string(),
+                        content: serde_json::Value::String("hello".to_string()),
+                    },
+                    is_meta: false,
+                    tool_use_result: None,
+                },
+            }]);
+
+        let removed = registry.clear_conversation("clear-me").await.unwrap();
+        assert_eq!(removed, 1);
+        assert!(session.engine_read().await.get_messages().is_empty());
+
+        // Snapshot now holds zero messages; transcript was truncated.
+        let persisted = registry
+            .load_persisted_session("clear-me")
+            .expect("snapshot persisted");
+        assert!(persisted.messages.is_empty());
+        let transcript = session_persistence::session_artifact_path(
+            registry.persistence_dir(),
+            "clear-me",
+            "jsonl",
+        )
+        .unwrap();
+        assert_eq!(std::fs::read_to_string(transcript).unwrap_or_default(), "");
+
+        // Unknown sessions are reported, not silently cleared.
+        assert!(registry.clear_conversation("no-such").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn terminal_handoff_is_consumed_once_by_owner() {
+        let (_dir, registry, cwd, _) = make_registry();
+        let (session, _) = registry
+            .get_or_create("handoff", || make_engine(cwd, "handoff"))
+            .await;
+        let (submitter, _) = session.add_client().await;
+        let (observer, _) = session.add_client().await;
+
+        session.arm_terminal_handoff(submitter).await;
+
+        // The submitting client's broadcast task consumes the hand-off.
+        assert!(session.take_terminal_handoff(submitter).await);
+        // Consumed exactly once — a second terminal event in the same turn
+        // (e.g. Result followed by Error) is written normally.
+        assert!(!session.take_terminal_handoff(submitter).await);
+
+        // Re-arm for the next turn; a foreign client's take must not touch
+        // the flag nor steal it.
+        session.arm_terminal_handoff(submitter).await;
+        assert!(!session.take_terminal_handoff(observer).await);
+        assert!(session.take_terminal_handoff(submitter).await);
+    }
+
+    #[tokio::test]
+    async fn terminal_handoff_survives_foreign_take_and_clears_on_detach() {
+        let (_dir, registry, cwd, _) = make_registry();
+        let (session, _) = registry
+            .get_or_create("handoff2", || make_engine(cwd, "handoff2"))
+            .await;
+        let (submitter, _) = session.add_client().await;
+        let (observer, _) = session.add_client().await;
+
+        session.arm_terminal_handoff(submitter).await;
+        // Observer sees the terminal event first: not its hand-off, flag
+        // stays armed for the submitter's own task.
+        assert!(!session.take_terminal_handoff(observer).await);
+        assert!(session.take_terminal_handoff(submitter).await);
+
+        // A client that disconnects between arm and take clears the flag so
+        // a later re-used client id cannot have its terminal event skipped.
+        session.arm_terminal_handoff(submitter).await;
+        session.remove_client(submitter).await;
+        assert!(!session.take_terminal_handoff(submitter).await);
+        assert!(!session.take_terminal_handoff(observer).await);
     }
 }

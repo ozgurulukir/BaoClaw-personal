@@ -469,6 +469,28 @@ QueryEngine.submit_message_with_attachments()
                 └── Skill extraction if applicable
 ```
 
+### Event Delivery and Terminal Hand-Off
+
+Stream events reach a client connection through two paths: the turn's
+drain task writes them directly to the submitting connection, and a
+per-client broadcast task forwards the shared broadcast channel to every
+_other_ connected client. The broadcast task skips events while the
+submitter lock is held — but the lock is released after the drain's final
+disk sync, so without extra bookkeeping the broadcast task could observe a
+terminal `Result`/`Error` event _after_ the release and write it a second
+time. Clients that send one answer per terminal event (chat gateways)
+would then show the assistant message twice.
+
+The fix is deterministic: the drain arms a per-client terminal hand-off
+flag _before_ broadcasting a terminal event, and the receiving broadcast
+task consumes the flag instead of writing. Because the flag is always set
+before the event can enter the broadcast channel, delivery is decided by
+ordering, never by timing. `clearSession` follows the same
+conversation-scoped discipline: it empties the in-memory messages,
+truncates the JSONL transcript and writes a fresh snapshot, while
+long-term memory files (`{id}.memory.md`, the shared memory store) stay
+intact.
+
 ## See also
 
 - [Permission system](PERMISSIONS.md)

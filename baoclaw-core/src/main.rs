@@ -296,6 +296,17 @@ fn spawn_shared_broadcast(
         loop {
             match rx.recv().await {
                 Ok(event) => {
+                    // Terminal events are hand-delivered to the submitting
+                    // client by its turn drain. Consume the hand-off first:
+                    // once `release_submitter` has run, the check below no
+                    // longer skips for the submitting client, and without the
+                    // hand-off it would receive the Result/Error a second
+                    // time (duplicated assistant messages on chat gateways).
+                    if matches!(event, EngineEvent::Result(_) | EngineEvent::Error(_))
+                        && session.take_terminal_handoff(client_id).await
+                    {
+                        continue;
+                    }
                     if session.is_active_submitter(client_id).await {
                         continue;
                     }

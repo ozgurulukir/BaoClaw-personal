@@ -277,11 +277,17 @@ export function createCommandHandlers(
     return formatStart(daemonInfo, chatId, sessionState);
   }
 
-  function handleClear(): string {
-    return (
-      `ℹ️ Each Telegram connection has its own conversation history managed by the daemon. ` +
-      `Reconnect the gateway for a fresh session.`
-    );
+  async function handleClear(): Promise<string> {
+    if (!ipcClient.connected) return formatDisconnected();
+    try {
+      const result = await ipcClient.request<{
+        cleared: boolean;
+        messages_removed: number;
+      }>("clearSession");
+      return `🧹 Conversation cleared (${result.messages_removed} messages removed). Starting fresh.`;
+    } catch (err) {
+      return formatError(err);
+    }
   }
 
   async function handleShutdown(): Promise<string> {

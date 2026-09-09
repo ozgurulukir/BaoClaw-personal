@@ -808,6 +808,18 @@ pub fn delete_session(sessions_dir: &Path, session_id: &str) -> io::Result<()> {
     save_registry_unlocked(sessions_dir, &index)
 }
 
+/// Truncate a session's JSONL transcript to empty, keeping every other
+/// artifact. Part of the `clearSession` RPC: the conversation restarts
+/// fresh while long-term memory files stay intact. Safe to call between
+/// turns — the transcript writer is opened per turn in append mode and
+/// will re-create a missing file.
+pub fn reset_transcript(sessions_dir: &Path, session_id: &str) -> io::Result<()> {
+    validate_session_id(session_id)?;
+    let _guard = persistence_lock().lock().unwrap_or_else(|e| e.into_inner());
+    let path = session_artifact_path(sessions_dir, session_id, "jsonl")?;
+    fs::write(&path, "")
+}
+
 fn validate_session_id(session_id: &str) -> io::Result<()> {
     if is_valid_session_id(session_id) {
         Ok(())
@@ -1232,6 +1244,44 @@ mod tests {
         // Registry should be empty
         let idx = load_registry(&sessions_dir);
         assert!(idx.sessions.is_empty());
+    }
+
+    #[test]
+    fn test_reset_transcript_truncates_and_keeps_artifacts() {
+        let dir = make_test_dir();
+        let sessions_dir = dir.path().join("sessions");
+
+        let state = PersistedSession {
+            schema_version: CURRENT_SCHEMA_VERSION,
+            session_id: "clear-1".to_string(),
+            cwd: "/tmp".to_string(),
+            model: "m".to_string(),
+            created_at: "2025-01-01T00:00:00Z".to_string(),
+            last_active: "2025-01-01T00:00:00Z".to_string(),
+            messages: Vec::new(),
+            memory_summary: None,
+        };
+        persist_session_state(&sessions_dir, &state).unwrap();
+        let transcript = session_artifact_path(&sessions_dir, "clear-1", "jsonl").unwrap();
+        fs::write(&transcript, "{\"entry\":1}\n{\"entry\":2}\n").unwrap();
+        let memory = session_artifact_path(&sessions_dir, "clear-1", "memory.md").unwrap();
+        fs::write(&memory, "long-term summary").unwrap();
+
+        reset_transcript(&sessions_dir, "clear-1").unwrap();
+
+        assert_eq!(fs::read_to_string(&transcript).unwrap(), "");
+        // Long-term memory artifact must survive a conversation clear.
+        assert_eq!(fs::read_to_string(&memory).unwrap(), "long-term summary");
+        assert!(load_session_state(&sessions_dir, "clear-1").is_some());
+
+        // Calling it without an existing transcript creates an empty one.
+        reset_transcript(&sessions_dir, "clear-2").unwrap();
+        assert!(session_artifact_path(&sessions_dir, "clear-2", "jsonl")
+            .unwrap()
+            .exists());
+
+        // Invalid ids are rejected, not written.
+        assert!(reset_transcript(&sessions_dir, "../escape").is_err());
     }
 
     #[test]

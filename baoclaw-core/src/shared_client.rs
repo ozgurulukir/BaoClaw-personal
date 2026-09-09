@@ -199,6 +199,9 @@ pub(super) async fn handle_shared_client(
                             ScmFlow::Break => break,
                             ScmFlow::Continue => continue,
                         },
+                        ClientMethod::ClearSession => {
+                            scm_clear_session(&shared, &session, &session_id, &writer, id).await;
+                        }
                         ClientMethod::SwitchModel { model: new_model } => {
                             match scm_switch_model(&session, &shared, &writer, id, new_model).await
                             {
@@ -668,6 +671,13 @@ async fn scm_submit_message(
             }
 
             let terminal_event = matches!(&event, EngineEvent::Result(_) | EngineEvent::Error(_));
+            if terminal_event {
+                // Arm before broadcasting: this client's broadcast task then
+                // skips the terminal event, which the direct write below
+                // delivers. Deterministic — the flag is set before the event
+                // can enter the broadcast channel.
+                task_session.arm_terminal_handoff(task_client_id).await;
+            }
             // Capture a structured failure so the RPC reply reports the
             // turn as an error instead of an unconditional "complete"
             // (an Error event alone used to be replied as success).
@@ -949,6 +959,46 @@ async fn scm_compact(
         }
     }
     ScmFlow::Continue
+}
+
+/// Empty the session's conversation in memory and on disk (fresh start).
+/// Long-term memory is kept. Rejected while a turn is in flight.
+async fn scm_clear_session(
+    shared: &SharedState,
+    session: &Arc<SharedSession>,
+    session_id: &str,
+    writer: WriterRef<'_>,
+    id: RequestId,
+) {
+    if session.has_active_submitter().await {
+        let mut conn_guard = writer.lock().await;
+        let _ = conn_guard
+            .send_error(
+                Some(id),
+                -32002,
+                "session busy: cannot clear while a message is being processed".into(),
+            )
+            .await;
+        return;
+    }
+    match shared.session_registry.clear_conversation(session_id).await {
+        Ok(removed) => {
+            let mut conn_guard = writer.lock().await;
+            let _ = conn_guard
+                .send_response(
+                    id,
+                    serde_json::json!({
+                        "cleared": true,
+                        "messages_removed": removed,
+                    }),
+                )
+                .await;
+        }
+        Err(message) => {
+            let mut conn_guard = writer.lock().await;
+            let _ = conn_guard.send_error(Some(id), -32000, message).await;
+        }
+    }
 }
 
 async fn scm_switch_model(
