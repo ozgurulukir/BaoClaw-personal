@@ -7,8 +7,10 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use tokio::sync::Mutex;
 
+use crate::engine::memory::apply_decay;
 use crate::engine::memory::archive::{ArchiveResult, MemoryArchive};
-use crate::engine::memory::{apply_decay, DecayConfig};
+use crate::engine::memory::decay::{boost_on_recall, days_since_anchor, decay_score, DecayConfig};
+use crate::engine::security::validate_memory_content;
 
 const MEMORY_FILE: &str = "memory.jsonl";
 
@@ -22,6 +24,9 @@ pub enum MemoryError {
     /// A corrupted entry was encountered during read.
     /// The entry is skipped but the error is surfaced for logging.
     Corrupted { line: usize, reason: String },
+    /// Content rejected by the memory security scan (credential patterns,
+    /// invisible unicode, prompt-injection phrasing).
+    Rejected(String),
 }
 
 impl std::fmt::Display for MemoryError {
@@ -32,6 +37,7 @@ impl std::fmt::Display for MemoryError {
             Self::Corrupted { line, reason } => {
                 write!(f, "Corrupted entry at line {}: {}", line, reason)
             }
+            Self::Rejected(reason) => write!(f, "{}", reason),
         }
     }
 }
@@ -41,7 +47,7 @@ impl std::error::Error for MemoryError {
         match self {
             Self::Io(e) => Some(e),
             Self::Serde(e) => Some(e),
-            Self::Corrupted { .. } => None,
+            Self::Corrupted { .. } | Self::Rejected(_) => None,
         }
     }
 }
@@ -58,7 +64,7 @@ impl From<serde_json::Error> for MemoryError {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum MemoryCategory {
     #[serde(rename = "fact")]
     Fact,
@@ -111,11 +117,25 @@ fn default_importance() -> f64 {
     DEFAULT_IMPORTANCE
 }
 
+/// Outcome of a store add: the stored entry plus whether this call created
+/// it. An exact-content duplicate returns the existing entry unmodified
+/// (`created: false`) instead of accumulating an identical line.
+#[derive(Debug, Clone)]
+pub struct AddOutcome {
+    pub entry: MemoryEntry,
+    pub created: bool,
+}
+
 /// Persistent memory store backed by a JSONL file.
 /// Supports both global (~/.baoclaw/) and project-level (<cwd>/.baoclaw/) memory.
 pub struct MemoryStore {
     entries: Mutex<Vec<MemoryEntry>>,
     file_path: Mutex<PathBuf>,
+    /// Serializes file mutations (appends and whole-file rewrites) against
+    /// each other. Without it, a rewrite's entries snapshot could clobber a
+    /// concurrently appended entry on disk (in-memory state would heal it
+    /// only at the next rewrite — or lose it at process exit).
+    persist: Mutex<()>,
 }
 
 impl MemoryStore {
@@ -138,6 +158,7 @@ impl MemoryStore {
         Self {
             entries: Mutex::new(entries),
             file_path: Mutex::new(file_path),
+            persist: Mutex::new(()),
         }
     }
 
@@ -160,6 +181,7 @@ impl MemoryStore {
         Self {
             entries: Mutex::new(entries),
             file_path: Mutex::new(file_path),
+            persist: Mutex::new(()),
         }
     }
 
@@ -187,12 +209,26 @@ impl MemoryStore {
             Err(_) => return Vec::new(), // File doesn't exist yet → empty Vec (not an error)
         };
         let mut entries = Vec::new();
+        let mut seen = std::collections::HashSet::new();
         for (line_no, line) in content.lines().enumerate() {
             if line.trim().is_empty() {
                 continue;
             }
             match serde_json::from_str::<MemoryEntry>(line) {
-                Ok(e) => entries.push(e),
+                Ok(e) => {
+                    // Order-preserving dedup: an exact-content duplicate (e.g.
+                    // from the pre-store MemoryTool that appended blindly)
+                    // renders twice in every prompt; keep the first occurrence.
+                    if !seen.insert(e.content.clone()) {
+                        eprintln!(
+                            "WARNING: duplicate memory entry at line {} in {} skipped",
+                            line_no,
+                            path.display()
+                        );
+                        continue;
+                    }
+                    entries.push(e);
+                }
                 Err(e) => {
                     // Log corrupted line but don't abort reading (degraded mode: skip + warn)
                     eprintln!(
@@ -212,7 +248,18 @@ impl MemoryStore {
             .iter()
             .map(serde_json::to_string)
             .collect::<Result<Vec<_>, _>>()?;
-        std::fs::write(path, lines.join("\n") + "\n")?;
+        let body = if lines.is_empty() {
+            String::new()
+        } else {
+            lines.join("\n") + "\n"
+        };
+        // Write to a sibling temp file and rename: a crash mid-write must
+        // never leave a truncated active file (the reader would degrade to
+        // "empty memory" on the surviving partial line).
+        let tmp = path.with_extension("jsonl.tmp");
+        std::fs::write(&tmp, body)?;
+        std::fs::rename(&tmp, path)?;
+        ensure_private_perms(path);
         Ok(())
     }
 
@@ -226,18 +273,57 @@ impl MemoryStore {
         content: String,
         category: MemoryCategory,
         source: String,
-    ) -> Result<MemoryEntry, MemoryError> {
+    ) -> Result<AddOutcome, MemoryError> {
+        self.add_with_importance(content, category, source, DEFAULT_IMPORTANCE)
+            .await
+    }
+
+    /// Add a new memory entry with an explicit importance score.
+    ///
+    /// The write path enforces the store's invariants regardless of caller
+    /// (model tool or user IPC): content must pass the memory security scan,
+    /// and an exact-content duplicate is idempotent — the existing entry is
+    /// returned with `created: false` instead of being re-appended.
+    ///
+    /// `importance` is clamped to `0.0..=1.0`; values above the default make a
+    /// memory decay slower and rank higher in the budgeted prompt fragment.
+    pub async fn add_with_importance(
+        &self,
+        content: String,
+        category: MemoryCategory,
+        source: String,
+        importance: f64,
+    ) -> Result<AddOutcome, MemoryError> {
+        validate_memory_content(&content).map_err(MemoryError::Rejected)?;
+
         let entry = MemoryEntry {
             id: uuid::Uuid::new_v4().to_string()[..8].to_string(),
             content,
             category,
             created_at: chrono::Utc::now().to_rfc3339(),
             source,
-            importance: DEFAULT_IMPORTANCE,
+            importance: importance.clamp(0.0, 1.0),
             recall_count: 0,
             last_recalled_at: None,
             archived: false,
         };
+
+        // Lock order: persist → entries (same as every whole-file rewrite).
+        let _persist = self.persist.lock().await;
+
+        {
+            let entries = self.entries.lock().await;
+            if let Some(existing) = entries
+                .iter()
+                .filter(|e| !e.archived)
+                .find(|e| e.content == entry.content)
+            {
+                return Ok(AddOutcome {
+                    entry: existing.clone(),
+                    created: false,
+                });
+            }
+        }
 
         // Serialize before acquiring any locks
         let serialized_line = serde_json::to_string(&entry)?;
@@ -263,12 +349,16 @@ impl MemoryStore {
                 .open(&fp)?;
             use std::io::Write;
             writeln!(f, "{}", serialized_line)?;
+            ensure_private_perms(&fp);
             Ok::<(), MemoryError>(())
         })
         .await;
 
         match join_result {
-            Ok(Ok(())) => Ok(entry),
+            Ok(Ok(())) => Ok(AddOutcome {
+                entry,
+                created: true,
+            }),
             Ok(Err(e)) => {
                 eprintln!("ERROR: memory write failed for entry {}: {}", entry.id, e);
                 Err(e)
@@ -296,6 +386,9 @@ impl MemoryStore {
     /// Returns `Ok(true)` if a memory was deleted, `Ok(false)` if no match found.
     /// Returns `Err(MemoryError)` if the file rewrite fails.
     pub async fn delete(&self, id_prefix: &str) -> Result<bool, MemoryError> {
+        // Lock order: persist → entries, so a delete's whole-file rewrite can
+        // never interleave with an add's append (which would drop it).
+        let _persist = self.persist.lock().await;
         let entries_snapshot;
         let mut entries = self.entries.lock().await;
         let before = entries.len();
@@ -329,6 +422,7 @@ impl MemoryStore {
     /// Returns the number of cleared memories on success.
     /// Returns `Err(MemoryError)` if the file truncation fails.
     pub async fn clear(&self) -> Result<usize, MemoryError> {
+        let _persist = self.persist.lock().await;
         let count = {
             let mut entries = self.entries.lock().await;
             let count = entries.len();
@@ -355,60 +449,124 @@ impl MemoryStore {
         }
     }
 
-    /// Build a system prompt fragment from all memories.
-    /// Returns None if no memories exist.
+    /// Build the long-term memory system prompt fragment.
     ///
-    /// Re-reads the memory file first: MemoryTool appends to disk directly
-    /// (bypassing this store), so a fresh read is what makes mid-session
-    /// saves reach the model without a daemon restart.
+    /// Entries are ranked by decayed importance and rendered within a
+    /// character budget (`DecayConfig::prompt_char_budget`) so the always-on
+    /// prompt cost stays bounded as the store grows. Entries that don't fit
+    /// stay reachable through the MemorySearch tool, which is pointed to in a
+    /// trailing note. Returns None if no memories exist (or nothing fits).
     pub async fn build_prompt_fragment(&self) -> Option<String> {
-        {
-            let path = self.file_path.lock().await.clone();
-            let fresh = Self::read_file(&path);
-            let mut entries = self.entries.lock().await;
-            *entries = fresh;
-        }
+        let config = DecayConfig::load();
+        self.build_prompt_fragment_with(&config).await
+    }
+
+    /// Config-injectable variant of [`build_prompt_fragment`] (test seam).
+    pub async fn build_prompt_fragment_with(&self, config: &DecayConfig) -> Option<String> {
         let entries = self.entries.lock().await;
-        if entries.is_empty() {
+        let candidates: Vec<&MemoryEntry> = entries
+            .iter()
+            .filter(|e| !e.archived && !e.content.trim().is_empty())
+            .collect();
+        if candidates.is_empty() {
             return None;
         }
 
+        // Rank by decayed importance (highest first; stable on ties so file
+        // order breaks them deterministically).
+        let mut ranked: Vec<(&MemoryEntry, f64)> = candidates
+            .iter()
+            .map(|e| (*e, decayed_score(e, config)))
+            .collect();
+        ranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+
+        // Greedy budget fill on the ranked order.
+        let mut selected: Vec<&MemoryEntry> = Vec::new();
+        let mut used = 0usize;
+        for (entry, _) in &ranked {
+            // Char (not byte) accounting so the budget means the same thing
+            // for CJK content, which costs ~3 bytes per char.
+            let line_len = entry.content.chars().count() + 2; // "- " prefix
+            if used + line_len > config.prompt_char_budget {
+                continue;
+            }
+            used += line_len;
+            selected.push(entry);
+        }
+        if selected.is_empty() {
+            return None;
+        }
+        let omitted = ranked.len() - selected.len();
+
         let mut parts = Vec::new();
-        parts.push("# Long-term Memory\n\nThe following are facts, preferences, and decisions remembered from previous conversations. Use them to provide personalized responses.\n".to_string());
+        parts.push(format!(
+            "# Long-term Memory [{}/{} memories · {}/{} chars]\n\n\
+             The following are facts, preferences, and decisions remembered from previous conversations. \
+             Use them to provide personalized responses.\n",
+            selected.len(),
+            ranked.len(),
+            used,
+            config.prompt_char_budget
+        ));
 
-        let facts: Vec<&MemoryEntry> = entries
-            .iter()
-            .filter(|e| matches!(e.category, MemoryCategory::Fact))
-            .collect();
-        let prefs: Vec<&MemoryEntry> = entries
-            .iter()
-            .filter(|e| matches!(e.category, MemoryCategory::Preference))
-            .collect();
-        let decisions: Vec<&MemoryEntry> = entries
-            .iter()
-            .filter(|e| matches!(e.category, MemoryCategory::Decision))
-            .collect();
-
-        if !facts.is_empty() {
-            parts.push("## Facts".to_string());
-            for e in &facts {
+        // Render selected entries grouped by category, in canonical order.
+        for (category, title) in [
+            (MemoryCategory::Fact, "## Facts"),
+            (MemoryCategory::Preference, "## Preferences"),
+            (MemoryCategory::Decision, "## Decisions"),
+        ] {
+            let group: Vec<&&MemoryEntry> =
+                selected.iter().filter(|e| e.category == category).collect();
+            if group.is_empty() {
+                continue;
+            }
+            parts.push(title.to_string());
+            for e in group {
                 parts.push(format!("- {}", e.content));
             }
         }
-        if !prefs.is_empty() {
-            parts.push("\n## Preferences".to_string());
-            for e in &prefs {
-                parts.push(format!("- {}", e.content));
-            }
-        }
-        if !decisions.is_empty() {
-            parts.push("\n## Decisions".to_string());
-            for e in &decisions {
-                parts.push(format!("- {}", e.content));
-            }
+
+        if omitted > 0 {
+            parts.push(format!(
+                "\n[{} lower-priority memories not shown — recall them with the MemorySearch tool.]",
+                omitted
+            ));
         }
 
         Some(parts.join("\n"))
+    }
+
+    /// Record a recall event for the given entry IDs.
+    ///
+    /// Applies the decay module's recall boost (importance bump, recall
+    /// counter, last-recalled timestamp) and persists the updated entries.
+    /// This is what keeps frequently-searched memories off the decay
+    /// death-clock; without it the time-only decay archives everything
+    /// purely by age.
+    pub async fn record_recall(&self, ids: &[String], config: &DecayConfig) {
+        // Persist lock held across mutation AND snapshot so the rewrite can
+        // never clobber a concurrently appended entry.
+        let snapshot = {
+            let _persist = self.persist.lock().await;
+            let mut entries = self.entries.lock().await;
+            let mut changed = 0usize;
+            for entry in entries.iter_mut() {
+                if ids.iter().any(|id| entry.id.starts_with(id.as_str())) {
+                    boost_on_recall(entry, config);
+                    changed += 1;
+                }
+            }
+            if changed == 0 {
+                return;
+            }
+            entries.clone()
+        };
+        let fp = self.file_path.lock().await.clone();
+        let join_result =
+            tokio::task::spawn_blocking(move || Self::write_all_sync(&fp, &snapshot)).await;
+        if let Ok(Err(e)) = join_result {
+            eprintln!("ERROR: memory recall persist failed: {}", e);
+        }
     }
 
     /// Archive low-importance memories.
@@ -428,6 +586,7 @@ impl MemoryStore {
         archive: &MemoryArchive,
         config: &DecayConfig,
     ) -> ArchiveResult {
+        let _persist = self.persist.lock().await;
         let mut entries = self.entries.lock().await;
 
         // Apply decay and find memories to archive
@@ -486,6 +645,7 @@ impl MemoryStore {
         id_prefix: &str,
         archive: &MemoryArchive,
     ) -> Option<MemoryEntry> {
+        let _persist = self.persist.lock().await;
         let mut entries = self.entries.lock().await;
 
         // Find and remove the memory
@@ -532,6 +692,7 @@ impl MemoryStore {
         memory.importance = DEFAULT_IMPORTANCE;
         memory.archived = false;
 
+        let _persist = self.persist.lock().await;
         // Add back to active memory
         let mut entries = self.entries.lock().await;
         entries.push(memory.clone());
@@ -670,5 +831,321 @@ pub fn parse_category(s: &str) -> MemoryCategory {
         "preference" | "pref" => MemoryCategory::Preference,
         "decision" | "dec" => MemoryCategory::Decision,
         _ => MemoryCategory::Fact,
+    }
+}
+
+/// Decayed importance of an entry right now: the ranking signal for the
+/// prompt fragment. Uses the same recency-anchor rule as maintenance decay
+/// ([`days_since_anchor`]) so ranking and archival can't drift apart.
+fn decayed_score(entry: &MemoryEntry, config: &DecayConfig) -> f64 {
+    decay_score(entry, days_since_anchor(entry), config)
+}
+
+#[cfg(test)]
+impl MemoryStore {
+    /// Test-only injection for entries `add()` can't create (e.g. archived
+    /// ones) — used by tests in other modules.
+    pub async fn seed_for_tests(&self, entry: MemoryEntry) {
+        self.entries.lock().await.push(entry);
+    }
+}
+
+/// Restrict a memory file to owner-only permissions (best-effort, unix only).
+/// The store holds everything the model has been told across sessions, so a
+/// world-readable file would leak it to every local account.
+fn ensure_private_perms(path: &std::path::Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Ok(meta) = std::fs::metadata(path) {
+            let mut perms = meta.permissions();
+            if perms.mode() & 0o777 != 0o600 {
+                perms.set_mode(0o600);
+                let _ = std::fs::set_permissions(path, perms);
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_store(name: &str) -> (tempfile::TempDir, MemoryStore) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join(name);
+        (dir, MemoryStore::load_with_path(path))
+    }
+
+    fn entry(id: &str, content: &str, category: MemoryCategory, importance: f64) -> MemoryEntry {
+        MemoryEntry {
+            id: id.to_string(),
+            content: content.to_string(),
+            category,
+            created_at: chrono::Utc::now().to_rfc3339(),
+            source: "test".to_string(),
+            importance,
+            recall_count: 0,
+            last_recalled_at: None,
+            archived: false,
+        }
+    }
+
+    async fn seed(store: &MemoryStore, entries: Vec<MemoryEntry>) {
+        // Bypass add() so tests control ids/importance directly.
+        *store.entries.lock().await = entries;
+    }
+
+    #[tokio::test]
+    async fn fragment_includes_everything_within_budget() {
+        let (_dir, store) = temp_store("memory.jsonl");
+        seed(
+            &store,
+            vec![
+                entry(
+                    "a1",
+                    "User prefers concise answers",
+                    MemoryCategory::Preference,
+                    0.8,
+                ),
+                entry(
+                    "a2",
+                    "Deploy target is the staging cluster",
+                    MemoryCategory::Fact,
+                    0.5,
+                ),
+            ],
+        )
+        .await;
+        let frag = store
+            .build_prompt_fragment_with(&DecayConfig {
+                prompt_char_budget: 5000,
+                ..DecayConfig::default()
+            })
+            .await
+            .expect("fragment");
+        assert!(frag.contains("[2/2 memories"));
+        assert!(frag.contains("## Preferences"));
+        assert!(frag.contains("- User prefers concise answers"));
+        assert!(frag.contains("## Facts"));
+        // Nothing omitted → no search pointer.
+        assert!(!frag.contains("MemorySearch"));
+    }
+
+    #[tokio::test]
+    async fn fragment_ranks_by_importance_within_budget() {
+        let (_dir, store) = temp_store("memory.jsonl");
+        let filler = "f".repeat(120);
+        let mut entries = vec![entry(
+            "hi",
+            "Critical: production DB is postgres on port 5433",
+            MemoryCategory::Fact,
+            1.0,
+        )];
+        for i in 0..20 {
+            entries.push(entry(
+                &format!("low{i}"),
+                &format!("memory {i}: {filler}"),
+                MemoryCategory::Fact,
+                0.2,
+            ));
+        }
+        seed(&store, entries).await;
+        let frag = store
+            .build_prompt_fragment_with(&DecayConfig {
+                prompt_char_budget: 400,
+                ..DecayConfig::default()
+            })
+            .await
+            .expect("fragment");
+        // The high-importance entry must survive the budget cut.
+        assert!(frag.contains("postgres on port 5433"));
+        assert!(frag.contains("[3/21 memories"));
+        // Omitted entries are pointed at the recall tool.
+        assert!(frag.contains("lower-priority memories not shown"));
+        assert!(frag.contains("MemorySearch"));
+        assert!(frag.len() < 700);
+    }
+
+    #[tokio::test]
+    async fn fragment_none_when_store_empty() {
+        let (_dir, store) = temp_store("memory.jsonl");
+        assert!(store
+            .build_prompt_fragment_with(&DecayConfig::default())
+            .await
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn read_file_dedups_exact_content() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("memory.jsonl");
+        let dup = entry("d1", "same content", MemoryCategory::Fact, 0.5);
+        let dup2 = {
+            let mut e = entry("d2", "same content", MemoryCategory::Fact, 0.5);
+            e.created_at = chrono::Utc::now().to_rfc3339();
+            e
+        };
+        std::fs::write(
+            &path,
+            format!(
+                "{}\n{}\n{}\n",
+                serde_json::to_string(&dup).unwrap(),
+                serde_json::to_string(&dup2).unwrap(),
+                serde_json::to_string(&entry("u", "unique", MemoryCategory::Fact, 0.5)).unwrap()
+            ),
+        )
+        .unwrap();
+        let store = MemoryStore::load_with_path(path);
+        let list = store.list().await;
+        assert_eq!(list.len(), 2);
+        assert_eq!(list[0].id, "d1");
+        assert_eq!(list[1].id, "u");
+    }
+
+    #[tokio::test]
+    async fn add_with_importance_clamps_and_persists() {
+        let (_dir, store) = temp_store("memory.jsonl");
+        let outcome = store
+            .add_with_importance(
+                "User runs NixOS".to_string(),
+                MemoryCategory::Fact,
+                "auto".to_string(),
+                7.5,
+            )
+            .await
+            .expect("add");
+        assert!(outcome.created);
+        assert!((outcome.entry.importance - 1.0).abs() < f64::EPSILON);
+        // Reload from disk: the entry (with clamped importance) round-trips.
+        let reloaded = MemoryStore::load_with_path(_dir.path().join("memory.jsonl"));
+        let list = reloaded.list().await;
+        assert_eq!(list.len(), 1);
+        assert!((list[0].importance - 1.0).abs() < f64::EPSILON);
+    }
+
+    #[tokio::test]
+    async fn add_exact_duplicate_is_idempotent() {
+        let (_dir, store) = temp_store("memory.jsonl");
+        let first = store
+            .add(
+                "User prefers dark mode".to_string(),
+                MemoryCategory::Preference,
+                "auto".to_string(),
+            )
+            .await
+            .unwrap();
+        assert!(first.created);
+        let second = store
+            .add(
+                "User prefers dark mode".to_string(),
+                MemoryCategory::Preference,
+                "user".to_string(),
+            )
+            .await
+            .unwrap();
+        assert!(!second.created);
+        assert_eq!(second.entry.id, first.entry.id);
+        // Case-differences are a different fact, not a duplicate.
+        let third = store
+            .add(
+                "user prefers dark mode".to_string(),
+                MemoryCategory::Preference,
+                "auto".to_string(),
+            )
+            .await
+            .unwrap();
+        assert!(third.created);
+        let list = store.list().await;
+        assert_eq!(list.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn add_rejects_content_failing_security_scan() {
+        let (_dir, store) = temp_store("memory.jsonl");
+        let result = store
+            .add(
+                "The API key is sk-test0123456789abcdefghij".to_string(),
+                MemoryCategory::Fact,
+                "auto".to_string(),
+            )
+            .await;
+        match result {
+            Err(MemoryError::Rejected(reason)) => {
+                assert!(reason.contains("credential"));
+            }
+            other => panic!("expected Rejected, got {:?}", other.map(|o| o.entry.id)),
+        }
+        assert!(store.list().await.is_empty());
+        assert!(!_dir.path().join("memory.jsonl").exists());
+    }
+
+    #[tokio::test]
+    async fn record_recall_boosts_importance_and_persists() {
+        let (_dir, store) = temp_store("memory.jsonl");
+        let e = store
+            .add(
+                "Deploy key lives in vault".to_string(),
+                MemoryCategory::Fact,
+                "auto".to_string(),
+            )
+            .await
+            .unwrap();
+        assert!((e.entry.importance - 0.5).abs() < f64::EPSILON);
+        store
+            .record_recall(std::slice::from_ref(&e.entry.id), &DecayConfig::default())
+            .await;
+        let list = store.list().await;
+        assert!((list[0].importance - 0.6).abs() < f64::EPSILON);
+        assert_eq!(list[0].recall_count, 1);
+        assert!(list[0].last_recalled_at.is_some());
+        // The boost survives a reload from disk.
+        let reloaded = MemoryStore::load_with_path(_dir.path().join("memory.jsonl"));
+        let persisted = reloaded.list().await;
+        assert_eq!(persisted.len(), 1);
+        assert!((persisted[0].importance - 0.6).abs() < f64::EPSILON);
+        assert_eq!(persisted[0].recall_count, 1);
+    }
+
+    #[tokio::test]
+    async fn record_recall_with_no_matches_skips_rewrite() {
+        let (_dir, store) = temp_store("memory.jsonl");
+        store
+            .add(
+                "something".to_string(),
+                MemoryCategory::Fact,
+                "auto".to_string(),
+            )
+            .await
+            .unwrap();
+        // Must not panic or touch the file.
+        store
+            .record_recall(&["zzzz".to_string()], &DecayConfig::default())
+            .await;
+        let list = store.list().await;
+        assert_eq!(list[0].recall_count, 0);
+    }
+
+    #[tokio::test]
+    async fn memory_file_gets_owner_only_permissions() {
+        let (_dir, store) = temp_store("memory.jsonl");
+        store
+            .add(
+                "secret-ish memory".to_string(),
+                MemoryCategory::Fact,
+                "auto".to_string(),
+            )
+            .await
+            .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let meta = std::fs::metadata(_dir.path().join("memory.jsonl")).unwrap();
+            assert_eq!(meta.permissions().mode() & 0o777, 0o600);
+        }
     }
 }

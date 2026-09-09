@@ -30,8 +30,8 @@ use permissions::gate::PermissionGate;
 use state::manager::{CoreState, StateManager};
 use tools::builtins::{
     AgentTool, BashTool, FileEditTool, FileReadTool, FileWriteTool, ImageEditTool, ImageGenTool,
-    MemoryTool, NotebookEditTool, ProjectNoteTool, TodoWriteTool, ToolSearchTool, WebFetchTool,
-    WebSearchTool,
+    MemorySearchTool, MemoryTool, NotebookEditTool, ProjectNoteTool, TodoWriteTool, ToolSearchTool,
+    WebFetchTool, WebSearchTool,
 };
 
 use crate::{resolve_daemon_socket, SharedState};
@@ -382,6 +382,7 @@ pub(super) fn build_engine_tools(
     api_client: &Arc<UnifiedClient>,
     evolution_engine: &Arc<engine::evolution::EvolutionEngine>,
     kit: &engine::kit::HeadlessEngineKit,
+    memory_store: &Arc<engine::memory::MemoryStore>,
 ) -> (
     Vec<Arc<dyn tools::Tool>>,
     permissions::GrantedSearchDirs,
@@ -422,7 +423,11 @@ pub(super) fn build_engine_tools(
         Arc::new(ImageEditTool::new()),
         Arc::new(NotebookEditTool::new().with_granted_dirs(Arc::clone(&granted_write_dirs))),
         Arc::new(TodoWriteTool::new()),
-        Arc::new(MemoryTool::new()),
+        // Memory tools share the daemon's long-lived store instance so saves
+        // and recalls are immediately visible to the prompt fragment, the
+        // search tool and the IPC control plane.
+        Arc::new(MemoryTool::new(Arc::clone(memory_store))),
+        Arc::new(MemorySearchTool::new(Arc::clone(memory_store))),
         Arc::new(ProjectNoteTool::new()),
         Arc::new(tools::builtins::SkillTool::new(PathBuf::from(cwd_str))),
         Arc::new(tools::builtins::EvolveTool::new(Arc::clone(

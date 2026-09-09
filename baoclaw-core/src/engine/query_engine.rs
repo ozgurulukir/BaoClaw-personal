@@ -1251,6 +1251,59 @@ pub fn estimate_tokens_str(s: &str) -> u64 {
     (s.len() as u64) / 4
 }
 
+/// Verbatim head kept per embedded block in `format_messages_for_summary`.
+/// Tool results dominate a session's byte volume but carry little summary
+/// signal beyond their head — the command, the error, the key literal.
+const SUMMARY_BLOCK_CHAR_BUDGET: usize = 400;
+
+/// Head of `text` ending at a char boundary, with an elision marker.
+fn truncate_with_marker(text: &str, max_chars: usize) -> String {
+    if text.len() <= max_chars {
+        return text.to_string();
+    }
+    let mut end = max_chars;
+    while !text.is_char_boundary(end) {
+        end += 1;
+    }
+    format!("{} [...{} chars elided]", &text[..end], text.len() - end)
+}
+
+/// Render a JSON value for summarizer input: text is kept verbatim up to
+/// `max_chars`, tool-result payloads are unwrapped from their envelope, and
+/// everything oversized gets a head + elision marker instead of being
+/// inlined in full (raw tool JSON used to crowd out the conversation).
+fn elide_for_summary(value: &Value, max_chars: usize) -> String {
+    match value {
+        Value::String(s) => truncate_with_marker(s, max_chars),
+        Value::Array(blocks) => blocks
+            .iter()
+            .map(|block| elide_for_summary(block, max_chars))
+            .collect::<Vec<_>>()
+            .join("\n"),
+        Value::Object(map) => {
+            match map.get("type").and_then(|t| t.as_str()) {
+                Some("tool_result") => {
+                    if let Some(inner) = map.get("content") {
+                        return elide_for_summary(inner, max_chars);
+                    }
+                }
+                Some("text") => {
+                    if let Some(inner) = map.get("text").and_then(|t| t.as_str()) {
+                        return truncate_with_marker(inner, max_chars);
+                    }
+                }
+                _ => {}
+            }
+            let compact = serde_json::to_string(value).unwrap_or_default();
+            truncate_with_marker(&compact, max_chars)
+        }
+        other => {
+            let compact = serde_json::to_string(other).unwrap_or_default();
+            truncate_with_marker(&compact, max_chars)
+        }
+    }
+}
+
 /// Format messages into a human-readable string for summarisation.
 pub fn format_messages_for_summary(messages: &[Message]) -> String {
     messages
@@ -1259,7 +1312,7 @@ pub fn format_messages_for_summary(messages: &[Message]) -> String {
             MessageContent::User { message, .. } => {
                 let text = match &message.content {
                     Value::String(s) => s.clone(),
-                    other => serde_json::to_string(other).unwrap_or_default(),
+                    other => elide_for_summary(other, SUMMARY_BLOCK_CHAR_BUDGET),
                 };
                 format!("User: {}", text)
             }
@@ -2049,6 +2102,47 @@ mod tests {
         }];
         let result = format_messages_for_summary(&messages);
         assert!(result.contains("System: System event occurred"));
+    }
+
+    #[test]
+    fn test_elide_for_summary_truncates_long_strings() {
+        let long = "x".repeat(1000);
+        let out = truncate_with_marker(&long, 100);
+        assert!(out.starts_with(&"x".repeat(100)));
+        assert!(out.contains("[...900 chars elided]"));
+        // Short strings pass through untouched.
+        assert_eq!(truncate_with_marker("short", 100), "short");
+    }
+
+    #[test]
+    fn test_format_messages_for_summary_elides_large_tool_results() {
+        let big_output = "E".repeat(5000);
+        let secret_tail = "FINAL-CONFIG-LITERAL-9876";
+        let tool_result = json!([
+            { "type": "tool_result", "tool_use_id": "tu_1", "content": [
+                { "type": "text", "text": format!("{}{}", big_output, secret_tail) }
+            ]}
+        ]);
+        let messages = vec![Message {
+            uuid: uuid::Uuid::new_v4().to_string(),
+            timestamp: chrono::Utc::now().to_rfc3339(),
+            content: MessageContent::User {
+                message: ApiUserMessage {
+                    role: "user".to_string(),
+                    content: tool_result,
+                },
+                is_meta: false,
+                tool_use_result: None,
+            },
+        }];
+        let result = format_messages_for_summary(&messages);
+        // Head is kept verbatim, the bulk is elided…
+        assert!(result.contains(&"E".repeat(400)));
+        assert!(result.contains("chars elided]"));
+        // …and the overall size collapses from ~5000 to the block budget.
+        assert!(result.len() < 1000);
+        // The verbatim tail beyond the budget is dropped (not paraphrased).
+        assert!(!result.contains(secret_tail));
     }
 
     #[test]

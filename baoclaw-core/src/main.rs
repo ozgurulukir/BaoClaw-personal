@@ -1191,6 +1191,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         &api_client,
         &evolution_engine,
         &headless_kit,
+        &memory_store,
     );
 
     // Write metadata file for discovery by CLI

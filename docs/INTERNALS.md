@@ -16,8 +16,9 @@ BaoClaw has two complementary memory layers: **Long-Term Memory** (cross-session
 | -------------- | ---------------------------------------------------------------------------------------------- |
 | **Scope**      | Two levels: global (`~/.baoclaw/memory.jsonl`) and project (`<project>/.baoclaw/memory.jsonl`) |
 | **Categories** | `fact` (user told me X), `preference` (user prefers Y), `decision` (we decided Z)              |
-| **Storage**    | Append-only JSONL, one JSON object per line                                                    |
+| **Storage**    | Append-only JSONL, one JSON object per line, owner-only permissions (0600)                     |
 | **Injection**  | Loaded at daemon startup → `build_prompt_fragment()` → appended to system prompt               |
+| **Recall**     | `MemorySearch` tool — keyword search over the store; hits get a decay recall boost             |
 | **Management** | `/memory add`, `/memory list`, `/memory delete`, `/memory clear`                               |
 
 When the daemon starts, `MemoryStore::load()` reads the global
@@ -25,6 +26,30 @@ When the daemon starts, `MemoryStore::load()` reads the global
 block that becomes part of the `append_system_prompt` injected into every
 conversation turn. Project-level `<project>/.baoclaw/memory.jsonl` is supported
 by the store API but is not currently loaded into the prompt.
+
+**Bounded prompt fragment:** the fragment does NOT dump the whole store.
+Entries are ranked by decayed importance (`importance × decay_rate^days`) and
+rendered within a character budget (`memory.prompt_char_budget`, default
+6000). The header carries a usage meter (`[3/21 memories · 480/6000 chars]`),
+and when entries don't fit, a trailing note points the model at the
+`MemorySearch` tool. Exact-content duplicates are dropped at load time.
+
+**Single writer:** `MemoryTool` and `MemorySearchTool` share the daemon's
+in-memory `MemoryStore` instance — saves are validated (`validate_memory_content`,
+so credentials/injection text never enter the store), deduplicated (an exact
+re-save is idempotent), and visible to the prompt fragment without a restart.
+Hand-editing `memory.jsonl` while the daemon runs requires a restart to be
+seen.
+
+**Live recall:** `MemorySearch` gives the model keyword search over everything
+that didn't fit (or wasn't worth always-on injection). Matches are scored by
+keyword coverage + importance, and every returned entry is recorded as a
+recall (`recall_count`, `last_recalled_at`, importance boost) — the signal
+that keeps frequently-used memories off the age-only decay→archive path.
+
+**Write-path etiquette (MemoryTool):** `content` (one declarative sentence),
+`category`, and an optional `importance` (0.0–1.0, default 0.5) — importance
+ranks entries in the fragment and slows their decay.
 
 #### Session Memory (`session_memory.rs`)
 
@@ -44,7 +69,15 @@ A per-session rolling summary that persists across the lifetime of a session —
 2. **Dynamic reminder** — injected into `<system-reminder>` alongside git status, once per **user turn**; tool-result continuation turns inside a task don't re-receive it (re-appending it after every tool call made the model re-acknowledge the same summary each turn)
 3. **Session resume** — **surface-scoped**: a session only ever resumes its own transcript (`{cwd_hash}-{surface}` exact match first, then the same surface's newest), never another surface's; snapshot restores seed the summary only when the session's own `.memory.md` is empty, so stale snapshot copies can't overwrite fresher files
 
-**Summary freshness:** the summarizer input keeps the **most recent ~40K chars** of the conversation, so the summary tracks current work rather than freezing on the session's opening minutes.
+**Summary freshness:** the summarizer input keeps the **most recent ~40K chars**
+of the conversation (so the summary tracks current work rather than freezing
+on the session's opening minutes), and each tool-result block inside it is
+elided to a verbatim 400-char head (`[...N chars elided]`) — raw tool JSON
+used to crowd the actual conversation out of the 40K window. The summary
+itself follows a fixed section layout (**Task Overview / Current State / Key
+Discoveries / Next Steps / Context to Preserve**) with a copy-literals-
+verbatim rule, so exact identifiers, paths and error messages survive
+compaction.
 
 ---
 
@@ -311,11 +344,9 @@ The system prompt is assembled in 5 ordered layers. The order matters for API pr
 
 **How skills & memory are loaded:**
 
-1. At daemon startup: `load_skills_for_prompt(cwd)` → discovers all skill `.md` files
-2. At daemon startup: `MemoryStore::load()` → reads global `~/.baoclaw/memory.jsonl`
-3. Combined via `build_append_prompt()` → becomes Layer 4
-4. Evolution engine's `build_prompt_fragment()` adds pending reviews and skill candidates
-5. All of this is computed once at startup and reused across turns
+1. At daemon startup: `load_skills_for_prompt(cwd)` → discovers all skill `.md` files; `MemoryStore::load()` → reads global `~/.baoclaw/memory.jsonl`
+2. Skills are frozen into the append prompt at startup (they don't change mid-session)
+3. Long-term memory and evolution nudges are the exception: the engine re-renders that fragment **once per query** (`query_engine.rs`), so mid-session `MemoryTool` saves and pending reviews reach the model without a restart — but they change rarely enough that the prefix cache stays warm between changes
 
 ---
 

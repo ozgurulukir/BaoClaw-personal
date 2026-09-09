@@ -242,6 +242,7 @@ mod tests {
             archive_threshold: 0.1,
             max_entries: 1000,
             cleanup_interval_hours: 24,
+            prompt_char_budget: 6000,
         }
     }
 

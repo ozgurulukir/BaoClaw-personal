@@ -67,7 +67,7 @@ Inspired by [Hermes Agent](https://github.com/NousResearch/hermes-agent)'s learn
 | Grep / Glob                     | Code search and file discovery                                |
 | WebSearch                       | Brave Search API with retry on rate limits                    |
 | WebFetch                        | Fetch and parse web pages                                     |
-| Memory                          | Long-term memory management                                   |
+| Memory / MemorySearch           | Long-term memory save and keyword recall                      |
 | Agent                           | Sub-agent for parallel tasks                                  |
 | Evolve                          | Self-improvement: create/improve skills, export training data |
 | Todo                            | Task list management                                          |

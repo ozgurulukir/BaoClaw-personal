@@ -1135,9 +1135,14 @@ async fn scm_memory_add(
         .await;
     let mut conn_guard = writer.lock().await;
     match result {
-        Ok(entry) => {
+        Ok(outcome) => {
+            // The store rejects credential/injection content and collapses
+            // exact duplicates itself, so the response reflects its verdict.
             let _ = conn_guard
-                .send_response(id, serde_json::json!({"memory": entry}))
+                .send_response(
+                    id,
+                    serde_json::json!({"memory": outcome.entry, "created": outcome.created}),
+                )
                 .await;
         }
         Err(e) => {

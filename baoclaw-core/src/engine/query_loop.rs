@@ -2473,17 +2473,37 @@ pub async fn update_session_memory_background(
 
     let prompt = if existing_summary.is_empty() {
         format!(
-            "You are summarizing a coding assistant session. Create a concise meeting-notes summary of the conversation so far.\n\
-             Preserve: key decisions, file changes, errors encountered, current task status, and any pending items.\n\
-             Format as markdown with headers.\n\n\
-             Conversation:\n{}", truncated)
+            "You are summarizing a coding assistant session. Write a rolling meeting-notes \
+             summary in markdown with exactly these sections:\n\n\
+             ## Task Overview\n\
+             ## Current State\n\
+             ## Key Discoveries\n\
+             ## Next Steps\n\
+             ## Context to Preserve\n\n\
+             - Task Overview: what the user asked for; quote key requests verbatim.\n\
+             - Current State: what is done, what is in progress, the very last action taken.\n\
+             - Key Discoveries: facts learned about the codebase/environment, including \
+             approaches that failed and why.\n\
+             - Next Steps: concrete pending actions, in order.\n\
+             - Context to Preserve: promises made to the user, constraints, stated preferences.\n\n\
+             Copy exact identifiers, paths, commands and error messages verbatim — never \
+             paraphrase literals. Be concise; the summary is capped at 8000 characters.\n\n\
+             Conversation:\n{}",
+            truncated
+        )
     } else {
         format!(
-            "You are updating a rolling summary of a coding assistant session.\n\
-             Here is the existing summary:\n---\n{}\n---\n\n\
-             Here is the recent conversation:\n{}\n\n\
-             Update the summary to reflect the latest work. Preserve key decisions, file changes, and pending items.",
-            existing_summary, truncated)
+            "You are updating a rolling summary of a coding assistant session.\n\n\
+             Existing summary:\n---\n{}\n---\n\n\
+             Recent conversation:\n{}\n\n\
+             Rewrite the summary so it reflects the latest work. Keep the same section layout \
+             (Task Overview / Current State / Key Discoveries / Next Steps / Context to \
+             Preserve): merge duplicates, drop resolved items, add new discoveries and failed \
+             approaches, keep the current task state accurate. Copy exact identifiers, paths, \
+             commands and error messages verbatim — never paraphrase literals. Be concise; the \
+             summary is capped at 8000 characters.",
+            existing_summary, truncated
+        )
     };
 
     let request = CreateMessageRequest {

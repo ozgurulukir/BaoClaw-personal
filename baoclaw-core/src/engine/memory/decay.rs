@@ -29,8 +29,15 @@ const DEFAULT_MAX_ENTRIES: usize = 1000;
 /// Default cleanup interval in hours (24 = daily).
 const DEFAULT_CLEANUP_INTERVAL_HOURS: u64 = 24;
 
+/// Default character budget for the memory prompt fragment (6000 ≈ 1500 tokens).
+const DEFAULT_PROMPT_CHAR_BUDGET: usize = 6000;
+
 fn default_cleanup_interval_hours() -> u64 {
     DEFAULT_CLEANUP_INTERVAL_HOURS
+}
+
+fn default_prompt_char_budget() -> usize {
+    DEFAULT_PROMPT_CHAR_BUDGET
 }
 
 /// Configuration for memory decay behavior.
@@ -65,6 +72,13 @@ pub struct DecayConfig {
     /// Default: 24 (daily).
     #[serde(default = "default_cleanup_interval_hours")]
     pub cleanup_interval_hours: u64,
+
+    /// Character budget for the long-term memory prompt fragment.
+    /// The fragment keeps the highest-scoring entries within this budget;
+    /// the rest stay reachable through the MemorySearch tool.
+    /// Default: 6000 (~1500 tokens).
+    #[serde(default = "default_prompt_char_budget")]
+    pub prompt_char_budget: usize,
 }
 
 fn default_decay_rate() -> f64 {
@@ -101,6 +115,7 @@ impl Default for DecayConfig {
             archive_threshold: DEFAULT_ARCHIVE_THRESHOLD,
             max_entries: DEFAULT_MAX_ENTRIES,
             cleanup_interval_hours: DEFAULT_CLEANUP_INTERVAL_HOURS,
+            prompt_char_budget: DEFAULT_PROMPT_CHAR_BUDGET,
         }
     }
 }
@@ -155,6 +170,20 @@ pub fn decay_score(memory: &MemoryEntry, days: f64, config: &DecayConfig) -> f64
     let decayed = memory.importance * config.decay_rate.powf(days);
     // Clamp to valid range [0.0, 1.0]
     decayed.clamp(0.0, 1.0)
+}
+
+/// Days since the entry's recency anchor: the last recall if there was one,
+/// else creation. The one rule both maintenance decay and prompt-fragment
+/// ranking must agree on — unparseable or future timestamps count as 0 days.
+pub fn days_since_anchor(memory: &MemoryEntry) -> f64 {
+    let anchor = memory
+        .last_recalled_at
+        .as_deref()
+        .unwrap_or(&memory.created_at);
+    chrono::DateTime::parse_from_rfc3339(anchor)
+        .map(|dt| (chrono::Utc::now() - dt.with_timezone(&chrono::Utc)).num_days() as f64)
+        .unwrap_or(0.0)
+        .max(0.0)
 }
 
 /// Boost importance when memory is recalled.
@@ -250,7 +279,6 @@ pub fn should_archive(memory: &MemoryEntry, config: &DecayConfig) -> bool {
 /// # Returns
 /// A vector of memory IDs that should be archived
 pub fn apply_decay(memories: &mut [MemoryEntry], config: &DecayConfig) -> Vec<String> {
-    let now = chrono::Utc::now();
     let mut to_archive = Vec::new();
 
     for memory in memories.iter_mut() {
@@ -259,18 +287,7 @@ pub fn apply_decay(memories: &mut [MemoryEntry], config: &DecayConfig) -> Vec<St
             continue;
         }
 
-        // Calculate days since last update
-        let last_time = memory
-            .last_recalled_at
-            .as_ref()
-            .or(Some(&memory.created_at))
-            .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
-            .map(|dt| dt.with_timezone(&chrono::Utc));
-
-        let days = match last_time {
-            Some(last) => (now - last).num_days() as f64,
-            None => 0.0, // If we can't parse, assume no decay needed
-        };
+        let days = days_since_anchor(memory);
 
         // Apply decay
         memory.importance = decay_score(memory, days, config);
@@ -481,6 +498,7 @@ mod tests {
             archive_threshold: 0.15,
             max_entries: 500,
             cleanup_interval_hours: 12,
+            prompt_char_budget: 6000,
         };
         let json = serde_json::to_string(&original).unwrap();
         let parsed: DecayConfig = serde_json::from_str(&json).unwrap();
@@ -495,5 +513,13 @@ mod tests {
         assert!((config.decay_rate - 0.95).abs() < f64::EPSILON);
         assert!((config.recall_boost - 0.1).abs() < f64::EPSILON); // default
         assert!((config.confirm_boost - 0.2).abs() < f64::EPSILON); // default
+    }
+
+    #[test]
+    fn test_config_deserialization_prompt_budget_default_and_override() {
+        let config: DecayConfig = serde_json::from_str("{}").unwrap();
+        assert_eq!(config.prompt_char_budget, 6000);
+        let config: DecayConfig = serde_json::from_str(r#"{"prompt_char_budget": 12000}"#).unwrap();
+        assert_eq!(config.prompt_char_budget, 12000);
     }
 }

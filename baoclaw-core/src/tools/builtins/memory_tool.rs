@@ -1,32 +1,24 @@
 use async_trait::async_trait;
 use serde_json::{json, Value};
-use std::io::Write;
+use std::sync::Arc;
 
+use crate::engine::memory::{parse_category, MemoryStore};
 use crate::tools::trait_def::*;
 
 /// Tool that allows the AI to automatically save important information
 /// to long-term memory (user preferences, facts, decisions).
+///
+/// Shares the daemon's long-lived [`MemoryStore`] instance, so saves are
+/// immediately visible to the prompt fragment, MemorySearch and the IPC
+/// control plane; the store itself rejects security-scan failures and
+/// collapses exact duplicates.
 pub struct MemoryTool {
-    /// Overrides the global `~/.baoclaw/memory.jsonl` path (test seam) so
-    /// tests never touch the user's real long-term memory.
-    memory_path: Option<std::path::PathBuf>,
-}
-
-impl Default for MemoryTool {
-    fn default() -> Self {
-        Self::new()
-    }
+    store: Arc<MemoryStore>,
 }
 
 impl MemoryTool {
-    pub fn new() -> Self {
-        Self { memory_path: None }
-    }
-
-    /// Redirect memory persistence to an explicit file (test seam).
-    pub fn with_memory_path(mut self, path: std::path::PathBuf) -> Self {
-        self.memory_path = Some(path);
-        self
+    pub fn new(store: Arc<MemoryStore>) -> Self {
+        Self { store }
     }
 }
 
@@ -44,11 +36,15 @@ impl Tool for MemoryTool {
         JsonSchema {
             schema_type: "object".to_string(),
             properties: Some(json!({
-                "content": { "type": "string", "description": "The information to remember" },
+                "content": { "type": "string", "description": "The information to remember, as a single concise declarative fact" },
                 "category": {
                     "type": "string",
                     "enum": ["fact", "preference", "decision"],
                     "description": "Category: fact (user told me X), preference (user prefers Y), decision (we decided Z)"
+                },
+                "importance": {
+                    "type": "number",
+                    "description": "Optional salience from 0.0 to 1.0 (default 0.5). Higher-importance memories stay in the always-on prompt longer; use ~0.9 only for durable facts (project constraints, standing preferences)."
                 }
             })),
             required: Some(vec!["content".to_string(), "category".to_string()]),
@@ -63,7 +59,9 @@ impl Tool for MemoryTool {
         "Save important information to long-term memory. Use this when you discover user preferences, \
          important facts, or decisions that should be remembered across conversations. \
          Categories: 'fact' for things the user told you, 'preference' for user preferences and habits, \
-         'decision' for decisions made during conversations. Be concise — store the key information only."
+         'decision' for decisions made during conversations. Be concise — store the key information only, \
+         as one declarative sentence per save (duplicates are ignored). Never store credentials or secrets. \
+         To look up what you already remember, use MemorySearch instead of asking the user."
             .to_string()
     }
 
@@ -77,42 +75,76 @@ impl Tool for MemoryTool {
             .get("content")
             .and_then(|v| v.as_str())
             .ok_or_else(|| ToolError::ExecutionFailed("Missing 'content'".into()))?;
-        let category = input
-            .get("category")
-            .and_then(|v| v.as_str())
-            .unwrap_or("fact");
+        let category = parse_category(
+            input
+                .get("category")
+                .and_then(|v| v.as_str())
+                .unwrap_or("fact"),
+        );
+        let importance = input
+            .get("importance")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.5)
+            .clamp(0.0, 1.0);
 
-        let memory_path = self.memory_path.clone().unwrap_or_else(|| {
-            let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
-            std::path::PathBuf::from(&home)
-                .join(".baoclaw")
-                .join("memory.jsonl")
-        });
-
-        let entry = json!({
-            "id": &uuid::Uuid::new_v4().to_string()[..8],
-            "content": content,
-            "category": category,
-            "created_at": chrono::Utc::now().to_rfc3339(),
-            "source": "auto"
-        });
-
-        let line = serde_json::to_string(&entry)
-            .map_err(|e| ToolError::ExecutionFailed(format!("Serialize error: {}", e)))?;
-
-        let mut f = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&memory_path)
-            .map_err(|e| {
-                ToolError::ExecutionFailed(format!("Failed to open memory file: {}", e))
-            })?;
-        writeln!(f, "{}", line)
-            .map_err(|e| ToolError::ExecutionFailed(format!("Failed to write: {}", e)))?;
-
-        Ok(ToolResult {
-            data: json!({ "saved": true, "id": entry["id"], "content": content, "category": category }),
-            is_error: false,
-        })
+        match self
+            .store
+            .add_with_importance(
+                content.to_string(),
+                category,
+                "auto".to_string(),
+                importance,
+            )
+            .await
+        {
+            Ok(outcome) => {
+                if outcome.created {
+                    Ok(ToolResult {
+                        data: json!({
+                            "saved": true,
+                            "id": outcome.entry.id,
+                            "content": content,
+                            "category": outcome.entry.category.to_string(),
+                            "importance": outcome.entry.importance,
+                        }),
+                        is_error: false,
+                    })
+                } else {
+                    Ok(ToolResult {
+                        data: json!({
+                            "saved": true,
+                            "duplicate": true,
+                            "id": outcome.entry.id,
+                            "content": content,
+                            "category": outcome.entry.category.to_string(),
+                            "note": "Already stored — no duplicate added."
+                        }),
+                        is_error: false,
+                    })
+                }
+            }
+            Err(e) => {
+                // Distinguish "rejected before touching the store" (nothing
+                // was saved) from "stored in memory but the disk write
+                // failed" (the entry is live for this daemon session; the
+                // model must not retry it as if it were lost).
+                let is_rejected =
+                    matches!(e, crate::engine::memory::store::MemoryError::Rejected(_));
+                let data = if is_rejected {
+                    json!({ "saved": false, "error": e.to_string() })
+                } else {
+                    json!({
+                        "saved": true,
+                        "persisted": false,
+                        "error": e.to_string(),
+                        "note": "Stored for this session, but writing to disk failed; it may not survive a restart. Do not retry the same save."
+                    })
+                };
+                Ok(ToolResult {
+                    data,
+                    is_error: true,
+                })
+            }
+        }
     }
 }
