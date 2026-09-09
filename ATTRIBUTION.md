@@ -1,10 +1,19 @@
 # Attribution
 
-This file covers three things: design influences, third-party dependencies,
-and bundled components. The authoritative dependency inventories are
-`baoclaw-core/Cargo.lock` and `package-lock.json` — transitive dependencies
-inherit their packages' licenses. License data below was verified against
-crates.io and installed package metadata on 2026-09-09.
+This file covers four things: provenance, design influences, third-party
+dependencies, and bundled components. The authoritative dependency
+inventories are `baoclaw-core/Cargo.lock` and `package-lock.json` —
+transitive dependencies inherit their packages' licenses. License data below
+was verified against crates.io and installed package metadata on 2026-09-09.
+
+## Provenance
+
+This repository is a fork of
+[baohx/BaoClaw](https://github.com/baohx/BaoClaw) (first published
+2026-04-02). The upstream README declares the MIT license but ships no
+LICENSE file; the root [`LICENSE`](LICENSE) here records the upstream MIT
+grant (with its copyright) alongside the copyright for this fork's
+modifications.
 
 ## Design influences
 
