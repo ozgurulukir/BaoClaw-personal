@@ -682,7 +682,7 @@ async fn lc_restore_session_history(
         // Surface-scoped resume: only this session's own transcript, never
         // another surface's (telegram must not inherit the web session).
         if let Some(rid) =
-            engine::transcript::find_latest_session_for_cwd(&cwd_str_for_resume, Some(session_id))
+            engine::transcript::find_latest_session_for_cwd(&cwd_str_for_resume, session_id)
         {
             match engine::transcript::TranscriptWriter::load(&rid) {
                 Ok(entries) => {

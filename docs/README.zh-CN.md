@@ -327,8 +327,9 @@ BaoClaw 以 200K token 上下文窗口为目标，采用多层压缩策略和校
 #### 会话恢复流程 —— 摘要优先三层策略
 
 ```
-1. find_latest_session_for_cwd(cwd)
-     → 对 cwd 做 FNV-1a 哈希 → 扫描 ~/.baoclaw/sessions/ 匹配的 .jsonl
+1. find_latest_session_for_cwd(cwd, session_id)
+     → 对 cwd 做 FNV-1a 哈希 → 扫描 ~/.baoclaw/sessions/ 匹配的 .jsonl，
+       仅限调用者自己的表面（先精确 id，其次同表面最新）
 2. TranscriptWriter::load(session_id) → 读取所有条目
 3. SessionMemory::load(session_id) → 检查 .memory.md 是否有预写摘要
 4. 三层加载策略（10 分钟 → < 5 秒）:

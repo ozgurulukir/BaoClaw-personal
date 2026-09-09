@@ -243,19 +243,18 @@ pub fn rebuild_messages_from_transcript_limited(
     messages
 }
 
-/// Find the transcript session a given cwd should resume.
+/// Find the transcript session a caller should resume.
 ///
-/// Sessions are stored as `{cwd_hash}-{surface}.jsonl`.  Resolution order:
-/// 1. With `preferred_session_id` (the caller's own `{cwd_hash}-{surface}`
-///    id): that exact id if its transcript exists, else the newest
-///    transcript carrying the **same surface** suffix.  A preferred id with
-///    no surface part (e.g. `cron-{uuid}`) never adopts a transcript.
-/// 2. With `None` (legacy discovery in `resolve_session_id`): the newest
-///    matching transcript for the cwd, any surface.
-pub fn find_latest_session_for_cwd(
-    cwd: &str,
-    preferred_session_id: Option<&str>,
-) -> Option<String> {
+/// Sessions are stored as `{cwd_hash}-{surface}.jsonl`.  Resolution order,
+/// scoped to the caller's own surface-suffixed `preferred_session_id` id:
+/// that exact id if its transcript exists, else the newest
+/// transcript carrying the **same surface** suffix.  A preferred id with
+/// no surface part (e.g. `cron-{uuid}`) never adopts a transcript.
+///
+/// Surface isolation is deliberate: without it the newest transcript for
+/// the cwd wins regardless of which surface wrote it, and the resuming
+/// session inherits another surface's history and memory summary.
+pub fn find_latest_session_for_cwd(cwd: &str, preferred_session_id: &str) -> Option<String> {
     let home = std::env::var("HOME")
         .or_else(|_| std::env::var("USERPROFILE"))
         .ok()?;
@@ -267,7 +266,7 @@ pub fn find_latest_session_for_cwd(
 pub fn find_latest_session_for_cwd_in(
     sessions_dir: &std::path::Path,
     cwd: &str,
-    preferred_session_id: Option<&str>,
+    preferred_session_id: &str,
 ) -> Option<String> {
     if !sessions_dir.is_dir() {
         return None;
@@ -294,31 +293,20 @@ pub fn find_latest_session_for_cwd_in(
         }
     }
 
-    // Surface isolation: a session may only ever resume its own surface.
-    // Without this, the newest transcript for the cwd wins regardless of
-    // which surface (telegram/web/cli/...) wrote it, and the resuming
-    // session inherits another surface's history and memory summary.
-    if let Some(preferred) = preferred_session_id {
-        if candidates.iter().any(|(id, _)| id == preferred) {
-            return Some(preferred.to_string());
-        }
-        let surface = session_surface(preferred, &cwd_hash);
-        return match surface {
-            Some(surface) => candidates
-                .into_iter()
-                .filter(|(id, _)| session_surface(id, &cwd_hash) == Some(surface))
-                .max_by_key(|(_, modified)| *modified)
-                .map(|(id, _)| id),
-            // The preferred id has no surface suffix (e.g. ephemeral job
-            // sessions) — never adopt another session's transcript.
-            None => None,
-        };
+    if candidates.iter().any(|(id, _)| id == preferred_session_id) {
+        return Some(preferred_session_id.to_string());
     }
-
-    candidates
-        .into_iter()
-        .max_by_key(|(_, modified)| *modified)
-        .map(|(id, _)| id)
+    let surface = session_surface(preferred_session_id, &cwd_hash);
+    match surface {
+        Some(surface) => candidates
+            .into_iter()
+            .filter(|(id, _)| session_surface(id, &cwd_hash) == Some(surface))
+            .max_by_key(|(_, modified)| *modified)
+            .map(|(id, _)| id),
+        // The preferred id has no surface suffix (e.g. ephemeral job
+        // sessions) — never adopt another session's transcript.
+        None => None,
+    }
 }
 
 /// The surface component of a session id: the part after the cwd hash
@@ -376,7 +364,7 @@ mod tests {
         write_session_file(dir.path(), &format!("{}-default", hash), unix_time(1000));
 
         let found =
-            find_latest_session_for_cwd_in(dir.path(), "/proj", Some(&format!("{}-default", hash)))
+            find_latest_session_for_cwd_in(dir.path(), "/proj", &format!("{}-default", hash))
                 .unwrap();
         assert_eq!(found, format!("{}-default", hash));
     }
@@ -390,8 +378,7 @@ mod tests {
 
         // The preferred surface (`-web`) has no transcript at all: the
         // newer cross-surface file must not be adopted.
-        let found =
-            find_latest_session_for_cwd_in(dir.path(), "/proj", Some(&format!("{}-web", hash)));
+        let found = find_latest_session_for_cwd_in(dir.path(), "/proj", &format!("{}-web", hash));
         assert_eq!(found, None);
     }
 
@@ -406,8 +393,7 @@ mod tests {
         // `-web` has no exact match, but its own older transcript exists —
         // the same-surface fallback must return it, not the newer telegram.
         let found =
-            find_latest_session_for_cwd_in(dir.path(), "/proj", Some(&format!("{}-web", hash)))
-                .unwrap();
+            find_latest_session_for_cwd_in(dir.path(), "/proj", &format!("{}-web", hash)).unwrap();
         assert_eq!(found, format!("{}-web", hash));
     }
 
@@ -422,7 +408,7 @@ mod tests {
         );
 
         let found =
-            find_latest_session_for_cwd_in(dir.path(), "/proj", Some(&format!("{}-default", hash)))
+            find_latest_session_for_cwd_in(dir.path(), "/proj", &format!("{}-default", hash))
                 .unwrap();
         assert_eq!(found, format!("{}-default", &hash[..8]));
     }
@@ -434,19 +420,8 @@ mod tests {
         write_session_file(dir.path(), &format!("{}-telegram", hash), unix_time(2000));
 
         // Ephemeral job sessions have no surface — never resume another's.
-        let found = find_latest_session_for_cwd_in(dir.path(), "/proj", Some("cron-ab12cd34"));
+        let found = find_latest_session_for_cwd_in(dir.path(), "/proj", "cron-ab12cd34");
         assert_eq!(found, None);
-    }
-
-    #[test]
-    fn test_no_preferred_keeps_newest_any_surface() {
-        let dir = tempfile::tempdir().unwrap();
-        let hash = cwd_identity_hash("/proj");
-        write_session_file(dir.path(), &format!("{}-telegram", hash), unix_time(2000));
-        write_session_file(dir.path(), &format!("{}-default", hash), unix_time(1000));
-
-        let found = find_latest_session_for_cwd_in(dir.path(), "/proj", None).unwrap();
-        assert_eq!(found, format!("{}-telegram", hash));
     }
 
     #[test]

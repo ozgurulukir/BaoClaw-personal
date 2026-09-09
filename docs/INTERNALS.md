@@ -127,7 +127,7 @@ This split ensures the cached system prompt prefix stays stable across turns —
 #### Session Resume Flow — Summary-First Three-Tier Strategy
 
 ```
-1. find_latest_session_for_cwd(cwd, Some(session_id))
+1. find_latest_session_for_cwd(cwd, session_id)
      → FNV-1a hash of cwd → scan ~/.baoclaw/sessions/ for matching .jsonl,
        restricted to the caller's own surface (exact id first, then the
        same `{cwd_hash}-{surface}` suffix) — cross-surface resumes never happen
@@ -141,6 +141,12 @@ This split ensures the cached system prompt prefix stays stable across turns —
 6. engine.load_token_baseline(session_id)   // restore calibrated count
 7. engine.seed_session_memory(&old_summary) // carry forward to new session
 ```
+
+**Main session:** the daemon's own engine uses a deterministic `{cwd_hash}-main`
+session id — it never adopts a client surface's transcript (an older
+implementation reused the newest transcript for the cwd, letting a busy
+gateway surface hijack the main session's snapshot and memory). Legacy
+8-char-hash `-main` sessions are migrated forward on boot.
 
 **Background summary generation** ensures Tier 1 is always available:
 

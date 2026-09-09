@@ -503,41 +503,34 @@ pub(super) async fn load_prompts_and_memory(
     (combined_append_prompt, memory_store, profile_manager)
 }
 
-/// Reuse existing project session or create new one.
-/// One project directory = one session file.
+/// Stable per-project session id for the daemon's main engine:
+/// `{cwd_hash}-main`.  Deterministic, so it needs no scanning and never
+/// adopts a client surface's session (see docs/INTERNALS.md); a legacy
+/// 8-char-hash `-main` session is migrated forward on boot.
 pub(super) fn resolve_session_id(cwd_str: &str) -> String {
+    resolve_session_id_in(
+        &engine::session_persistence::default_sessions_dir(),
+        cwd_str,
+    )
+}
+
+/// Directory-injectable variant of [`resolve_session_id`] (test seam).
+fn resolve_session_id_in(sessions_dir: &std::path::Path, cwd_str: &str) -> String {
     let cwd_key = crate::cwd_hash(cwd_str);
-    // No preferred id: legacy discovery semantics — the newest transcript for
-    // this cwd is reused (and migrated from the 8-char hash if needed).
-    let session_id = match engine::transcript::find_latest_session_for_cwd(cwd_str, None) {
-        Some(legacy_id) => {
-            if let Some(suffix) = engine::transcript::session_surface(&legacy_id, &cwd_key) {
-                let normalized_id = format!("{}-{}", cwd_key, suffix);
-                let sessions_dir = engine::session_persistence::default_sessions_dir();
-                let migrated = engine::session_persistence::migrate_legacy_session(
-                    &sessions_dir,
-                    &legacy_id,
-                    &normalized_id,
-                    cwd_str,
-                )
-                .unwrap_or(false);
-                if migrated
-                    || engine::session_persistence::load_session_state(
-                        &sessions_dir,
-                        &normalized_id,
-                    )
-                    .is_some()
-                {
-                    normalized_id
-                } else {
-                    legacy_id
-                }
-            } else {
-                legacy_id
-            }
-        }
-        None => format!("{}-{}", cwd_key, &uuid::Uuid::new_v4().to_string()[..8]),
-    };
+    let session_id = format!("{}-main", cwd_key);
+    let legacy_id = format!("{}-main", crate::legacy_cwd_hash(cwd_str));
+    // No-op unless a legacy main session actually exists.
+    if let Err(error) = engine::session_persistence::migrate_legacy_session(
+        sessions_dir,
+        &legacy_id,
+        &session_id,
+        cwd_str,
+    ) {
+        eprintln!(
+            "[session-registry] WARNING: legacy main-session migration skipped: {}",
+            error
+        );
+    }
     eprintln!("Session ID: {} (cwd: {})", session_id, cwd_str);
     session_id
 }
@@ -929,5 +922,76 @@ pub(super) async fn run_accept_loop(
                 continue;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod resolve_session_tests {
+    use super::*;
+
+    #[test]
+    fn main_session_id_is_deterministic_per_cwd() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = resolve_session_id_in(dir.path(), "/some/project");
+        let second = resolve_session_id_in(dir.path(), "/some/project");
+        let other = resolve_session_id_in(dir.path(), "/other/project");
+
+        assert_eq!(first, second);
+        assert_ne!(first, other);
+        assert_eq!(first, format!("{}-main", crate::cwd_hash("/some/project")));
+    }
+
+    #[test]
+    fn legacy_main_session_is_migrated_forward() {
+        use engine::session_persistence::{self, PersistedSession};
+
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = "/migrated/project";
+        let legacy_id = format!("{}-main", crate::legacy_cwd_hash(cwd));
+        let target = format!("{}-main", crate::cwd_hash(cwd));
+
+        // Migration only fires for a recorded session state (it checks the
+        // snapshot's cwd), so seed a valid one for the legacy id.
+        let state = PersistedSession {
+            schema_version: session_persistence::CURRENT_SCHEMA_VERSION,
+            session_id: legacy_id.clone(),
+            cwd: cwd.to_string(),
+            model: "test-model".to_string(),
+            created_at: chrono::Utc::now().to_rfc3339(),
+            last_active: chrono::Utc::now().to_rfc3339(),
+            messages: Vec::new(),
+            memory_summary: None,
+        };
+        session_persistence::persist_session_state(dir.path(), &state).unwrap();
+        std::fs::write(
+            dir.path().join(format!("{}.jsonl", legacy_id)),
+            "seed entry\n",
+        )
+        .unwrap();
+
+        let resolved = resolve_session_id_in(dir.path(), cwd);
+        assert_eq!(resolved, target);
+        // The legacy artifacts now live under the modern id.
+        assert!(dir.path().join(format!("{}.jsonl", target)).exists());
+        assert_eq!(
+            session_persistence::load_session_state(dir.path(), &target)
+                .unwrap()
+                .session_id,
+            target
+        );
+    }
+
+    #[test]
+    fn surface_sessions_are_never_adopted() {
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = "/busy/project";
+        let hash = crate::cwd_hash(cwd);
+        // A gateway surface's transcript is the newest artifact for this cwd.
+        std::fs::write(dir.path().join(format!("{}-telegram.jsonl", hash)), "x\n").unwrap();
+
+        let resolved = resolve_session_id_in(dir.path(), cwd);
+        assert_eq!(resolved, format!("{}-main", hash));
+        // And nothing was read or copied from the surface session.
+        assert!(!dir.path().join(format!("{}-main.jsonl", hash)).exists());
     }
 }
