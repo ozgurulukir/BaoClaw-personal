@@ -187,15 +187,21 @@ fn restore_persisted_state(
     }
 
     let has_messages = !persisted.messages.is_empty();
-    let has_summary = persisted
-        .memory_summary
-        .as_deref()
-        .is_some_and(|summary| !summary.trim().is_empty());
+    let summary = persisted.memory_summary.filter(|s| !s.trim().is_empty());
+    let has_summary = summary.is_some();
     if has_messages {
         engine.set_messages(persisted.messages);
     }
-    if let Some(summary) = persisted.memory_summary {
-        if !summary.trim().is_empty() {
+    // Seed the engine's session memory from the snapshot only when the
+    // session's own .memory.md was empty at load time.  The snapshot's
+    // summary is a copy of that file, so re-seeding onto a non-empty memory
+    // would write stale content back over fresher summaries on every restore.
+    if let Some(summary) = summary {
+        let memory_empty = engine
+            .get_session_memory()
+            .as_ref()
+            .is_none_or(|sm| sm.get().trim().is_empty());
+        if memory_empty {
             engine.seed_session_memory(&summary);
         }
     }
@@ -589,7 +595,15 @@ mod tests {
     use tempfile::TempDir;
 
     fn make_engine(cwd: PathBuf, session_id: &str) -> QueryEngine {
-        QueryEngine::new(crate::engine::query_engine::QueryEngineConfig {
+        QueryEngine::new(make_engine_config(cwd, session_id, None))
+    }
+
+    fn make_engine_config(
+        cwd: PathBuf,
+        session_id: &str,
+        session_memory: Option<Arc<crate::engine::session_memory::SessionMemory>>,
+    ) -> crate::engine::query_engine::QueryEngineConfig {
+        crate::engine::query_engine::QueryEngineConfig {
             cwd,
             tools: vec![],
             api_client: Arc::new(UnifiedClient::new_anthropic(ApiClientConfig {
@@ -614,7 +628,7 @@ mod tests {
             max_tokens: 16_384,
             max_tokens_budget: None,
             agent_label: None,
-            session_memory: None,
+            session_memory,
             file_cache: None,
             tool_result_store: None,
             permission: None,
@@ -622,7 +636,85 @@ mod tests {
             evolution: None,
             memory_store: None,
             tool_health: None,
-        })
+        }
+    }
+
+    /// Engine whose session memory is bound to a throwaway sessions dir;
+    /// returns the memory handle for pre-seeding and assertions.
+    fn make_engine_with_memory(
+        cwd: PathBuf,
+        session_id: &str,
+        sessions_dir: &TempDir,
+    ) -> (
+        QueryEngine,
+        Arc<crate::engine::session_memory::SessionMemory>,
+    ) {
+        let sm = Arc::new(crate::engine::session_memory::SessionMemory::load_in(
+            sessions_dir.path(),
+            session_id,
+        ));
+        let engine = QueryEngine::new(make_engine_config(cwd, session_id, Some(Arc::clone(&sm))));
+        (engine, sm)
+    }
+
+    fn make_persisted(
+        session_id: &str,
+        cwd: &std::path::Path,
+        memory_summary: Option<String>,
+    ) -> PersistedSession {
+        PersistedSession {
+            schema_version: session_persistence::CURRENT_SCHEMA_VERSION,
+            session_id: session_id.to_string(),
+            cwd: cwd.to_string_lossy().to_string(),
+            model: "test-model".to_string(),
+            created_at: chrono::Utc::now().to_rfc3339(),
+            last_active: chrono::Utc::now().to_rfc3339(),
+            messages: Vec::new(),
+            memory_summary,
+        }
+    }
+
+    #[test]
+    fn restore_seeds_snapshot_summary_when_memory_file_is_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = dir.path().join("proj");
+        let (mut engine, sm) = make_engine_with_memory(cwd.clone(), "sess-a", &dir);
+
+        let summary = "## Stale snapshot summary\n- rebase in progress".to_string();
+        let restored = restore_persisted_state(
+            &mut engine,
+            "sess-a",
+            make_persisted("sess-a", &cwd, Some(summary.clone())),
+        );
+
+        assert!(restored);
+        assert_eq!(sm.get(), summary);
+        // Seeding persisted the recovered summary so the next boot finds it.
+        assert_eq!(std::fs::read_to_string(sm.file_path()).unwrap(), summary);
+    }
+
+    #[test]
+    fn restore_never_overwrites_fresher_memory_with_stale_snapshot() {
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = dir.path().join("proj");
+        let (mut engine, sm) = make_engine_with_memory(cwd.clone(), "sess-b", &dir);
+
+        let fresh = "## Fresh summary\n- reflects the latest turns".to_string();
+        sm.update(fresh.clone());
+
+        let restored = restore_persisted_state(
+            &mut engine,
+            "sess-b",
+            make_persisted(
+                "sess-b",
+                &cwd,
+                Some("## Stale snapshot\n- from an old boot".to_string()),
+            ),
+        );
+
+        assert!(restored);
+        assert_eq!(sm.get(), fresh);
+        assert_eq!(std::fs::read_to_string(sm.file_path()).unwrap(), fresh);
     }
 
     fn make_registry() -> (TempDir, SessionRegistry, PathBuf, PathBuf) {

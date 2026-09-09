@@ -34,21 +34,23 @@ pub struct SessionMemory {
 }
 
 impl SessionMemory {
-    /// Compute the file path for a given session ID.
-    pub fn path_for(session_id: &str) -> PathBuf {
-        let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
-        let sessions_dir = PathBuf::from(home).join(".baoclaw").join("sessions");
-        crate::engine::session_persistence::session_artifact_path(
-            &sessions_dir,
+    /// Load an existing session memory file. Returns empty string if missing.
+    pub fn load(session_id: &str) -> Self {
+        Self::load_in(
+            &crate::engine::session_persistence::default_sessions_dir(),
+            session_id,
+        )
+    }
+
+    /// Directory-injectable variant of [`load`] (test seam) — tests must
+    /// never touch the real `~/.baoclaw/sessions/` directory.
+    pub fn load_in(sessions_dir: &std::path::Path, session_id: &str) -> Self {
+        let file_path = crate::engine::session_persistence::session_artifact_path(
+            sessions_dir,
             session_id,
             "memory.md",
         )
-        .unwrap_or_default()
-    }
-
-    /// Load an existing session memory file. Returns empty string if missing.
-    pub fn load(session_id: &str) -> Self {
-        let file_path = Self::path_for(session_id);
+        .unwrap_or_default();
         let parent = match file_path.parent() {
             Some(parent) if !file_path.as_os_str().is_empty() => parent,
             _ => {
@@ -201,15 +203,16 @@ mod tests {
 
     #[test]
     fn test_should_update_empty() {
-        let sm = SessionMemory::load("__test_unit__");
+        let dir = tempfile::tempdir().unwrap();
+        let sm = SessionMemory::load_in(dir.path(), "unit-empty");
         assert!(!sm.should_update(5));
         assert!(sm.should_update(6));
-        sm.clear();
     }
 
     #[test]
     fn test_update_and_get() {
-        let sm = SessionMemory::load("__test_unit_2__");
+        let dir = tempfile::tempdir().unwrap();
+        let sm = SessionMemory::load_in(dir.path(), "unit-update");
         let summary = "# Session Memory\n- Did stuff".to_string();
         sm.update(summary.clone());
         assert_eq!(sm.get(), summary);
@@ -219,17 +222,18 @@ mod tests {
 
     #[test]
     fn test_is_available() {
-        let sm = SessionMemory::load("__test_unit_3__");
+        let dir = tempfile::tempdir().unwrap();
+        let sm = SessionMemory::load_in(dir.path(), "unit-available");
         sm.update("# Memory\nThis is a real summary with enough content.".to_string());
         assert!(sm.is_available());
         sm.update("".to_string());
         assert!(!sm.is_available());
-        sm.clear();
     }
 
     #[test]
     fn test_set_message_count() {
-        let sm = SessionMemory::load("__test_unit_4__");
+        let dir = tempfile::tempdir().unwrap();
+        let sm = SessionMemory::load_in(dir.path(), "unit-count");
         sm.update(
             "# Memory\nThis is a real summary with enough content to pass the threshold."
                 .to_string(),
@@ -237,22 +241,22 @@ mod tests {
         sm.set_message_count(10);
         assert!(!sm.should_update(19));
         assert!(sm.should_update(20));
-        sm.clear();
     }
 
     #[test]
     fn test_truncation() {
-        let sm = SessionMemory::load("__test_unit_5__");
+        let dir = tempfile::tempdir().unwrap();
+        let sm = SessionMemory::load_in(dir.path(), "unit-truncation");
         let long = "X".repeat(10_000);
         sm.update(long.clone());
         assert!(sm.get().len() < long.len());
         assert!(sm.get().contains("[Summary truncated"));
-        sm.clear();
     }
 
     #[test]
     fn test_invalid_session_id_disables_persistence_without_fallback_path() {
-        let sm = SessionMemory::load("../invalid-session");
+        let dir = tempfile::tempdir().unwrap();
+        let sm = SessionMemory::load_in(dir.path(), "../invalid-session");
 
         assert!(sm.file_path().as_os_str().is_empty());
         sm.update("summary that remains in memory only".to_string());

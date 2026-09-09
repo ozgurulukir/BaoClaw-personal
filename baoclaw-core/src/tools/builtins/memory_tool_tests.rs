@@ -36,8 +36,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_memory_tool_call_valid() {
-        let tool = MemoryTool::new();
         let dir = tempdir().unwrap();
+        let memory_file = dir.path().join("memory.jsonl");
+        let tool = MemoryTool::new().with_memory_path(memory_file.clone());
         let ctx = make_ctx(dir.path());
         let progress = NoopProgress;
 
@@ -51,16 +52,22 @@ mod tests {
         let result = res.unwrap();
         assert!(!result.is_error);
         assert_eq!(result.data["category"], "preference");
+
+        // The entry landed in the redirected file, not the user's real
+        // ~/.baoclaw/memory.jsonl.
+        let written = std::fs::read_to_string(&memory_file).unwrap();
+        assert!(written.contains("User prefers dark mode"));
     }
 
     #[tokio::test]
     async fn test_memory_tool_call_missing_fields() {
-        let tool = MemoryTool::new();
         let dir = tempdir().unwrap();
+        let tool = MemoryTool::new().with_memory_path(dir.path().join("memory.jsonl"));
         let ctx = make_ctx(dir.path());
         let progress = NoopProgress;
 
         let res = tool.call(json!({}), &ctx, &progress).await;
         assert!(res.is_err());
+        assert!(!dir.path().join("memory.jsonl").exists());
     }
 }

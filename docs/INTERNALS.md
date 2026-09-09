@@ -41,8 +41,10 @@ A per-session rolling summary that persists across the lifetime of a session —
 **How it's used:**
 
 1. **Free compaction** — `session_memory_compact()` uses the existing summary to replace old messages without any API call (keeps last 10 messages)
-2. **Dynamic reminder** — injected into `<system-reminder>` in the user message each turn alongside git status
-3. **Session resume** — when reconnecting, the old summary seeds the new session and triggers immediate compaction if > 50 messages
+2. **Dynamic reminder** — injected into `<system-reminder>` alongside git status, once per **user turn**; tool-result continuation turns inside a task don't re-receive it (re-appending it after every tool call made the model re-acknowledge the same summary each turn)
+3. **Session resume** — **surface-scoped**: a session only ever resumes its own transcript (`{cwd_hash}-{surface}` exact match first, then the same surface's newest), never another surface's; snapshot restores seed the summary only when the session's own `.memory.md` is empty, so stale snapshot copies can't overwrite fresher files
+
+**Summary freshness:** the summarizer input keeps the **most recent ~40K chars** of the conversation, so the summary tracks current work rather than freezing on the session's opening minutes.
 
 ---
 
@@ -125,8 +127,10 @@ This split ensures the cached system prompt prefix stays stable across turns —
 #### Session Resume Flow — Summary-First Three-Tier Strategy
 
 ```
-1. find_latest_session_for_cwd(cwd)
-     → FNV-1a hash of cwd → scan ~/.baoclaw/sessions/ for matching .jsonl
+1. find_latest_session_for_cwd(cwd, Some(session_id))
+     → FNV-1a hash of cwd → scan ~/.baoclaw/sessions/ for matching .jsonl,
+       restricted to the caller's own surface (exact id first, then the
+       same `{cwd_hash}-{surface}` suffix) — cross-surface resumes never happen
 2. TranscriptWriter::load(session_id) → read all entries
 3. SessionMemory::load(session_id) → check .memory.md for existing summary
 4. Three-tier loading (10 min → < 5 sec):

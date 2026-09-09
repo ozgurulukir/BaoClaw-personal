@@ -114,15 +114,15 @@ fn socket_dir() -> PathBuf {
     dir
 }
 
-/// Compute a stable hash of the working directory path.
-/// Uses the existing deterministic FNV-1a implementation with 16 hex chars
-/// for a short, stable ID.
+/// Compute a stable hash of the working directory path: 16 hex chars for a
+/// short, stable ID. Delegates to the engine's canonical implementation so
+/// session-id construction and resume's surface matching never diverge.
 fn cwd_hash(cwd: &str) -> String {
-    format!("{:016x}", md5_simple(cwd))
+    baoclaw_core::engine::transcript::cwd_identity_hash(cwd)
 }
 
 fn legacy_cwd_hash(cwd: &str) -> String {
-    format!("{:016x}", md5_simple(cwd))[..8].to_string()
+    cwd_hash(cwd)[..8].to_string()
 }
 
 fn make_socket_path(cwd: &str) -> PathBuf {
@@ -212,16 +212,6 @@ fn cleanup_meta(socket_path: &std::path::Path) {
             eprintln!("[daemon] WARNING: could not remove daemon meta: {}", e);
         }
     }
-}
-
-/// Simple hash for cwd → short hex string
-fn md5_simple(input: &str) -> u64 {
-    let mut h: u64 = 0xcbf29ce484222325;
-    for b in input.bytes() {
-        h ^= b as u64;
-        h = h.wrapping_mul(0x100000001b3);
-    }
-    h
 }
 
 // ══════════════════════════════════════════════════════════
@@ -508,7 +498,9 @@ async fn handle_client(mut conn: IpcConnection, shared: SharedState) {
             .await;
 
         // ── Resume session history: snapshot-first, legacy transcript fallback ──
-        let resumed = lc_restore_session_history(&session, is_new, resumed, &work_cwd).await;
+        let resumed =
+            lc_restore_session_history(&session, is_new, resumed, &work_cwd, &session_id_clone)
+                .await;
 
         let (client_id, broadcast_rx) = session.add_client().await;
         let msg_count = session.engine_read().await.get_messages().len();
@@ -682,11 +674,16 @@ async fn lc_restore_session_history(
     is_new: bool,
     mut resumed: bool,
     work_cwd: &PathBuf,
+    session_id: &str,
 ) -> bool {
     let current_msg_count = session.engine_read().await.get_messages().len();
     if (is_new || current_msg_count == 0) && !resumed {
         let cwd_str_for_resume = work_cwd.to_string_lossy().to_string();
-        if let Some(rid) = engine::transcript::find_latest_session_for_cwd(&cwd_str_for_resume) {
+        // Surface-scoped resume: only this session's own transcript, never
+        // another surface's (telegram must not inherit the web session).
+        if let Some(rid) =
+            engine::transcript::find_latest_session_for_cwd(&cwd_str_for_resume, Some(session_id))
+        {
             match engine::transcript::TranscriptWriter::load(&rid) {
                 Ok(entries) => {
                     let entry_count = entries.len();

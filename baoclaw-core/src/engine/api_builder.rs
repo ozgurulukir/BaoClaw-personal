@@ -348,24 +348,29 @@ pub fn build_api_request(messages: &[Message], config: &QueryLoopConfig) -> Crea
 
     // Inject dynamic <system-reminder> into the last user message to avoid
     // invalidating the cached system prompt prefix.  Git status, session
-    // memory, and other per-turn information goes here.
+    // memory, and other per-turn information goes here.  Only genuine user
+    // turns receive it: re-appending the reminder to every tool-result
+    // continuation turn made the model re-acknowledge the same content
+    // (e.g. the session memory summary) after each tool call.
     if let Some(reminder) = build_dynamic_reminder(config) {
-        if let Some(last_msg) = api_messages.last_mut() {
-            // Append the reminder to the existing user message content
-            if let Some(content) = last_msg.get_mut("content") {
-                match content {
-                    Value::String(s) => {
-                        *s = format!("{}\n\n{}", s, reminder);
-                    }
-                    Value::Array(blocks) => {
-                        blocks.push(serde_json::json!({
-                            "type": "text",
-                            "text": reminder,
-                        }));
-                    }
-                    _ => {
-                        // Fallback: replace content with a string containing the reminder
-                        *content = Value::String(format!("{}\n\n{}", content, reminder));
+        if api_messages.last().is_some_and(is_user_text_turn) {
+            if let Some(last_msg) = api_messages.last_mut() {
+                // Append the reminder to the existing user message content
+                if let Some(content) = last_msg.get_mut("content") {
+                    match content {
+                        Value::String(s) => {
+                            *s = format!("{}\n\n{}", s, reminder);
+                        }
+                        Value::Array(blocks) => {
+                            blocks.push(serde_json::json!({
+                                "type": "text",
+                                "text": reminder,
+                            }));
+                        }
+                        _ => {
+                            // Fallback: replace content with a string containing the reminder
+                            *content = Value::String(format!("{}\n\n{}", content, reminder));
+                        }
                     }
                 }
             }
@@ -571,5 +576,63 @@ pub fn build_dynamic_reminder(config: &QueryLoopConfig) -> Option<String> {
             "<system-reminder>\n{}\n</system-reminder>",
             parts.join("\n\n")
         ))
+    }
+}
+
+/// Whether the final API message opens a genuine user turn: a user message
+/// whose content is plain text, with no tool results attached.  Tool-result
+/// continuation turns share the `user` role but must not receive the dynamic
+/// reminder again — it was already injected on the turn's first call.
+fn is_user_text_turn(msg: &Value) -> bool {
+    if msg.get("role").and_then(|r| r.as_str()) != Some("user") {
+        return false;
+    }
+    match msg.get("content") {
+        Some(Value::String(_)) => true,
+        Some(Value::Array(blocks)) => !blocks
+            .iter()
+            .any(|b| b.get("type").and_then(|t| t.as_str()) == Some("tool_result")),
+        _ => false,
+    }
+}
+
+#[cfg(test)]
+mod reminder_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn test_user_text_turn_detection() {
+        assert!(is_user_text_turn(&json!({
+            "role": "user",
+            "content": "fix the bug"
+        })));
+        assert!(is_user_text_turn(&json!({
+            "role": "user",
+            "content": [{"type": "text", "text": "fix the bug"}]
+        })));
+    }
+
+    #[test]
+    fn test_tool_result_turn_is_not_a_user_turn() {
+        assert!(!is_user_text_turn(&json!({
+            "role": "user",
+            "content": [{"type": "tool_result", "tool_use_id": "t1", "content": "ok"}]
+        })));
+        assert!(!is_user_text_turn(&json!({
+            "role": "user",
+            "content": [
+                {"type": "tool_result", "tool_use_id": "t1", "content": "ok"},
+                {"type": "text", "text": "stray text"}
+            ]
+        })));
+    }
+
+    #[test]
+    fn test_assistant_role_is_not_a_user_turn() {
+        assert!(!is_user_text_turn(&json!({
+            "role": "assistant",
+            "content": [{"type": "text", "text": "hi"}]
+        })));
     }
 }

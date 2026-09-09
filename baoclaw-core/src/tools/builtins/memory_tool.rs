@@ -6,7 +6,11 @@ use crate::tools::trait_def::*;
 
 /// Tool that allows the AI to automatically save important information
 /// to long-term memory (user preferences, facts, decisions).
-pub struct MemoryTool;
+pub struct MemoryTool {
+    /// Overrides the global `~/.baoclaw/memory.jsonl` path (test seam) so
+    /// tests never touch the user's real long-term memory.
+    memory_path: Option<std::path::PathBuf>,
+}
 
 impl Default for MemoryTool {
     fn default() -> Self {
@@ -16,7 +20,13 @@ impl Default for MemoryTool {
 
 impl MemoryTool {
     pub fn new() -> Self {
-        Self
+        Self { memory_path: None }
+    }
+
+    /// Redirect memory persistence to an explicit file (test seam).
+    pub fn with_memory_path(mut self, path: std::path::PathBuf) -> Self {
+        self.memory_path = Some(path);
+        self
     }
 }
 
@@ -72,10 +82,12 @@ impl Tool for MemoryTool {
             .and_then(|v| v.as_str())
             .unwrap_or("fact");
 
-        let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
-        let memory_path = std::path::PathBuf::from(&home)
-            .join(".baoclaw")
-            .join("memory.jsonl");
+        let memory_path = self.memory_path.clone().unwrap_or_else(|| {
+            let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
+            std::path::PathBuf::from(&home)
+                .join(".baoclaw")
+                .join("memory.jsonl")
+        });
 
         let entry = json!({
             "id": &uuid::Uuid::new_v4().to_string()[..8],

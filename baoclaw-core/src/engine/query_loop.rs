@@ -2434,6 +2434,19 @@ pub fn validate_and_fix_tool_messages(messages: &[Message]) -> Vec<Message> {
 
     result
 }
+/// Keep at most the last `max_chars` bytes worth of `text`, cutting at a
+/// UTF-8 character boundary and marking what was omitted.
+pub fn tail_chars(text: &str, max_chars: usize) -> String {
+    if text.len() <= max_chars {
+        return text.to_string();
+    }
+    let mut start = text.len() - max_chars;
+    while !text.is_char_boundary(start) {
+        start += 1;
+    }
+    format!("[...earlier conversation omitted...]\n{}", &text[start..])
+}
+
 /// Background task: generate a session summary and persist it.
 ///
 /// Spawned (fire-and-forget) after each query loop iteration when
@@ -2453,19 +2466,10 @@ pub async fn update_session_memory_background(
     }
 
     let conversation_text = format_messages_for_summary(&messages);
-    let max_chars: usize = 40_000;
-    let truncated = if conversation_text.len() > max_chars {
-        format!(
-            "{}...\n\n[Truncated, {} total chars]",
-            conversation_text
-                .chars()
-                .take(max_chars)
-                .collect::<String>(),
-            conversation_text.len()
-        )
-    } else {
-        conversation_text
-    };
+    // Keep the most recent portion of the conversation: the tail carries the
+    // current task state, while an early cut would freeze the summary on the
+    // session's first minutes and leave it stale for the rest of the session.
+    let truncated = tail_chars(&conversation_text, 40_000);
 
     let prompt = if existing_summary.is_empty() {
         format!(
@@ -2531,6 +2535,37 @@ pub async fn update_session_memory_background(
         Err(e) => {
             eprintln!("Session memory background update failed: {}", e);
         }
+    }
+}
+
+#[cfg(test)]
+mod session_summary_tests {
+    use super::*;
+
+    #[test]
+    fn test_tail_chars_short_input_passthrough() {
+        assert_eq!(tail_chars("hello", 100), "hello");
+        assert_eq!(tail_chars("", 10), "");
+    }
+
+    #[test]
+    fn test_tail_chars_keeps_tail_and_marks_omission() {
+        let text = "a".repeat(300);
+        let out = tail_chars(&text, 100);
+        assert!(out.starts_with("[...earlier conversation omitted...]\n"));
+        let body = out.lines().nth(1).unwrap();
+        assert_eq!(body.len(), 100);
+        assert!(text.ends_with(body));
+    }
+
+    #[test]
+    fn test_tail_chars_cuts_at_char_boundary() {
+        // 'é' is two bytes; a naive byte cut would split it.
+        let text = "é".repeat(150);
+        let out = tail_chars(&text, 100);
+        let body = out.lines().nth(1).unwrap();
+        assert_eq!(body.chars().count(), 50);
+        assert!(text.ends_with(body));
     }
 }
 

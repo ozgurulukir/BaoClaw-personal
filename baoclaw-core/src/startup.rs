@@ -507,10 +507,11 @@ pub(super) async fn load_prompts_and_memory(
 /// One project directory = one session file.
 pub(super) fn resolve_session_id(cwd_str: &str) -> String {
     let cwd_key = crate::cwd_hash(cwd_str);
-    let session_id = match engine::transcript::find_latest_session_for_cwd(cwd_str) {
+    // No preferred id: legacy discovery semantics — the newest transcript for
+    // this cwd is reused (and migrated from the 8-char hash if needed).
+    let session_id = match engine::transcript::find_latest_session_for_cwd(cwd_str, None) {
         Some(legacy_id) => {
-            let legacy_prefix = format!("{}-", crate::legacy_cwd_hash(cwd_str));
-            if let Some(suffix) = legacy_id.strip_prefix(&legacy_prefix) {
+            if let Some(suffix) = engine::transcript::session_surface(&legacy_id, &cwd_key) {
                 let normalized_id = format!("{}-{}", cwd_key, suffix);
                 let sessions_dir = engine::session_persistence::default_sessions_dir();
                 let migrated = engine::session_persistence::migrate_legacy_session(

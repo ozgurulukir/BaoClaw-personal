@@ -245,10 +245,20 @@ mod tests {
         }
     }
 
+    /// Throwaway store + archive in a temp dir (the TempDir must stay bound
+    /// for the test's lifetime, hence the tuple).
+    fn fresh_memory_fixtures() -> (tempfile::TempDir, Arc<MemoryStore>, Arc<MemoryArchive>) {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(MemoryStore::load_with_path(dir.path().join("memory.jsonl")));
+        let archive = Arc::new(MemoryArchive::load_with_path(
+            dir.path().join("archive.jsonl"),
+        ));
+        (dir, store, archive)
+    }
+
     #[tokio::test]
     async fn test_scheduler_creation() {
-        let store = Arc::new(MemoryStore::load());
-        let archive = Arc::new(MemoryArchive::load());
+        let (_dir, store, archive) = fresh_memory_fixtures();
         let config = create_test_config();
 
         let scheduler =
@@ -260,13 +270,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_run_cleanup() {
-        let store = Arc::new(MemoryStore::load());
-        let archive = Arc::new(MemoryArchive::load());
+        let (_dir, store, archive) = fresh_memory_fixtures();
         let config = create_test_config();
 
         // Clear for test
-        store.clear().await.unwrap();
-        archive.clear().await;
 
         let scheduler =
             MemoryCleanupScheduler::new(Arc::clone(&store), Arc::clone(&archive), config);
@@ -281,12 +288,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_state_tracking() {
-        let store = Arc::new(MemoryStore::load());
-        let archive = Arc::new(MemoryArchive::load());
+        let (_dir, store, archive) = fresh_memory_fixtures();
         let config = create_test_config();
-
-        store.clear().await.unwrap();
-        archive.clear().await;
 
         let scheduler =
             MemoryCleanupScheduler::new(Arc::clone(&store), Arc::clone(&archive), config);
@@ -310,12 +313,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_not_due_after_run() {
-        let store = Arc::new(MemoryStore::load());
-        let archive = Arc::new(MemoryArchive::load());
+        let (_dir, store, archive) = fresh_memory_fixtures();
         let config = create_test_config();
-
-        store.clear().await.unwrap();
-        archive.clear().await;
 
         let scheduler =
             MemoryCleanupScheduler::new(Arc::clone(&store), Arc::clone(&archive), config);
@@ -330,8 +329,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_shutdown() {
-        let store = Arc::new(MemoryStore::load());
-        let archive = Arc::new(MemoryArchive::load());
+        let (_dir, store, archive) = fresh_memory_fixtures();
         let config = create_test_config();
 
         let scheduler = Arc::new(MemoryCleanupScheduler::new(
@@ -349,8 +347,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_custom_interval() {
-        let store = Arc::new(MemoryStore::load());
-        let archive = Arc::new(MemoryArchive::load());
+        let (_dir, store, archive) = fresh_memory_fixtures();
         let config = create_test_config();
 
         // Use very short interval for testing

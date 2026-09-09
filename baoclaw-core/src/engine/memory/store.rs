@@ -123,6 +123,12 @@ impl MemoryStore {
     pub fn load() -> Self {
         let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
         let file_path = PathBuf::from(&home).join(".baoclaw").join(MEMORY_FILE);
+        Self::load_with_path(file_path)
+    }
+
+    /// Load memories from an explicit file path (test seam) — tests must
+    /// never touch the user's real `~/.baoclaw/memory.jsonl`.
+    pub fn load_with_path(file_path: PathBuf) -> Self {
         let entries = Self::read_file(&file_path);
         eprintln!(
             "Loaded {} long-term memories from {}",

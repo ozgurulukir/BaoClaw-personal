@@ -67,6 +67,17 @@ impl MemoryArchive {
         }
     }
 
+    /// Load an archive from an explicit file path (test seam) — tests must
+    /// never touch the user's real `~/.baoclaw` archive.
+    pub fn load_with_path(file_path: PathBuf) -> Self {
+        let entries = Self::read_file(&file_path);
+        Self {
+            entries: Mutex::new(entries),
+            file_path: Mutex::new(file_path),
+            max_entries: DEFAULT_MAX_ARCHIVE_SIZE,
+        }
+    }
+
     /// Load archive with custom configuration.
     pub fn load_with_config(config: &DecayConfig) -> Self {
         let mut archive = Self::load();
@@ -340,10 +351,17 @@ mod tests {
         }
     }
 
+    /// Fresh archive in a throwaway directory (the TempDir must stay bound
+    /// for the test's lifetime, hence the tuple).
+    async fn fresh_archive() -> (tempfile::TempDir, MemoryArchive) {
+        let dir = tempfile::tempdir().unwrap();
+        let archive = MemoryArchive::load_with_path(dir.path().join("archive.jsonl"));
+        (dir, archive)
+    }
+
     #[tokio::test]
     async fn test_archive_single_memory() {
-        let archive = MemoryArchive::load();
-        archive.clear().await;
+        let (_dir, archive) = fresh_archive().await;
 
         let memory = create_test_memory("test-archive-1", 0.05);
         let archived = archive.archive_memory(memory.clone()).await;
@@ -357,8 +375,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_archive_multiple_memories() {
-        let archive = MemoryArchive::load();
-        archive.clear().await;
+        let (_dir, archive) = fresh_archive().await;
 
         let memories = vec![
             create_test_memory("test-multi-1", 0.05),
@@ -378,13 +395,11 @@ mod tests {
         assert!(listed.iter().any(|e| e.id == "test-multi-2"));
 
         // Cleanup
-        archive.clear().await;
     }
 
     #[tokio::test]
     async fn test_restore_memory() {
-        let archive = MemoryArchive::load();
-        archive.clear().await;
+        let (_dir, archive) = fresh_archive().await;
 
         let memory = create_test_memory("test-restore", 0.05);
         archive.archive_memory(memory).await;
@@ -403,8 +418,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_restore_nonexistent() {
-        let archive = MemoryArchive::load();
-        archive.clear().await;
+        let (_dir, archive) = fresh_archive().await;
 
         let result = archive.restore_memory("nonexistent").await;
         assert!(result.is_none());
@@ -412,8 +426,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_archived() {
-        let archive = MemoryArchive::load();
-        archive.clear().await;
+        let (_dir, archive) = fresh_archive().await;
 
         let memory = create_test_memory("test-get", 0.05);
         archive.archive_memory(memory).await;
@@ -425,14 +438,11 @@ mod tests {
         // Should still be in archive
         let listed = archive.list_archived().await;
         assert!(listed.iter().any(|e| e.id == "test-get"));
-
-        archive.clear().await;
     }
 
     #[tokio::test]
     async fn test_delete_archived() {
-        let archive = MemoryArchive::load();
-        archive.clear().await;
+        let (_dir, archive) = fresh_archive().await;
 
         let memory = create_test_memory("test-delete", 0.05);
         archive.archive_memory(memory).await;
@@ -447,8 +457,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_delete_nonexistent() {
-        let archive = MemoryArchive::load();
-        archive.clear().await;
+        let (_dir, archive) = fresh_archive().await;
 
         let deleted = archive.delete_archived("nonexistent").await;
         assert!(!deleted);
@@ -456,8 +465,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_list_archived() {
-        let archive = MemoryArchive::load();
-        archive.clear().await;
+        let (_dir, archive) = fresh_archive().await;
 
         assert!(archive.list_archived().await.is_empty());
 
@@ -469,14 +477,11 @@ mod tests {
 
         let listed = archive.list_archived().await;
         assert_eq!(listed.len(), 2);
-
-        archive.clear().await;
     }
 
     #[tokio::test]
     async fn test_clear() {
-        let archive = MemoryArchive::load();
-        archive.clear().await;
+        let (_dir, archive) = fresh_archive().await;
 
         let memories = vec![
             create_test_memory("test-clear-1", 0.05),
@@ -491,8 +496,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_count() {
-        let archive = MemoryArchive::load();
-        archive.clear().await;
+        let (_dir, archive) = fresh_archive().await;
 
         assert_eq!(archive.count().await, 0);
 
@@ -503,14 +507,11 @@ mod tests {
         archive.archive_memories(memories).await;
 
         assert_eq!(archive.count().await, 2);
-
-        archive.clear().await;
     }
 
     #[tokio::test]
     async fn test_search() {
-        let archive = MemoryArchive::load();
-        archive.clear().await;
+        let (_dir, archive) = fresh_archive().await;
 
         let mut memory1 = create_test_memory("test-search-1", 0.05);
         memory1.content = "Important fact about Rust programming".to_string();
@@ -533,15 +534,12 @@ mod tests {
         // Search for "test" (should match neither)
         let results = archive.search("nonexistent_keyword").await;
         assert!(results.is_empty());
-
-        archive.clear().await;
     }
 
     #[tokio::test]
     async fn test_cleanup() {
         // Create archive with low max_entries for testing
-        let archive = MemoryArchive::load();
-        archive.clear().await;
+        let (_dir, archive) = fresh_archive().await;
 
         // Manually set low limit
         {
@@ -556,14 +554,11 @@ mod tests {
         let count = archive.cleanup().await;
         // Should not trigger cleanup since we didn't set max_entries
         assert_eq!(count, 0);
-
-        archive.clear().await;
     }
 
     #[tokio::test]
     async fn test_needs_cleanup() {
-        let archive = MemoryArchive::load();
-        archive.clear().await;
+        let (_dir, archive) = fresh_archive().await;
 
         assert!(!archive.needs_cleanup().await);
 
@@ -574,6 +569,5 @@ mod tests {
         archive.archive_memories(memories).await;
 
         // Note: archive_memories performs cleanup, so this depends on max_entries
-        archive.clear().await;
     }
 }
