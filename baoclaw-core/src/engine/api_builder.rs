@@ -513,6 +513,21 @@ pub fn build_system_prompt(config: &QueryLoopConfig) -> Option<Vec<Value>> {
     }
 }
 
+/// The freshness note appended below the session-memory summary: present
+/// when the summary is meaningfully behind the live history, absent when
+/// freshness is unknown (`None` — e.g. right after a restore) or recent.
+fn summary_freshness_note(age: Option<usize>) -> Option<String> {
+    let age = age?;
+    if age > crate::engine::session_memory::UPDATE_INTERVAL {
+        Some(format!(
+            "# Summary Freshness\n\nThe session summary above was last updated {} messages ago; later work may be missing from it.",
+            age
+        ))
+    } else {
+        None
+    }
+}
+
 /// Build a `<system-reminder>` user message containing **dynamic** information
 /// that changes between turns (git status, session memory, etc.).
 ///
@@ -549,11 +564,18 @@ pub fn build_dynamic_reminder(config: &QueryLoopConfig) -> Option<String> {
         }
     }
 
-    // Session memory (rolling summary) — updated after compaction
+    // Session memory (rolling summary) — updated in the background as the
+    // session progresses. A staleness note is appended when the summary is
+    // meaningfully behind the current history, so the model can weigh it
+    // accordingly instead of treating it as current fact.
     if let Some(sm) = &config.session_memory {
         let memory = sm.get();
         if !memory.is_empty() {
             parts.push(format!("# Session Memory\n\n{}", memory));
+            let age = sm.messages_since_update(config.recent_messages_for_rules.len());
+            if let Some(note) = summary_freshness_note(age) {
+                parts.push(note);
+            }
         }
     }
 
@@ -611,6 +633,18 @@ mod reminder_tests {
             "role": "user",
             "content": [{"type": "text", "text": "fix the bug"}]
         })));
+    }
+
+    #[test]
+    fn test_summary_freshness_note_states() {
+        // Unknown freshness (restored session) → no note.
+        assert!(summary_freshness_note(None).is_none());
+        // Recent summary → no note.
+        assert!(summary_freshness_note(Some(5)).is_none());
+        // Stale summary → note with the age spelled out.
+        let note = summary_freshness_note(Some(25)).unwrap();
+        assert!(note.contains("# Summary Freshness"));
+        assert!(note.contains("25 messages ago"));
     }
 
     #[test]

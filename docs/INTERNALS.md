@@ -55,19 +55,27 @@ ranks entries in the fragment and slows their decay.
 
 A per-session rolling summary that persists across the lifetime of a session — like meeting notes that get refined over time.
 
-| Aspect               | Detail                                                      |
-| -------------------- | ----------------------------------------------------------- |
-| **Storage**          | `~/.baoclaw/sessions/{session_id}.memory.md`                |
-| **First update**     | Triggers at **6 messages** (if summary is empty)            |
-| **Refresh interval** | Every **10 messages** after the last update                 |
-| **Thread safety**    | `std::sync::Mutex` — safe to share via `Arc<SessionMemory>` |
-| **Persistence**      | Written to disk on every `update()` call                    |
+| Aspect               | Detail                                                                                                                |
+| -------------------- | --------------------------------------------------------------------------------------------------------------------- |
+| **Storage**          | `~/.baoclaw/sessions/{session_id}.memory.md`                                                                          |
+| **First update**     | Triggers at **6 messages** (if summary is empty)                                                                      |
+| **Refresh interval** | Every **10 messages** after the last update                                                                           |
+| **Stall protection** | The interval baseline re-anchors when history shrinks (compaction used to freeze updates for the rest of the session) |
+| **Trigger sites**    | After tool-call turns AND on text-only final turns                                                                    |
+| **Thread safety**    | `std::sync::Mutex` — safe to share via `Arc<SessionMemory>`                                                           |
+| **Persistence**      | Written to disk on every `update()` call                                                                              |
 
 **How it's used:**
 
 1. **Free compaction** — `session_memory_compact()` uses the existing summary to replace old messages without any API call (keeps last 10 messages)
 2. **Dynamic reminder** — injected into `<system-reminder>` alongside git status, once per **user turn**; tool-result continuation turns inside a task don't re-receive it (re-appending it after every tool call made the model re-acknowledge the same summary each turn)
 3. **Session resume** — **surface-scoped**: a session only ever resumes its own transcript (`{cwd_hash}-{surface}` exact match first, then the same surface's newest), never another surface's; snapshot restores seed the summary only when the session's own `.memory.md` is empty, so stale snapshot copies can't overwrite fresher files
+
+**Freshness marker:** when the summary is more than **10 messages** behind the
+live history, the dynamic reminder adds a `# Summary Freshness` note ("last
+updated N messages ago; later work may be missing") so the model weighs it as
+a snapshot instead of current fact. Right after a restore the age is unknown,
+so no note is shown rather than a misleading one.
 
 **Summary freshness:** the summarizer input keeps the **most recent ~40K chars**
 of the conversation (so the summary tracks current work rather than freezing
@@ -111,9 +119,11 @@ Compaction is tried from cheapest to most expensive:
 ```
 ┌─────────────────────────────────────────────────────────────────┐
 │ Level 1: micro_compact  (FREE, every turn)                      │
-│   • Clears tool_result content > 500 chars AND > 60 min old    │
+│   • Clears tool_result content > 8192 chars AND > 24 h old      │
+│     (config: micro_compact_min_chars / _min_age_secs)           │
 │   • Skips last 4 messages (current turn)                        │
-│   • Replacement text: "[Old tool result cleared — N chars]"     │
+│   • Replacement names the tool: "[Old tool result cleared —     │
+│     Bash output, originally N chars]"                           │
 ├─────────────────────────────────────────────────────────────────┤
 │ Level 2: session_memory_compact  (FREE, no API call)            │
 │   • Uses existing SessionMemory rolling summary                 │

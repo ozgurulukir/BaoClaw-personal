@@ -132,6 +132,7 @@ impl Tool for AgentTool {
             context_window: context.context_window,
             auto_compact_threshold_ratio: context.auto_compact_threshold_ratio,
             max_tokens: self.kit.max_tokens,
+            micro_compact: self.kit.micro_compact,
             max_tokens_budget: None,
             // Propagate parent turn id so CLI can render nested boxes
             parent_turn_id: input

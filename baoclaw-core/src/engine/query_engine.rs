@@ -79,6 +79,46 @@ pub struct QueryEngineConfig {
     /// dynamic reminder reflects degraded tools. None = a fresh per-query
     /// tracker with no enforcement (legacy behavior).
     pub tool_health: Option<Arc<crate::engine::tool_health::ToolHealthTracker>>,
+    /// Micro-compact thresholds for clearing old large tool results before
+    /// each API call. Defaults to the historical 24h / 8KB backstop.
+    pub micro_compact: MicroCompactConfig,
+}
+
+/// Thresholds governing `micro_compact`: a tool result is replaced with a
+/// placeholder when it is BOTH older than `min_age_secs` AND serialized
+/// larger than `min_chars`, and it sits outside the most recent messages.
+#[derive(Clone, Copy, Debug)]
+pub struct MicroCompactConfig {
+    pub min_age_secs: u64,
+    pub min_chars: usize,
+}
+
+impl Default for MicroCompactConfig {
+    fn default() -> Self {
+        Self {
+            min_age_secs: 86_400,
+            min_chars: 8_192,
+        }
+    }
+}
+
+impl MicroCompactConfig {
+    /// Effectively disabled — nothing is old or large enough. Test helper.
+    pub fn disabled() -> Self {
+        Self {
+            min_age_secs: u64::MAX,
+            min_chars: usize::MAX,
+        }
+    }
+}
+
+impl From<&crate::config::BaoclawConfig> for MicroCompactConfig {
+    fn from(config: &crate::config::BaoclawConfig) -> Self {
+        Self {
+            min_age_secs: config.micro_compact_min_age_secs,
+            min_chars: config.micro_compact_min_chars,
+        }
+    }
 }
 
 /// Thinking mode configuration for the LLM.
@@ -540,6 +580,26 @@ impl QueryEngine {
             return;
         }
 
+        // ---- Pass 0: orphan tool_result removal ----
+        // A tool_result whose tool_use id appears nowhere in the history
+        // (typically a mid-turn restore slice or a dropped assistant) would
+        // 400 the API. Strip the blocks; drop user messages left with an
+        // empty content array. Runs before Pass 1 so stub injection never
+        // fires for blocks removed here.
+        let (all_tool_use_ids, all_tool_result_ids) = collect_tool_ids(&self.messages);
+        let orphans: std::collections::HashSet<String> = all_tool_result_ids
+            .difference(&all_tool_use_ids)
+            .cloned()
+            .collect();
+        if !orphans.is_empty() {
+            let removed = strip_orphan_tool_result_blocks(&mut self.messages, &orphans);
+            eprintln!(
+                "Cleanup: removed {} orphan tool_result block(s) ({} id(s))",
+                removed,
+                orphans.len()
+            );
+        }
+
         // ---- Pass 1: middle-of-history orphan tool_use repair ----
         // Scan every assistant message; for each tool_use id, the NEXT user
         // message must contain a tool_result with the same id. Any missing id
@@ -581,15 +641,22 @@ impl QueryEngine {
                         .cloned()
                         .collect();
                     if !missing.is_empty() {
-                        eprintln!(
-                            "Cleanup: injecting stub tool_results for {} missing id(s) at msg[{}]",
-                            missing.len(),
-                            next_idx
-                        );
                         if let MessageContent::User { message, .. } =
                             &mut self.messages[next_idx].content
                         {
-                            for id in missing {
+                            // The follow-up user message may be a plain text
+                            // string (the model answered; the tool result was
+                            // lost): convert it to a block array so the stub
+                            // has somewhere to land.
+                            if message.content.is_string() {
+                                let text = message.content.as_str().unwrap_or_default().to_string();
+                                message.content = Value::Array(vec![serde_json::json!({
+                                    "type": "text",
+                                    "text": text
+                                })]);
+                            }
+                            let mut injected = 0usize;
+                            for id in &missing {
                                 if let Value::Array(ref mut arr) = &mut message.content {
                                     arr.push(serde_json::json!({
                                         "type": "tool_result",
@@ -597,7 +664,14 @@ impl QueryEngine {
                                         "content": "[Tool execution interrupted — result missing]",
                                         "is_error": true,
                                     }));
+                                    injected += 1;
                                 }
+                            }
+                            if injected > 0 {
+                                eprintln!(
+                                    "Cleanup: injecting stub tool_results for {} missing id(s) at msg[{}]",
+                                    injected, next_idx
+                                );
                             }
                         }
                     }
@@ -1118,6 +1192,7 @@ impl QueryEngine {
             max_budget_usd: self.config.max_budget_usd,
             max_tokens_budget: self.config.max_tokens_budget,
             max_tokens: self.config.max_tokens,
+            micro_compact: self.config.micro_compact,
             telemetry: self.config.telemetry.clone(),
             evolution: self.config.evolution.clone(),
         };
@@ -1198,6 +1273,8 @@ pub struct QueryLoopConfig {
     pub max_tokens_budget: Option<u64>,
     /// Output token cap sent with each model request (default 16_384).
     pub max_tokens: u32,
+    /// Micro-compact thresholds for clearing old large tool results.
+    pub micro_compact: MicroCompactConfig,
     /// Local telemetry recorder (cloned from the engine config).
     pub telemetry: Option<Arc<crate::engine::telemetry::collector::TelemetryCollector>>,
     /// Evolution engine for trajectory recording.
@@ -1380,6 +1457,7 @@ mod tests {
             evolution: None,
             memory_store: None,
             tool_health: None,
+            micro_compact: MicroCompactConfig::default(),
         }
     }
 
@@ -2214,6 +2292,7 @@ mod tests {
             max_budget_usd: None,
             max_tokens_budget: None,
             max_tokens: 16_384,
+            micro_compact: MicroCompactConfig::default(),
             context_window: 200_000,
             auto_compact_threshold_ratio: 0.7,
         }
@@ -2363,6 +2442,221 @@ mod tests {
                 assert_eq!(content, "Step 1: Parse the input");
             }
             _ => panic!("Expected ThinkingChunk"),
+        }
+    }
+}
+
+#[cfg(test)]
+mod cleanup_pass0_tests {
+    use super::*;
+    use crate::models::message::{ApiAssistantMessage, ApiUserMessage, ContentBlock};
+
+    fn user_with_results(ids: &[(&str, &str)]) -> Message {
+        let blocks: Vec<Value> = ids
+            .iter()
+            .map(|(id, content)| {
+                if *id == "text" {
+                    serde_json::json!({"type": "text", "text": content})
+                } else {
+                    serde_json::json!({"type": "tool_result", "tool_use_id": id, "content": content})
+                }
+            })
+            .collect();
+        Message {
+            uuid: uuid::Uuid::new_v4().to_string(),
+            timestamp: chrono::Utc::now().to_rfc3339(),
+            content: MessageContent::User {
+                message: ApiUserMessage {
+                    role: "user".to_string(),
+                    content: Value::Array(blocks),
+                },
+                is_meta: false,
+                tool_use_result: None,
+            },
+        }
+    }
+
+    fn plain_user(text: &str) -> Message {
+        Message {
+            uuid: uuid::Uuid::new_v4().to_string(),
+            timestamp: chrono::Utc::now().to_rfc3339(),
+            content: MessageContent::User {
+                message: ApiUserMessage {
+                    role: "user".to_string(),
+                    content: Value::String(text.to_string()),
+                },
+                is_meta: false,
+                tool_use_result: None,
+            },
+        }
+    }
+
+    fn assistant_with_tool_use(id: &str) -> Message {
+        Message {
+            uuid: uuid::Uuid::new_v4().to_string(),
+            timestamp: chrono::Utc::now().to_rfc3339(),
+            content: MessageContent::Assistant {
+                message: ApiAssistantMessage {
+                    role: "assistant".to_string(),
+                    content: vec![ContentBlock::ToolUse {
+                        id: id.to_string(),
+                        name: "Bash".to_string(),
+                        input: serde_json::json!({}),
+                    }],
+                    stop_reason: None,
+                    usage: None,
+                },
+                cost_usd: 0.0,
+                duration_ms: 0,
+            },
+        }
+    }
+
+    fn make_engine_with(messages: Vec<Message>) -> QueryEngine {
+        let config = crate::engine::query_engine::QueryEngineConfig {
+            cwd: PathBuf::from("/tmp"),
+            tools: vec![],
+            api_client: Arc::new(crate::api::unified::UnifiedClient::new_anthropic(
+                crate::api::client::ApiClientConfig {
+                    api_key: "test-key".to_string(),
+                    base_url: None,
+                    max_retries: None,
+                    api_path: None,
+                },
+            )),
+            model: "test-model".to_string(),
+            thinking_config: ThinkingConfig::Disabled,
+            max_turns: None,
+            max_budget_usd: None,
+            verbose: false,
+            custom_system_prompt: None,
+            append_system_prompt: None,
+            session_id: None,
+            fallback_models: vec![],
+            max_retries_per_model: 1,
+            context_window: 200_000,
+            auto_compact_threshold_ratio: 0.7,
+            max_tokens: 16_384,
+            micro_compact: MicroCompactConfig::default(),
+            max_tokens_budget: None,
+            parent_turn_id: None,
+            agent_label: None,
+            session_memory: None,
+            file_cache: None,
+            tool_result_store: None,
+            permission: None,
+            telemetry: None,
+            evolution: None,
+            memory_store: None,
+            tool_health: None,
+        };
+        let mut engine = QueryEngine::new(config);
+        engine.set_messages(messages);
+        engine
+    }
+
+    fn block_summary(msg: &Message) -> Vec<String> {
+        match &msg.content {
+            MessageContent::User { message, .. } => match &message.content {
+                Value::Array(arr) => arr
+                    .iter()
+                    .map(|b| {
+                        b.get("type")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("?")
+                            .to_string()
+                    })
+                    .collect(),
+                Value::String(_) => vec!["string".to_string()],
+                _ => vec![],
+            },
+            _ => vec![],
+        }
+    }
+
+    #[test]
+    fn orphan_result_only_user_message_is_removed() {
+        // Assistant never issued tu_orphan — the whole result-only user
+        // message must go (restore-slice shape).
+        let mut engine = make_engine_with(vec![
+            plain_user("question"),
+            assistant_with_tool_use("tu_1"),
+            user_with_results(&[("tu_1", "ok")]),
+            user_with_results(&[("tu_orphan", "lost")]),
+        ]);
+        engine.cleanup_incomplete_tool_calls();
+        assert_eq!(engine.get_messages().len(), 3);
+    }
+
+    #[test]
+    fn mixed_user_message_keeps_valid_strips_orphan() {
+        let mut engine = make_engine_with(vec![
+            assistant_with_tool_use("tu_1"),
+            user_with_results(&[("tu_1", "ok"), ("tu_orphan", "lost")]),
+        ]);
+        engine.cleanup_incomplete_tool_calls();
+        assert_eq!(engine.get_messages().len(), 2);
+        let summary = block_summary(&engine.get_messages()[1]);
+        assert_eq!(summary, vec!["tool_result"]);
+    }
+
+    #[test]
+    fn mixed_message_with_text_keeps_the_text_block() {
+        let assistant_text = Message {
+            uuid: uuid::Uuid::new_v4().to_string(),
+            timestamp: chrono::Utc::now().to_rfc3339(),
+            content: MessageContent::Assistant {
+                message: ApiAssistantMessage {
+                    role: "assistant".to_string(),
+                    content: vec![ContentBlock::Text {
+                        text: "let me check".to_string(),
+                    }],
+                    stop_reason: None,
+                    usage: None,
+                },
+                cost_usd: 0.0,
+                duration_ms: 0,
+            },
+        };
+        let mut engine = make_engine_with(vec![
+            assistant_text,
+            user_with_results(&[("text", "answer"), ("tu_orphan", "lost")]),
+        ]);
+        engine.cleanup_incomplete_tool_calls();
+        assert_eq!(engine.get_messages().len(), 2);
+        let summary = block_summary(&engine.get_messages()[1]);
+        assert_eq!(summary, vec!["text"]);
+    }
+
+    #[test]
+    fn valid_pairs_and_stub_injection_still_work() {
+        // The assistant issued tu_1 and tu_2 but only tu_1's result arrived:
+        // Pass 0 must strip nothing (tu_1 is valid, tu_2 has no RESULT to be
+        // orphaned) and Pass 1 must inject the error stub for tu_2.
+        let both = assistant_with_tool_use("tu_1");
+        let both = {
+            let mut m = both;
+            if let MessageContent::Assistant { message, .. } = &mut m.content {
+                message.content.push(ContentBlock::ToolUse {
+                    id: "tu_2".to_string(),
+                    name: "Read".to_string(),
+                    input: serde_json::json!({}),
+                });
+            }
+            m
+        };
+        let mut engine = make_engine_with(vec![both, user_with_results(&[("tu_1", "ok")])]);
+        engine.cleanup_incomplete_tool_calls();
+        match &engine.get_messages()[1].content {
+            MessageContent::User { message, .. } => match &message.content {
+                Value::Array(arr) => {
+                    assert_eq!(arr.len(), 2, "Pass 1 must inject the stub for tu_2");
+                    assert_eq!(arr[1]["tool_use_id"], "tu_2");
+                    assert_eq!(arr[1]["is_error"], true);
+                }
+                _ => panic!("expected array"),
+            },
+            _ => panic!("expected user message"),
         }
     }
 }

@@ -21,8 +21,8 @@ use crate::tools::trait_def::ToolContext;
 
 use crate::engine::query_engine::{
     estimate_tokens, format_messages_for_summary, AdaptiveCompactTracker, CompactResult,
-    EngineError, EngineEvent, NoopProgressSender, QueryLoopConfig, QueryResult, QueryStatus,
-    EMPTY_USAGE,
+    EngineError, EngineEvent, MicroCompactConfig, NoopProgressSender, QueryLoopConfig, QueryResult,
+    QueryStatus, EMPTY_USAGE,
 };
 use crate::engine::tool_loop::{
     accumulate_usage, build_tool_result_message, extract_text, extract_tool_result_ids,
@@ -415,8 +415,8 @@ pub async fn run_query_loop(
             }
         }
 
-        // ── Micro-compact: clear old tool results (> 60 min, > 500 chars) ──
-        micro_compact(messages, 3600);
+        // ── Micro-compact: clear old, large tool results (config knobs) ──
+        micro_compact(messages, config.micro_compact);
 
         // ── Multi-level budget check ──
         // Use pre-computed budget from submit_message_with_attachments on first turn
@@ -688,6 +688,7 @@ pub async fn run_query_loop(
                 start_time.elapsed().as_millis() as u64,
             )
             .await;
+            maybe_spawn_session_memory_update(messages, &config);
             send_terminal_result(
                 &tx,
                 start_time,
@@ -930,6 +931,7 @@ async fn call_api_with_fallback(
         max_budget_usd: config.max_budget_usd,
         max_tokens_budget: config.max_tokens_budget,
         max_tokens: config.max_tokens,
+        micro_compact: config.micro_compact,
     };
     let request = build_api_request(messages, &current_config);
 
@@ -2170,17 +2172,31 @@ fn record_compact_feedback(
 
 /// Micro-compact: replace old, large tool-result content with placeholders.
 ///
-/// Called before each API call in the query loop.  Tool results older than
-/// `idle_threshold_secs` (default 60 min) and larger than 500 chars are
-/// replaced with a size annotation, freeing context budget without an API
-/// summarisation round-trip.
-pub fn micro_compact(messages: &mut [Message], idle_threshold_secs: u64) {
+/// Called before each API call in the query loop. A tool result outside the
+/// most recent messages is replaced with a named placeholder when it is BOTH
+/// older than `cfg.min_age_secs` AND serialized larger than `cfg.min_chars`
+/// — freeing context budget without an API summarisation round-trip. The
+/// thresholds come from the `micro_compact_min_age_secs` /
+/// `micro_compact_min_chars` config knobs (defaults 24h / 8KB).
+pub fn micro_compact(messages: &mut [Message], cfg: MicroCompactConfig) {
     let now = std::time::SystemTime::now();
-    let threshold = std::time::Duration::from_secs(idle_threshold_secs);
+    let threshold = std::time::Duration::from_secs(cfg.min_age_secs);
 
     // Skip the last few messages (they are the current turn — keep intact).
     let skip_recent = 4usize;
     let start = messages.len().saturating_sub(skip_recent);
+
+    // tool_use_id → tool name, so the placeholder says WHAT was cleared.
+    let mut tool_names: std::collections::HashMap<String, String> = Default::default();
+    for msg in messages.iter() {
+        if let MessageContent::Assistant { message, .. } = &msg.content {
+            for block in &message.content {
+                if let ContentBlock::ToolUse { id, name, .. } = block {
+                    tool_names.insert(id.clone(), name.clone());
+                }
+            }
+        }
+    }
 
     for msg in messages[..start].iter_mut() {
         // Compute age from the message timestamp.
@@ -2202,12 +2218,19 @@ pub fn micro_compact(messages: &mut [Message], idle_threshold_secs: u64) {
             if let Value::Array(blocks) = &mut message.content {
                 for block in blocks.iter_mut() {
                     if block.get("type").and_then(|v| v.as_str()) == Some("tool_result") {
+                        let tool_label = block
+                            .get("tool_use_id")
+                            .and_then(|v| v.as_str())
+                            .and_then(|id| tool_names.get(id))
+                            .map(|name| format!("{name} output, "))
+                            .unwrap_or_default();
                         if let Some(content) = block.get_mut("content") {
                             let output_str = content.to_string();
-                            if output_str.len() > 500 {
+                            let output_chars = output_str.chars().count();
+                            if output_chars > cfg.min_chars {
                                 *content = serde_json::json!(format!(
-                                    "[Old tool result cleared — originally {} chars]",
-                                    output_str.len()
+                                    "[Old tool result cleared — {}originally {} chars]",
+                                    tool_label, output_chars
                                 ));
                             }
                         }
@@ -2318,6 +2341,78 @@ pub fn reactive_compact(messages: &mut Vec<Message>, target_reduction: Option<us
     *messages = messages[drop_to..].to_vec();
 }
 
+/// Global scan of a message history: all `tool_use` ids carried by assistant
+/// messages and all `tool_result` ids carried by user messages. The single
+/// source of "what pairs with what" for both the persisted-history cleanup
+/// and the wire-shaping pass.
+pub fn collect_tool_ids(
+    messages: &[Message],
+) -> (
+    std::collections::HashSet<String>,
+    std::collections::HashSet<String>,
+) {
+    let mut tool_use_ids = std::collections::HashSet::new();
+    let mut tool_result_ids = std::collections::HashSet::new();
+    for msg in messages.iter() {
+        match &msg.content {
+            MessageContent::Assistant { message, .. } => {
+                for block in &message.content {
+                    if let ContentBlock::ToolUse { id, .. } = block {
+                        tool_use_ids.insert(id.clone());
+                    }
+                }
+            }
+            MessageContent::User { message, .. } => {
+                for id in extract_tool_result_ids(message) {
+                    tool_result_ids.insert(id);
+                }
+            }
+            _ => {}
+        }
+    }
+    (tool_use_ids, tool_result_ids)
+}
+
+/// The single "keep this block?" rule for orphan stripping: non-tool_result
+/// blocks are always kept; a `tool_result` is kept only when its id is NOT
+/// orphaned. Shared by the persisted-history cleanup (Pass 0) and the
+/// wire-shaping pass so the two can never disagree on what an orphan is.
+fn is_retained_block(block: &Value, orphans: &std::collections::HashSet<String>) -> bool {
+    block.get("type").and_then(|v| v.as_str()) != Some("tool_result")
+        || block
+            .get("tool_use_id")
+            .and_then(|v| v.as_str())
+            .is_none_or(|id| !orphans.contains(id))
+}
+
+/// Remove `tool_result` blocks whose `tool_use_id` is in `orphans` from every
+/// user message, and drop user messages whose content array becomes empty.
+/// Returns the number of blocks removed. Mutates in place.
+pub fn strip_orphan_tool_result_blocks(
+    messages: &mut Vec<Message>,
+    orphans: &std::collections::HashSet<String>,
+) -> usize {
+    let mut removed = 0usize;
+    let mut i = 0;
+    while i < messages.len() {
+        let mut emptied = false;
+        if let MessageContent::User { message, .. } = &mut messages[i].content {
+            if let Value::Array(arr) = &mut message.content {
+                let before = arr.len();
+                arr.retain(|block| is_retained_block(block, orphans));
+                removed += before - arr.len();
+                emptied = arr.is_empty();
+            }
+        }
+        if emptied {
+            messages.remove(i);
+        } else {
+            i += 1;
+        }
+    }
+    removed
+}
+
 /// Validate and fix tool_use/tool_result pairing in messages before API call.
 /// This ensures we never send malformed messages to the API.
 pub fn validate_and_fix_tool_messages(messages: &[Message]) -> Vec<Message> {
@@ -2325,33 +2420,7 @@ pub fn validate_and_fix_tool_messages(messages: &[Message]) -> Vec<Message> {
     eprintln!("  Input messages: {}", messages.len());
 
     // First pass: collect all tool_use IDs and their corresponding tool_result IDs
-    let mut tool_use_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
-    let mut tool_result_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
-
-    for msg in messages.iter() {
-        match &msg.content {
-            MessageContent::Assistant { message, .. } => {
-                let ids: Vec<String> = message
-                    .content
-                    .iter()
-                    .filter_map(|block| match block {
-                        ContentBlock::ToolUse { id, .. } => Some(id.clone()),
-                        _ => None,
-                    })
-                    .collect();
-                for id in ids {
-                    tool_use_ids.insert(id);
-                }
-            }
-            MessageContent::User { message, .. } => {
-                let ids = extract_tool_result_ids(message);
-                for id in ids {
-                    tool_result_ids.insert(id);
-                }
-            }
-            _ => {}
-        }
-    }
+    let (tool_use_ids, tool_result_ids) = collect_tool_ids(messages);
 
     eprintln!(
         "  Found {} tool_use IDs: {:?}",
@@ -2410,14 +2479,25 @@ pub fn validate_and_fix_tool_messages(messages: &[Message]) -> Vec<Message> {
                     // Regular user message, keep it
                     result.push(msg.clone());
                 } else {
-                    // Tool result message - check if any results are valid (not orphaned)
-                    let has_valid_result = result_ids
-                        .iter()
-                        .any(|id| !orphaned_tool_results.contains(id));
-                    if has_valid_result {
-                        // Keep message but filter out orphaned results
-                        // For now, just keep the whole message
-                        result.push(msg.clone());
+                    // Tool result message - keep the valid blocks (text and
+                    // paired results), strip the orphaned ones. An orphan
+                    // reaching the wire is a 400.
+                    let has_retained = match &message.content {
+                        Value::Array(arr) => arr
+                            .iter()
+                            .any(|block| is_retained_block(block, &orphaned_tool_results)),
+                        _ => true,
+                    };
+                    if has_retained {
+                        let mut fixed = msg.clone();
+                        if let MessageContent::User { message, .. } = &mut fixed.content {
+                            if let Value::Array(arr) = &mut message.content {
+                                arr.retain(|block| {
+                                    is_retained_block(block, &orphaned_tool_results)
+                                });
+                            }
+                        }
+                        result.push(fixed);
                     } else {
                         eprintln!("validate_and_fix: skipping user message with only orphaned tool_result");
                     }
@@ -2640,5 +2720,240 @@ mod adaptive_compact_tests {
         assert_eq!(tracker.history[0].tokens_before, 1234);
         assert_eq!(tracker.history[0].tokens_after, 0);
         assert!(!tracker.history[0].user_repeated_topic);
+    }
+}
+
+#[cfg(test)]
+mod context_hygiene_tests {
+    use super::*;
+    use crate::engine::query_engine::MicroCompactConfig;
+    use crate::models::message::{ApiAssistantMessage, ApiUserMessage, ContentBlock};
+
+    fn old_ts() -> String {
+        (chrono::Utc::now() - chrono::Duration::hours(2)).to_rfc3339()
+    }
+
+    fn assistant_with_tool_use(id: &str, name: &str) -> Message {
+        Message {
+            uuid: uuid::Uuid::new_v4().to_string(),
+            timestamp: old_ts(),
+            content: MessageContent::Assistant {
+                message: ApiAssistantMessage {
+                    role: "assistant".to_string(),
+                    content: vec![ContentBlock::ToolUse {
+                        id: id.to_string(),
+                        name: name.to_string(),
+                        input: serde_json::json!({}),
+                    }],
+                    stop_reason: None,
+                    usage: None,
+                },
+                cost_usd: 0.0,
+                duration_ms: 0,
+            },
+        }
+    }
+
+    fn user_with_result(id: &str, content_len: usize) -> Message {
+        Message {
+            uuid: uuid::Uuid::new_v4().to_string(),
+            timestamp: old_ts(),
+            content: MessageContent::User {
+                message: ApiUserMessage {
+                    role: "user".to_string(),
+                    content: Value::Array(vec![serde_json::json!({
+                        "type": "tool_result",
+                        "tool_use_id": id,
+                        "content": "x".repeat(content_len),
+                    })]),
+                },
+                is_meta: false,
+                tool_use_result: None,
+            },
+        }
+    }
+
+    fn result_content(msg: &Message) -> String {
+        match &msg.content {
+            MessageContent::User { message, .. } => match &message.content {
+                Value::Array(arr) => arr[0]
+                    .get("content")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string(),
+                _ => panic!("expected array content"),
+            },
+            _ => panic!("expected user message"),
+        }
+    }
+
+    fn aggressive() -> MicroCompactConfig {
+        MicroCompactConfig {
+            min_age_secs: 0,
+            min_chars: 10,
+        }
+    }
+
+    fn pad_to_five(messages: &mut Vec<Message>) {
+        while messages.len() < 5 {
+            messages.push(Message {
+                uuid: uuid::Uuid::new_v4().to_string(),
+                timestamp: old_ts(),
+                content: MessageContent::User {
+                    message: ApiUserMessage {
+                        role: "user".to_string(),
+                        content: Value::String("filler".to_string()),
+                    },
+                    is_meta: false,
+                    tool_use_result: None,
+                },
+            });
+        }
+    }
+
+    #[test]
+    fn micro_compact_names_the_cleared_tool() {
+        let mut messages = vec![
+            user_with_result("tu_1", 100),
+            assistant_with_tool_use("tu_1", "Bash"),
+        ];
+        pad_to_five(&mut messages);
+        micro_compact(&mut messages, aggressive());
+        let content = result_content(&messages[0]);
+        assert!(
+            content.starts_with("[Old tool result cleared — Bash output, "),
+            "{}",
+            content
+        );
+        assert!(content.ends_with("chars]"), "{}", content);
+    }
+
+    #[test]
+    fn micro_compact_unknown_tool_uses_generic_placeholder() {
+        let mut messages = vec![user_with_result("tu_missing", 100)];
+        pad_to_five(&mut messages);
+        micro_compact(&mut messages, aggressive());
+        let content = result_content(&messages[0]);
+        // The reported size is the JSON-serialized form (string + quotes).
+        let serialized_len = serde_json::json!("x".repeat(100)).to_string().len();
+        assert_eq!(
+            content,
+            format!(
+                "[Old tool result cleared — originally {} chars]",
+                serialized_len
+            )
+        );
+    }
+
+    #[test]
+    fn micro_compact_respects_both_thresholds() {
+        // Large but young → untouched.
+        let mut messages = vec![user_with_result("tu_1", 100)];
+        pad_to_five(&mut messages);
+        micro_compact(
+            &mut messages,
+            MicroCompactConfig {
+                min_age_secs: 86_400,
+                min_chars: 10,
+            },
+        );
+        assert_eq!(result_content(&messages[0]).len(), 100);
+
+        // Old but small → untouched.
+        let mut messages = vec![user_with_result("tu_1", 5)];
+        pad_to_five(&mut messages);
+        micro_compact(&mut messages, aggressive());
+        assert_eq!(result_content(&messages[0]).len(), 5);
+    }
+
+    #[test]
+    fn micro_compact_never_touches_recent_messages() {
+        let mut messages = vec![user_with_result("tu_1", 100)];
+        pad_to_five(&mut messages);
+        micro_compact(&mut messages, MicroCompactConfig::disabled());
+        assert_eq!(result_content(&messages[0]).len(), 100);
+    }
+
+    #[test]
+    fn micro_compact_skips_last_four_messages() {
+        let old = user_with_result("tu_1", 100);
+        let mut messages = vec![
+            assistant_with_tool_use("tu_1", "Bash"),
+            old,
+            Message {
+                uuid: uuid::Uuid::new_v4().to_string(),
+                timestamp: old_ts(),
+                content: MessageContent::User {
+                    message: ApiUserMessage {
+                        role: "user".to_string(),
+                        content: Value::Array(vec![serde_json::json!({
+                            "type": "tool_result",
+                            "tool_use_id": "tu_1",
+                            "content": "x".repeat(100),
+                        })]),
+                    },
+                    is_meta: false,
+                    tool_use_result: None,
+                },
+            },
+        ];
+        // len == 3 → start == 0 → wait, skip_recent=4 > len → start == 0,
+        // everything is "recent" relative to the window cap. Add padding to
+        // push the duplicate result outside the last four.
+        pad_to_five(&mut messages);
+        // Now len == 5, start == 1 → index 0 processed, index 2 (in last 4) not.
+        micro_compact(&mut messages, aggressive());
+        let content = result_content(&messages[2]);
+        assert_eq!(content.len(), 100, "result inside last 4 must stay intact");
+    }
+
+    #[test]
+    fn strip_orphan_blocks_drops_emptied_user_messages() {
+        let mut messages = vec![
+            assistant_with_tool_use("tu_1", "Bash"),
+            user_with_result("tu_orphan", 50),
+        ];
+        let (use_ids, result_ids) = collect_tool_ids(&messages);
+        let orphans: std::collections::HashSet<String> =
+            result_ids.difference(&use_ids).cloned().collect();
+        assert_eq!(orphans.len(), 1);
+        let removed = strip_orphan_tool_result_blocks(&mut messages, &orphans);
+        assert_eq!(removed, 1);
+        assert_eq!(messages.len(), 1, "emptied user message must be dropped");
+    }
+
+    #[test]
+    fn validate_strips_orphan_blocks_but_keeps_valid_and_text() {
+        use crate::models::message::ApiUserMessage;
+        let mixed_user = Message {
+            uuid: uuid::Uuid::new_v4().to_string(),
+            timestamp: old_ts(),
+            content: MessageContent::User {
+                message: ApiUserMessage {
+                    role: "user".to_string(),
+                    content: Value::Array(vec![
+                        serde_json::json!({"type": "text", "text": "the tool says:"}),
+                        serde_json::json!({"type": "tool_result", "tool_use_id": "tu_1", "content": "valid"}),
+                        serde_json::json!({"type": "tool_result", "tool_use_id": "tu_orphan", "content": "orphan"}),
+                    ]),
+                },
+                is_meta: false,
+                tool_use_result: None,
+            },
+        };
+        let messages = vec![assistant_with_tool_use("tu_1", "Bash"), mixed_user];
+        let fixed = validate_and_fix_tool_messages(&messages);
+        assert_eq!(fixed.len(), 2);
+        match &fixed[1].content {
+            MessageContent::User { message, .. } => match &message.content {
+                Value::Array(arr) => {
+                    assert_eq!(arr.len(), 2, "orphan block must be stripped");
+                    assert_eq!(arr[0]["type"], "text");
+                    assert_eq!(arr[1]["tool_use_id"], "tu_1");
+                }
+                _ => panic!("expected array"),
+            },
+            _ => panic!("expected user message"),
+        }
     }
 }

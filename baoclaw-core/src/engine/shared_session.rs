@@ -655,6 +655,7 @@ impl Default for SessionRegistry {
 
 #[cfg(test)]
 mod tests {
+    use super::super::query_engine::MicroCompactConfig;
     use super::*;
     use crate::api::client::ApiClientConfig;
     use crate::api::unified::UnifiedClient;
@@ -694,6 +695,7 @@ mod tests {
             auto_compact_threshold_ratio: 0.7,
             parent_turn_id: None,
             max_tokens: 16_384,
+            micro_compact: MicroCompactConfig::default(),
             max_tokens_budget: None,
             agent_label: None,
             session_memory,

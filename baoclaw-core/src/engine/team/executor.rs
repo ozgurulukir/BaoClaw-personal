@@ -911,6 +911,7 @@ impl TeamExecutor {
             context_window: kit.context_window,
             auto_compact_threshold_ratio: kit.auto_compact_threshold_ratio,
             max_tokens: kit.max_tokens,
+            micro_compact: kit.micro_compact,
             max_tokens_budget,
             parent_turn_id: None,
             agent_label: Some("sub-agent".to_string()),

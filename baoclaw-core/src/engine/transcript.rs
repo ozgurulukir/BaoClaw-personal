@@ -207,9 +207,38 @@ pub fn rebuild_messages_from_transcript(
     messages
 }
 
+/// Snap a tail-cut index back to a complete user-turn boundary.
+///
+/// A turn's transcript entries always open with a `UserMessage` (the user's
+/// prompt) followed by its `AssistantMessage` and `ToolResult` entries, so a
+/// tail slice starting at a `UserMessage` can never orphan a `tool_result`
+/// from its `tool_use`. Returns the nearest `UserMessage` index at or before
+/// `cut`; when the prefix has no user message at all (pathological —
+/// transcripts open with one), the tail is dropped entirely by returning
+/// `entries.len()`.
+pub fn align_cut_to_user_turn(entries: &[TranscriptEntry], cut: usize) -> usize {
+    let mut c = cut.min(entries.len());
+    if c >= entries.len() {
+        return entries.len();
+    }
+    while c > 0 {
+        if entries[c].entry_type == TranscriptEntryType::UserMessage {
+            return c;
+        }
+        c -= 1;
+    }
+    // c == 0: only aligned if the very first entry opens a turn.
+    if !entries.is_empty() && entries[0].entry_type == TranscriptEntryType::UserMessage {
+        0
+    } else {
+        entries.len()
+    }
+}
+
 /// Rebuild messages from transcript entries, limited to the last `max_entries`.
 ///
-/// If the entry count exceeds `max_entries`, only the tail is rebuilt.
+/// If the entry count exceeds `max_entries`, only the tail is rebuilt, with
+/// the cut aligned to a complete user turn (see [`align_cut_to_user_turn`]).
 /// When a `summary` is provided and truncation occurs, a `CompactBoundary`
 /// system message is prepended so the LLM has context about earlier turns.
 pub fn rebuild_messages_from_transcript_limited(
@@ -223,7 +252,12 @@ pub fn rebuild_messages_from_transcript_limited(
         return rebuild_messages_from_transcript(entries);
     }
 
-    let limited = &entries[entries.len() - max_entries..];
+    if max_entries == 0 {
+        return Vec::new();
+    }
+
+    let start = align_cut_to_user_turn(entries, entries.len() - max_entries);
+    let limited = &entries[start..];
     let mut messages = rebuild_messages_from_transcript(limited);
 
     if let Some(summary_text) = summary {
@@ -661,5 +695,151 @@ mod tests {
         } else {
             panic!("Expected User message with tool results");
         }
+    }
+
+    #[test]
+    fn test_align_cut_snaps_back_to_user_turn() {
+        use TranscriptEntryType as T;
+        let entries = vec![
+            make_entry(T::UserMessage, json!({})),
+            make_entry(T::AssistantMessage, json!({})),
+            make_entry(T::ToolUse, json!({})),
+            make_entry(T::ToolResult, json!({})),
+            make_entry(T::UserMessage, json!({})),
+            make_entry(T::AssistantMessage, json!({})),
+        ];
+        // Cut lands on the second turn's start → unchanged.
+        assert_eq!(align_cut_to_user_turn(&entries, 4), 4);
+        // Cut lands mid-turn (AssistantMessage) → snaps back to turn start.
+        assert_eq!(align_cut_to_user_turn(&entries, 5), 4);
+        // Cut lands on a ToolResult → snaps back past the whole first turn.
+        assert_eq!(align_cut_to_user_turn(&entries, 3), 0);
+        assert_eq!(align_cut_to_user_turn(&entries, 0), 0);
+    }
+
+    #[test]
+    fn test_align_cut_without_user_message_drops_tail() {
+        use TranscriptEntryType as T;
+        let entries = vec![
+            make_entry(T::AssistantMessage, json!({})),
+            make_entry(T::ToolResult, json!({})),
+        ];
+        // No UserMessage anywhere → the tail would be pair-less; drop it.
+        assert_eq!(align_cut_to_user_turn(&entries, 1), 2);
+    }
+
+    #[test]
+    fn test_rebuild_limited_starts_at_complete_user_turn() {
+        use crate::models::message::{
+            ApiAssistantMessage, ApiUserMessage, ContentBlock, Message, MessageContent,
+        };
+        let make_user = |text: &str| Message {
+            uuid: uuid::Uuid::new_v4().to_string(),
+            timestamp: "2024-01-15T10:30:00Z".to_string(),
+            content: MessageContent::User {
+                message: ApiUserMessage {
+                    role: "user".to_string(),
+                    content: Value::String(text.to_string()),
+                },
+                is_meta: false,
+                tool_use_result: None,
+            },
+        };
+        let make_assistant = |tool_id: Option<&str>| {
+            let blocks = match tool_id {
+                Some(id) => vec![ContentBlock::ToolUse {
+                    id: id.to_string(),
+                    name: "Bash".to_string(),
+                    input: json!({}),
+                }],
+                None => vec![ContentBlock::Text {
+                    text: "done".to_string(),
+                }],
+            };
+            Message {
+                uuid: uuid::Uuid::new_v4().to_string(),
+                timestamp: "2024-01-15T10:30:01Z".to_string(),
+                content: MessageContent::Assistant {
+                    message: ApiAssistantMessage {
+                        role: "assistant".to_string(),
+                        content: blocks,
+                        stop_reason: None,
+                        usage: None,
+                    },
+                    cost_usd: 0.0,
+                    duration_ms: 0,
+                },
+            }
+        };
+        // Three turns: [U, A(tool_use), TR] × 2 + [U, A(text)]
+        let entries = vec![
+            make_entry(
+                TranscriptEntryType::UserMessage,
+                serde_json::to_value(make_user("t1")).unwrap(),
+            ),
+            make_entry(
+                TranscriptEntryType::AssistantMessage,
+                serde_json::to_value(make_assistant(Some("tu_1"))).unwrap(),
+            ),
+            make_entry(
+                TranscriptEntryType::ToolResult,
+                json!({"tool_use_id": "tu_1", "output": "out1", "is_error": false}),
+            ),
+            make_entry(
+                TranscriptEntryType::UserMessage,
+                serde_json::to_value(make_user("t2")).unwrap(),
+            ),
+            make_entry(
+                TranscriptEntryType::AssistantMessage,
+                serde_json::to_value(make_assistant(Some("tu_2"))).unwrap(),
+            ),
+            make_entry(
+                TranscriptEntryType::ToolResult,
+                json!({"tool_use_id": "tu_2", "output": "out2", "is_error": false}),
+            ),
+            make_entry(
+                TranscriptEntryType::UserMessage,
+                serde_json::to_value(make_user("t3")).unwrap(),
+            ),
+            make_entry(
+                TranscriptEntryType::AssistantMessage,
+                serde_json::to_value(make_assistant(None)).unwrap(),
+            ),
+        ];
+
+        // Raw cut (8-4=4) would start at turn 2's AssistantMessage; the
+        // aligned cut starts at turn 2's UserMessage instead.
+        let messages = rebuild_messages_from_transcript_limited(&entries, 4, None);
+        assert!(!messages.is_empty());
+        // First rebuilt message must be a plain user text message — never a
+        // synthetic tool-result flush.
+        match &messages[0].content {
+            MessageContent::User { message, .. } => {
+                assert_eq!(message.content, Value::String("t2".to_string()));
+            }
+            other => panic!("expected user text message first, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_rebuild_limited_zero_max_entries_yields_empty() {
+        use crate::models::message::{ApiUserMessage, Message, MessageContent};
+        let msg = Message {
+            uuid: uuid::Uuid::new_v4().to_string(),
+            timestamp: "2024-01-15T10:30:00Z".to_string(),
+            content: MessageContent::User {
+                message: ApiUserMessage {
+                    role: "user".to_string(),
+                    content: Value::String("hello".to_string()),
+                },
+                is_meta: false,
+                tool_use_result: None,
+            },
+        };
+        let entries = vec![make_entry(
+            TranscriptEntryType::UserMessage,
+            serde_json::to_value(&msg).unwrap(),
+        )];
+        assert!(rebuild_messages_from_transcript_limited(&entries, 0, Some("summary")).is_empty());
     }
 }

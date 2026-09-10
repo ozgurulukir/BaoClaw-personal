@@ -42,6 +42,18 @@ fn default_max_parallel_tools() -> usize {
     8
 }
 
+/// Default minimum age (seconds) a tool result must reach before
+/// micro-compact may replace it with a placeholder (24 hours).
+fn default_micro_compact_min_age_secs() -> u64 {
+    86_400
+}
+
+/// Default minimum serialized size (chars) a tool result must exceed before
+/// micro-compact may replace it with a placeholder (8 KB).
+fn default_micro_compact_min_chars() -> usize {
+    8_192
+}
+
 // ─── ModelProfile ───────────────────────────────────────────────────────────
 
 /// A model configuration profile with its own API credentials and window.
@@ -115,6 +127,14 @@ pub struct BaoclawConfig {
     /// turn; excess requests queue on a semaphore (default 8).
     #[serde(default = "default_max_parallel_tools")]
     pub max_parallel_tools: usize,
+    /// Micro-compact: a tool result older than this many seconds may be
+    /// replaced with a placeholder before each API call (default 86_400 = 24h).
+    #[serde(default = "default_micro_compact_min_age_secs")]
+    pub micro_compact_min_age_secs: u64,
+    /// Micro-compact: only tool results serialized larger than this many
+    /// chars are eligible for placeholder replacement (default 8192 = 8KB).
+    #[serde(default = "default_micro_compact_min_chars")]
+    pub micro_compact_min_chars: usize,
     /// Master switch for telemetry recording. When false, the daemon drops
     /// turn/session events instead of writing them to ~/.baoclaw/telemetry.db.
     /// Toggled at runtime via the `telemetry.setEnabled` RPC (/telemetry on|off)
@@ -218,6 +238,8 @@ impl Default for BaoclawConfig {
             max_tokens: default_max_tokens(),
             bash_max_timeout_ms: default_bash_max_timeout_ms(),
             max_parallel_tools: default_max_parallel_tools(),
+            micro_compact_min_age_secs: default_micro_compact_min_age_secs(),
+            micro_compact_min_chars: default_micro_compact_min_chars(),
             telemetry_enabled: default_telemetry_enabled(),
             model_profiles: HashMap::new(),
             primary_profile: None,
@@ -549,6 +571,8 @@ mod tests {
             max_tokens: 8192,
             bash_max_timeout_ms: 450_000,
             max_parallel_tools: 4,
+            micro_compact_min_age_secs: 3_600,
+            micro_compact_min_chars: 500,
             telemetry_enabled: false,
             openai_base_url: None,
             context_window: 200_000,

@@ -117,6 +117,7 @@ impl TaskManager {
                 context_window: kit.context_window,
                 auto_compact_threshold_ratio: kit.auto_compact_threshold_ratio,
                 max_tokens: kit.max_tokens,
+                micro_compact: kit.micro_compact,
                 max_tokens_budget: None,
                 parent_turn_id: None,
                 agent_label: None,

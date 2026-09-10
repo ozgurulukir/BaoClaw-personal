@@ -266,6 +266,7 @@ fn build_shared_engine(
         context_window: shared.baoclaw_config.context_window,
         auto_compact_threshold_ratio: shared.baoclaw_config.auto_compact_threshold_ratio,
         max_tokens: shared.baoclaw_config.max_tokens,
+        micro_compact: engine::query_engine::MicroCompactConfig::from(&shared.baoclaw_config),
         max_tokens_budget: None,
         telemetry: shared.telemetry.clone(),
         evolution: Some(Arc::clone(&shared.evolution_engine)),
@@ -732,9 +733,9 @@ async fn lc_restore_session_history(
                              (Summary will be generated during this session for next time.)",
                             entry_count, tail_size
                         );
-                        let tail_entries = &entries[entry_count - tail_size..];
-                        let mut msgs =
-                            engine::transcript::rebuild_messages_from_transcript(tail_entries);
+                        let mut msgs = engine::transcript::rebuild_messages_from_transcript_limited(
+                            &entries, tail_size, None,
+                        );
 
                         // Prepend a warning so the LLM knows context is incomplete
                         if !msgs.is_empty() {
@@ -1186,6 +1187,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         context_window: baoclaw_config.context_window,
         auto_compact_threshold_ratio: baoclaw_config.auto_compact_threshold_ratio,
         max_tokens: baoclaw_config.max_tokens,
+        micro_compact: engine::query_engine::MicroCompactConfig::from(&baoclaw_config),
         max_budget_usd: baoclaw_config.max_budget_usd,
         telemetry: telemetry_collector.clone(),
         evolution: Some(Arc::clone(&evolution_engine)),

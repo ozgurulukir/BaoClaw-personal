@@ -77,6 +77,7 @@ proptest! {
             max_budget_usd: None,
             max_tokens_budget: None,
             max_tokens: 16_384,
+            micro_compact: baoclaw_core::engine::query_engine::MicroCompactConfig::default(),
         };
 
         let system = build_system_prompt(&config);

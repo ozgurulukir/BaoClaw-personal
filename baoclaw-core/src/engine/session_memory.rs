@@ -18,7 +18,7 @@ use crate::engine::security::validate_memory_content;
 const FIRST_UPDATE_THRESHOLD: usize = 6;
 
 /// Number of new messages between summary updates.
-const UPDATE_INTERVAL: usize = 10;
+pub(crate) const UPDATE_INTERVAL: usize = 10;
 
 /// Maximum summary length (chars).  Summaries exceeding this are truncated.
 const MAX_SUMMARY_CHARS: usize = 8000;
@@ -116,6 +116,12 @@ impl SessionMemory {
     }
 
     /// Whether enough new messages have arrived to warrant an update.
+    ///
+    /// Self-healing: compaction shrinks the message vector while this
+    /// baseline stays high, which used to make the condition permanently
+    /// unsatisfiable (the summary went stale for the rest of the session).
+    /// When the history is smaller than the recorded baseline, the baseline
+    /// re-anchors to the new size so the next interval fires normally.
     pub fn should_update(&self, message_count: usize) -> bool {
         let guard = self.content.lock().unwrap_or_else(|e| e.into_inner());
         let current = guard.trim();
@@ -124,12 +130,15 @@ impl SessionMemory {
             drop(guard);
             message_count >= FIRST_UPDATE_THRESHOLD
         } else {
-            let last = *self
+            let mut last = self
                 .last_update_count
                 .lock()
                 .unwrap_or_else(|e| e.into_inner());
+            if message_count < *last {
+                *last = message_count;
+            }
             drop(guard);
-            message_count >= last + UPDATE_INTERVAL
+            message_count >= *last + UPDATE_INTERVAL
         }
     }
 
@@ -175,6 +184,22 @@ impl SessionMemory {
         *guard = count;
     }
 
+    /// Messages since the last summary update, for freshness hints.
+    /// `None` when freshness is unknown — the baseline is in-memory only and
+    /// resets to 0 on process load, so a restored session cannot say how old
+    /// its carried-over summary is.
+    pub fn messages_since_update(&self, current_count: usize) -> Option<usize> {
+        let last = *self
+            .last_update_count
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if last == 0 || current_count < last {
+            None
+        } else {
+            Some(current_count - last)
+        }
+    }
+
     /// Clear the session memory.
     pub fn clear(&self) {
         let mut guard = self.content.lock().unwrap_or_else(|e| e.into_inner());
@@ -218,6 +243,32 @@ mod tests {
         assert_eq!(sm.get(), summary);
         sm.clear();
         assert!(sm.get().is_empty());
+    }
+
+    #[test]
+    fn test_should_update_rebases_after_history_shrinks() {
+        let dir = tempfile::tempdir().unwrap();
+        let sm = SessionMemory::load_in(dir.path(), "unit-rebase");
+        sm.update("# Memory\nA real summary with plenty of content.".to_string());
+        sm.set_message_count(50);
+        // History shrank to 11 (compaction). Before the rebase fix this
+        // condition was unsatisfiable for the rest of the session.
+        assert!(!sm.should_update(11));
+        // Next interval fires UPDATE_INTERVAL messages after the new size.
+        assert!(sm.should_update(21));
+    }
+
+    #[test]
+    fn test_messages_since_update() {
+        let dir = tempfile::tempdir().unwrap();
+        let sm = SessionMemory::load_in(dir.path(), "unit-since");
+        sm.update("# Memory\nA real summary with plenty of content.".to_string());
+        // Baseline resets to 0 on load → freshness unknown, not "0 old".
+        assert_eq!(sm.messages_since_update(30), None);
+        sm.set_message_count(20);
+        assert_eq!(sm.messages_since_update(30), Some(10));
+        // History shrank below the baseline → unknown again.
+        assert_eq!(sm.messages_since_update(5), None);
     }
 
     #[test]

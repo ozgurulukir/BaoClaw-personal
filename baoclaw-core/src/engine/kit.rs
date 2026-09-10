@@ -16,6 +16,7 @@ use std::sync::Arc;
 use crate::engine::evolution::EvolutionEngine;
 use crate::engine::file_cache::FileCache;
 use crate::engine::memory::MemoryStore;
+use crate::engine::query_engine::MicroCompactConfig;
 use crate::engine::telemetry::collector::TelemetryCollector;
 use crate::engine::tool_health::ToolHealthTracker;
 use crate::engine::tool_result_store::ToolResultStore;
@@ -35,6 +36,8 @@ pub struct HeadlessEngineKit {
     pub auto_compact_threshold_ratio: f64,
     /// Output token cap sent with each model request (default 16_384).
     pub max_tokens: u32,
+    /// Micro-compact thresholds for clearing old large tool results.
+    pub micro_compact: MicroCompactConfig,
     /// Per-query cost ceiling from the daemon config. None = the engine
     /// runs unbounded (cron jobs override with their own tighter limit).
     /// Token ceilings are a team-policy concern, not a kit one.
@@ -66,6 +69,7 @@ impl HeadlessEngineKit {
             context_window: 200_000,
             auto_compact_threshold_ratio: 0.7,
             max_tokens: 16_384,
+            micro_compact: MicroCompactConfig::default(),
             max_budget_usd: None,
             telemetry: None,
             evolution: None,
