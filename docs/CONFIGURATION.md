@@ -18,8 +18,7 @@
 │   └── my-plugin/
 │       ├── skills/
 │       └── mcp.json
-├── mcp.json                         # User-level MCP servers
-├── mcp-auth/                        # MCP OAuth tokens
+├── mcp.json                         # User-level MCP servers (discovered and listed, not executed)
 ├── models/                          # Local model files (whisper etc.)
 │   └── ggml-base.bin
 ├── telemetry.db                    # Local telemetry (SQLite; turns + sessions)

@@ -77,7 +77,7 @@ A closed learning loop:
 
 ### 🔌 Extensible
 
-- **MCP support** — connect external MCP servers for additional tools
+- **MCP discovery** — detect and list configured external MCP servers (`/mcp`); their tools are surfaced as configuration only, not executed by the daemon
 - **Skills** — markdown-based skill files loaded into system prompt (personal + project scope)
 - **Plugins** — directory-based plugin system with tools, skills, and MCP configs
 - **Many LLM models** — Anthropic native + compatible OpenAI-style APIs (OpenRouter, Ollama, vLLM, etc.)

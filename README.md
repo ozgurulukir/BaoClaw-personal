@@ -87,7 +87,6 @@ real credentials in examples or test fixtures.
        │         ┌───────┴───────┐         │
        │         │ Tool Executor │         │
        │         │ Built-in tools│         │
-       │         │ + MCP servers │         │
        │         └───────────────┘         │
        │  ┌──────────────┐ ┌────────────┐ │
        │  │Cron Scheduler│ │ Evolution  │ │

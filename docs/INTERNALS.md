@@ -437,7 +437,6 @@ Request with primary model
 | API server error (5xx)             | Retry with backoff | 3 attempts, exponential (1s→2s→4s) |
 | API auth error                     | Fatal              | Cannot recover automatically       |
 | API bad request (context overflow) | Auto-compact       | Compact → retry                    |
-| MCP disconnect                     | Retry              | 5 attempts, 2s initial delay       |
 | Tool timeout                       | Fatal              | Report to user                     |
 
 **Key behaviors:**
