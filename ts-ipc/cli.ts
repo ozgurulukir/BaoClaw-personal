@@ -2540,6 +2540,12 @@ async function main() {
             disabled: boolean;
             source: string;
             config_path: string;
+            runtime?: {
+              state: string;
+              tool_count?: number;
+              restarts?: number;
+              reason?: string;
+            };
           }>;
           count: number;
         }>("listMcpServers");
@@ -2553,9 +2559,22 @@ async function main() {
             `\n${FG_ORANGE}${BOLD}MCP Servers${RESET} ${DIM}(${result.count})${RESET}\n`,
           );
           for (const srv of result.servers) {
-            const statusIcon = srv.disabled
-              ? `${FG_RED}●${RESET}`
-              : `${FG_GREEN}●${RESET}`;
+            // Live state from the daemon's connection manager when present;
+            // fall back to the static disabled flag for older daemons.
+            const state = srv.runtime?.state;
+            const inactive =
+              state === "skipped" || state === "requires_restart";
+            const statusIcon = state
+              ? state === "ready"
+                ? `${FG_GREEN}●${RESET}`
+                : state === "connecting"
+                  ? `${FG_ORANGE}●${RESET}`
+                  : inactive
+                    ? `${DIM}●${RESET}`
+                    : `${FG_RED}●${RESET}`
+              : srv.disabled
+                ? `${DIM}●${RESET}`
+                : `${FG_GREEN}●${RESET}`;
             const source = `${DIM}[${srv.source}]${RESET}`;
             console.log(
               `  ${statusIcon} ${FG_WHITE}${BOLD}${srv.name}${RESET} ${source}`,
@@ -2567,6 +2586,19 @@ async function main() {
               console.log(`    ${DIM}${srv.server_type}: ${short}${RESET}`);
             } else if (srv.url) {
               console.log(`    ${DIM}${srv.server_type}: ${srv.url}${RESET}`);
+            }
+            if (state) {
+              const parts = [state];
+              if (srv.runtime?.tool_count) {
+                parts.push(`${srv.runtime.tool_count} tools`);
+              }
+              if (srv.runtime?.restarts) {
+                parts.push(`${srv.runtime.restarts} restarts`);
+              }
+              if (srv.runtime?.reason) {
+                parts.push(srv.runtime.reason);
+              }
+              console.log(`    ${DIM}${parts.join(" — ")}${RESET}`);
             }
           }
           console.log();

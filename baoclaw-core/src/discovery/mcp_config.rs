@@ -3,7 +3,11 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use tokio::fs;
 
-/// A discovered MCP server configuration
+/// A discovered MCP server configuration.
+///
+/// `env` values are SECRETS: the field is `skip_serializing` because this
+/// struct is embedded in the `listMcpServers` RPC response, and no log
+/// statement may format it.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct McpServerInfo {
     pub name: String,
@@ -12,8 +16,10 @@ pub struct McpServerInfo {
     pub server_type: String, // "stdio", "sse", "http"
     pub url: Option<String>,
     pub disabled: bool,
-    pub source: String, // "user", "project", "local"
+    pub source: String, // "user", "project", "local", "plugin:<name>"
     pub config_path: String,
+    #[serde(default, skip_serializing)]
+    pub env: HashMap<String, String>,
 }
 
 /// MCP config file format (mcp.json)
@@ -33,78 +39,113 @@ struct McpServerEntry {
     url: Option<String>,
     #[serde(rename = "type")]
     server_type: Option<String>,
+    #[serde(default)]
+    env: HashMap<String, String>,
 }
 
 /// Discover all MCP server configurations from standard locations.
-/// Reads from:
-///   - ~/.claude/mcp.json (user scope)
-///   - .claude/mcp.json in cwd (project scope)
-///   - .claude/mcp.local.json in cwd (local scope, gitignored)
+/// Reads from (first definition of a name wins):
+///   - ~/.baoclaw/mcp.json (user scope)
+///   - ~/.baoclaw/plugins/*/mcp.json (user plugins)
+///   - .baoclaw/mcp.json in cwd (project scope)
+///   - .baoclaw/plugins/*/mcp.json in cwd (project plugins)
+///   - .baoclaw/mcp.local.json in cwd (local scope, gitignored)
 pub async fn discover_mcp_servers(cwd: &Path) -> Vec<McpServerInfo> {
+    let home = dirs_path();
+    discover_mcp_servers_in(home.as_deref(), cwd).await
+}
+
+/// Hermetic twin of [`discover_mcp_servers`] with the home directory
+/// injected (tests pass a tempdir; production passes `$HOME`).
+pub async fn discover_mcp_servers_in(home: Option<&Path>, cwd: &Path) -> Vec<McpServerInfo> {
     let mut servers = Vec::new();
 
     // User-level config: ~/.baoclaw/mcp.json
-    if let Some(home) = dirs_path() {
+    if let Some(home) = home {
         let user_config = home.join(".baoclaw").join("mcp.json");
-        if let Ok(entries) = load_mcp_config(&user_config, "user").await {
-            servers.extend(entries);
-        }
+        servers.extend(load_mcp_config(&user_config, "user").await);
 
         // Plugin MCP configs: ~/.baoclaw/plugins/*/mcp.json
-        if let Ok(plugin_servers) = scan_plugin_mcp(&home.join(".baoclaw").join("plugins")).await {
-            servers.extend(plugin_servers);
-        }
+        servers.extend(scan_plugin_mcp(&home.join(".baoclaw").join("plugins")).await);
     }
 
     // Project-level config: <cwd>/.baoclaw/mcp.json
     let project_config = cwd.join(".baoclaw").join("mcp.json");
-    if let Ok(entries) = load_mcp_config(&project_config, "project").await {
-        servers.extend(entries);
-    }
+    servers.extend(load_mcp_config(&project_config, "project").await);
 
     // Project plugin MCP configs: <cwd>/.baoclaw/plugins/*/mcp.json
-    if let Ok(plugin_servers) = scan_plugin_mcp(&cwd.join(".baoclaw").join("plugins")).await {
-        servers.extend(plugin_servers);
-    }
+    servers.extend(scan_plugin_mcp(&cwd.join(".baoclaw").join("plugins")).await);
 
     // Local config (gitignored): <cwd>/.baoclaw/mcp.local.json
     let local_config = cwd.join(".baoclaw").join("mcp.local.json");
-    if let Ok(entries) = load_mcp_config(&local_config, "local").await {
-        servers.extend(entries);
-    }
+    servers.extend(load_mcp_config(&local_config, "local").await);
 
-    servers
+    // Dedup first-wins by name (source order above is deterministic); a
+    // name defined in user scope shadows the same name in project scope.
+    let mut seen = std::collections::HashSet::new();
+    let mut deduped = Vec::new();
+    for server in servers {
+        let key = server.name.to_lowercase();
+        if seen.insert(key) {
+            deduped.push(server);
+        } else {
+            eprintln!(
+                "[mcp] duplicate server '{}' skipped (first definition wins)",
+                server.name
+            );
+        }
+    }
+    deduped
 }
 
 /// Scan all plugins in a plugins directory for mcp.json configs.
-async fn scan_plugin_mcp(
-    plugins_dir: &Path,
-) -> Result<Vec<McpServerInfo>, Box<dyn std::error::Error>> {
+async fn scan_plugin_mcp(plugins_dir: &Path) -> Vec<McpServerInfo> {
     let mut servers = Vec::new();
-    let mut entries = fs::read_dir(plugins_dir).await?;
-    while let Some(entry) = entries.next_entry().await? {
-        if !entry.file_type().await?.is_dir() {
-            continue;
-        }
-        let plugin_name = entry.file_name().to_string_lossy().to_string();
-        let mcp_config = entry.path().join("mcp.json");
-        let source = format!("plugin:{}", plugin_name);
-        if let Ok(plugin_servers) = load_mcp_config(&mcp_config, &source).await {
-            servers.extend(plugin_servers);
+    let Ok(mut entries) = fs::read_dir(plugins_dir).await else {
+        return servers;
+    };
+    // read_dir order is OS-dependent; sort so dedup-first-wins (and the
+    // discovered list) is deterministic across restarts.
+    let mut plugin_dirs = Vec::new();
+    while let Ok(Some(entry)) = entries.next_entry().await {
+        if entry.file_type().await.map(|t| t.is_dir()).unwrap_or(false) {
+            plugin_dirs.push(entry.path());
         }
     }
-    Ok(servers)
+    plugin_dirs.sort();
+    for dir in plugin_dirs {
+        let plugin_name = dir
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_default();
+        let mcp_config = dir.join("mcp.json");
+        let source = format!("plugin:{}", plugin_name);
+        servers.extend(load_mcp_config(&mcp_config, &source).await);
+    }
+    servers
 }
 
-async fn load_mcp_config(
-    path: &Path,
-    source: &str,
-) -> Result<Vec<McpServerInfo>, Box<dyn std::error::Error>> {
-    let content = fs::read_to_string(path).await?;
-    let config: McpJsonConfig = serde_json::from_str(&content)?;
+/// A missing file is normal (silent); a file that EXISTS but fails to parse
+/// is a misconfiguration the operator must see.
+async fn load_mcp_config(path: &Path, source: &str) -> Vec<McpServerInfo> {
+    let content = match fs::read_to_string(path).await {
+        Ok(c) => c,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Vec::new(),
+        Err(e) => {
+            eprintln!("[mcp] WARNING: cannot read {}: {}", path.display(), e);
+            return Vec::new();
+        }
+    };
+    let config: McpJsonConfig = match serde_json::from_str(&content) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("[mcp] WARNING: failed to parse {}: {}", path.display(), e);
+            return Vec::new();
+        }
+    };
     let config_path = path.to_string_lossy().to_string();
 
-    let servers = config
+    config
         .mcp_servers
         .into_iter()
         .map(|(name, entry)| {
@@ -125,11 +166,10 @@ async fn load_mcp_config(
                 disabled: entry.disabled,
                 source: source.to_string(),
                 config_path: config_path.clone(),
+                env: entry.env,
             }
         })
-        .collect();
-
-    Ok(servers)
+        .collect()
 }
 
 fn dirs_path() -> Option<PathBuf> {

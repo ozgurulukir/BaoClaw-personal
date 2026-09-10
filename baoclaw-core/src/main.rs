@@ -79,6 +79,8 @@ struct SharedState {
     headless_kit: engine::kit::HeadlessEngineKit,
     /// Team executor for managing sub-agent teams.
     team_executor: Arc<engine::team::TeamManager>,
+    /// MCP stdio server connections; the tool catalog was frozen at boot.
+    mcp_manager: Arc<baoclaw_core::mcp::ConnectionManager>,
 }
 
 /// Socket directory for all BaoClaw daemon instances
@@ -1197,6 +1199,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         tool_health: Arc::clone(&tool_health),
     };
 
+    // MCP eager boot connect. Each handshake RPC is bounded by
+    // mcp_startup_timeout_secs, so a hung server cannot stall daemon startup;
+    // a server that fails its first attempt simply registers no tools. The
+    // tool catalog is frozen after this point (reconnects never re-register).
+    let mcp_servers = if baoclaw_config.mcp_enabled {
+        baoclaw_core::discovery::mcp_config::discover_mcp_servers(std::path::Path::new(
+            &opts.cwd_str,
+        ))
+        .await
+    } else {
+        Vec::new()
+    };
+    let mcp_manager = baoclaw_core::mcp::ConnectionManager::start_all(
+        mcp_servers,
+        baoclaw_core::mcp::McpLaunchConfig::from(&baoclaw_config),
+        Some(Arc::clone(&tool_health)),
+    )
+    .await;
+    let mcp_tools = mcp_manager.boot_and_build_tools().await;
+    if !mcp_tools.is_empty() {
+        eprintln!("MCP tools registered: {}", mcp_tools.len());
+    }
+
     // Build engine tools (core tools + AgentTool + ToolSearchTool)
     let (engine_tools, granted_search_dirs, granted_write_dirs) = startup::build_engine_tools(
         &opts.cwd_str,
@@ -1205,6 +1230,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         &evolution_engine,
         &headless_kit,
         &memory_store,
+        mcp_tools,
     );
 
     // Write metadata file for discovery by CLI
@@ -1230,6 +1256,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         opts.cli_thinking_config,
         opts.cli_resume_session_id,
         session_id,
+        mcp_manager,
     )
     .await;
 

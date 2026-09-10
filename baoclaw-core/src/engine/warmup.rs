@@ -3,7 +3,6 @@
 //! Flow: user input ──► intent prediction ──► rule matching ──► warmup execution
 //!   - warm the file cache (read files matching globs)
 //!   - preload skills (interface reserved)
-//!   - preload MCP tools (interface reserved)
 //!
 //! Learning: each warmed file that is later actually read counts as a "hit".
 //! Rules with persistently low hit rates get their weight reduced and are
@@ -41,9 +40,6 @@ pub struct WarmupRule {
     /// Empty = pattern-only matching.
     #[serde(default)]
     pub intents: Vec<String>,
-    /// MCP tools to preload (interface reserved).
-    #[serde(default)]
-    pub preload_mcp: Vec<String>,
     /// File globs to warm into the file cache.
     #[serde(default)]
     pub warmup_files: Vec<String>,
@@ -113,7 +109,6 @@ fn default_rules() -> Vec<WarmupRule> {
             id: "testing".into(),
             pattern: r"test|测试".into(),
             intents: vec!["testing".into()],
-            preload_mcp: vec![],
             warmup_files: vec!["tests/**/*.rs".into(), "**/*test*.ts".into()],
             preload_skills: vec!["test-driven-development".into()],
             warmup_tools: vec!["Bash".into()],
@@ -122,7 +117,6 @@ fn default_rules() -> Vec<WarmupRule> {
             id: "debugging".into(),
             pattern: r"error|bug|fix|crash|panic|报错|崩溃".into(),
             intents: vec!["debugging".into()],
-            preload_mcp: vec![],
             warmup_files: vec!["**/*.log".into()],
             preload_skills: vec!["systematic-debugging".into()],
             warmup_tools: vec!["Bash".into(), "FileRead".into()],
@@ -131,7 +125,6 @@ fn default_rules() -> Vec<WarmupRule> {
             id: "deploy".into(),
             pattern: r"deploy|docker|kubernetes|k8s|部署".into(),
             intents: vec!["deployment".into()],
-            preload_mcp: vec!["kubernetes".into(), "docker".into()],
             warmup_files: vec!["Dockerfile".into(), "deploy/**".into(), "k8s/**".into()],
             preload_skills: vec![],
             warmup_tools: vec!["Bash".into()],
@@ -140,7 +133,6 @@ fn default_rules() -> Vec<WarmupRule> {
             id: "refactor".into(),
             pattern: r"refactor|重构".into(),
             intents: vec!["refactoring".into()],
-            preload_mcp: vec![],
             warmup_files: vec![],
             preload_skills: vec!["refactoring-patterns".into()],
             warmup_tools: vec!["Grep".into(), "FileRead".into(), "FileEdit".into()],
@@ -149,7 +141,6 @@ fn default_rules() -> Vec<WarmupRule> {
             id: "docs".into(),
             pattern: r"readme|document|docs|文档".into(),
             intents: vec!["doc_write".into()],
-            preload_mcp: vec![],
             warmup_files: vec!["README.md".into(), "docs/**/*.md".into()],
             preload_skills: vec![],
             warmup_tools: vec!["FileWrite".into()],
@@ -277,8 +268,6 @@ pub struct WarmupResult {
     pub warmed_files: Vec<PathBuf>,
     /// Skills suggested for preload (interface reserved).
     pub preload_skills: Vec<String>,
-    /// MCP tools suggested for preload (interface reserved).
-    pub preload_mcp: Vec<String>,
     /// Built-in tools hinted.
     pub warmup_tools: Vec<String>,
 }
@@ -374,7 +363,6 @@ impl WarmupManager {
             result
                 .preload_skills
                 .extend(rule.preload_skills.iter().cloned());
-            result.preload_mcp.extend(rule.preload_mcp.iter().cloned());
             result
                 .warmup_tools
                 .extend(rule.warmup_tools.iter().cloned());
@@ -414,8 +402,8 @@ impl WarmupManager {
             }
         }
 
-        // Preload skills/MCP: interface reserved — actual loading is performed
-        // by the host (CLI) which owns the skill registry and MCP clients.
+        // Preload skills: interface reserved — actual loading is performed
+        // by the host (CLI) which owns the skill registry.
 
         if let Err(e) = self.stats.save_to(&self.stats_path) {
             eprintln!(
@@ -822,12 +810,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_warmup_collects_skills_and_mcp() {
+    async fn test_warmup_collects_skills() {
         let dir = tmp_dir("skills");
         let mut mgr = test_manager(&dir);
         let result = mgr.warmup("deploy with docker", &[]).await;
         assert!(result.matched_rules.contains(&"deploy".to_string()));
-        assert!(result.preload_mcp.contains(&"docker".to_string()));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

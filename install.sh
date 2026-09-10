@@ -183,31 +183,25 @@ make_launcher "baoclaw-telegram"  "baoclaw-telegram/src/gateway.ts" "Telegram bo
 make_launcher "baoclaw-feishu"    "baoclaw-feishu/src/gateway.ts"  "Feishu bot gateway"
 make_launcher "baoclaw-whatsapp"  "baoclaw-whatsapp/src/gateway.ts" "WhatsApp gateway"
 
-# 8. MCP server launcher script
-mkdir -p "$INSTALL_DIR/bin"
-if [ -f "$SCRIPT_DIR/scripts/mcp-servers.sh" ]; then
-  cp "$SCRIPT_DIR/scripts/mcp-servers.sh" "$INSTALL_DIR/bin/mcp-servers"
-  chmod +x "$INSTALL_DIR/bin/mcp-servers"
-  echo "✓ mcp-servers → $INSTALL_DIR/bin/mcp-servers"
-  echo "  Usage: $INSTALL_DIR/bin/mcp-servers {start|stop|restart|status|debug}"
-fi
-
 # 9. Docs
 mkdir -p "$INSTALL_DIR/docs"
 [ -f "$SCRIPT_DIR/docs/USAGE.md" ] && cp "$SCRIPT_DIR/docs/USAGE.md" "$INSTALL_DIR/docs/" && echo "✓ docs/USAGE.md → $INSTALL_DIR/docs/"
 [ -f "$SCRIPT_DIR/docs/DAEMON_MIGRATION.md" ] && cp "$SCRIPT_DIR/docs/DAEMON_MIGRATION.md" "$INSTALL_DIR/docs/" && echo "✓ docs/DAEMON_MIGRATION.md → $INSTALL_DIR/docs/"
 
-# 10. Systemd service update (if exists)
+# 10. Systemd service cleanup: MCP servers are now managed by the daemon
+# itself; remove any leftover launcher hook and stale binary so the unit
+# never references a file that no longer exists.
 SYSTEMD_DIR="$HOME/.config/systemd/user"
 if [ -d "$SYSTEMD_DIR" ] && [ -f "$SYSTEMD_DIR/baoclaw.service" ]; then
-  if ! grep -q "ExecStartPre.*mcp-servers" "$SYSTEMD_DIR/baoclaw.service" 2>/dev/null; then
-    echo ""
-    echo "⚠️  Updating systemd service to start MCP servers..."
-    BAOCLAW_BIN="$HOME/.baoclaw/bin"
-    sed -i "s|ExecStart=${BAOCLAW_BIN}/baoclaw-core --daemon|ExecStartPre=${BAOCLAW_BIN}/mcp-servers start\nExecStart=${BAOCLAW_BIN}/baoclaw-core --daemon|" "$SYSTEMD_DIR/baoclaw.service"
-    echo "✓ systemd service updated"
-    echo "  Run: systemctl --user daemon-reload && systemctl --user restart baoclaw"
+  if grep -q "ExecStartPre.*mcp-servers" "$SYSTEMD_DIR/baoclaw.service" 2>/dev/null; then
+    sed -i "/ExecStartPre=.*mcp-servers/d" "$SYSTEMD_DIR/baoclaw.service"
+    echo "✓ Removed obsolete mcp-servers hook from baoclaw.service"
+    echo "  Run: systemctl --user daemon-reload"
   fi
+fi
+if [ -f "$INSTALL_DIR/bin/mcp-servers" ]; then
+  rm -f "$INSTALL_DIR/bin/mcp-servers"
+  echo "✓ Removed obsolete $INSTALL_DIR/bin/mcp-servers (daemon manages MCP servers now)"
 fi
 
 echo ""

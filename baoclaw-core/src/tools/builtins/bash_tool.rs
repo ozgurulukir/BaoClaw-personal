@@ -7,6 +7,29 @@ use std::time::Duration;
 use crate::infra::sandbox_config::SandboxConfig;
 use crate::tools::trait_def::*;
 
+/// Environment variables stripped from every spawned child (Bash calls and
+/// MCP server processes alike) so daemon credentials cannot leak into
+/// subprocess environments. Explicit per-server `env` entries in mcp.json are
+/// applied AFTER this removal and win — the list targets accidental leakage.
+pub(crate) const SENSITIVE_ENV_KEYS: &[&str] = &[
+    "ANTHROPIC_API_KEY",
+    "OPENAI_API_KEY",
+    "DEEPSEEK_API_KEY",
+    "GEMINI_API_KEY",
+    "GOOGLE_API_KEY",
+    "BRAVE_API_KEY",
+    "BRAVE_SEARCH_API_KEY",
+    "TELEGRAM_BOT_TOKEN",
+    "FEISHU_APP_SECRET",
+    "FEISHU_APP_ID",
+    "WHATSAPP_TOKEN",
+    "AWS_SECRET_ACCESS_KEY",
+    "AWS_SESSION_TOKEN",
+    "GITHUB_TOKEN",
+    "GH_TOKEN",
+    "BAOCLAW_API_KEY",
+];
+
 /// BashTool - executes shell commands via /bin/bash -c
 ///
 /// Optionally wraps commands through a sandbox (Bubblewrap / Docker) when
@@ -165,24 +188,6 @@ impl Tool for BashTool {
         }
 
         // Sanitize child environment to prevent exfiltration of credentials
-        const SENSITIVE_ENV_KEYS: &[&str] = &[
-            "ANTHROPIC_API_KEY",
-            "OPENAI_API_KEY",
-            "DEEPSEEK_API_KEY",
-            "GEMINI_API_KEY",
-            "GOOGLE_API_KEY",
-            "BRAVE_API_KEY",
-            "BRAVE_SEARCH_API_KEY",
-            "TELEGRAM_BOT_TOKEN",
-            "FEISHU_APP_SECRET",
-            "FEISHU_APP_ID",
-            "WHATSAPP_TOKEN",
-            "AWS_SECRET_ACCESS_KEY",
-            "AWS_SESSION_TOKEN",
-            "GITHUB_TOKEN",
-            "GH_TOKEN",
-            "BAOCLAW_API_KEY",
-        ];
         for key in SENSITIVE_ENV_KEYS {
             cmd.env_remove(key);
         }

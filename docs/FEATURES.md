@@ -77,7 +77,7 @@ A closed learning loop:
 
 ### 🔌 Extensible
 
-- **MCP discovery** — detect and list configured external MCP servers (`/mcp`); their tools are surfaced as configuration only, not executed by the daemon
+- **MCP client (stdio)** — the daemon spawns configured stdio MCP servers at boot and registers their tools as first-class tools named `mcp__<server>__<tool>`; tool calls execute against the server process (auto-reconnect with bounded backoff, `/mcp` shows live state). SSE/HTTP servers are discovered and listed but not executed
 - **Skills** — markdown-based skill files loaded into system prompt (personal + project scope)
 - **Plugins** — directory-based plugin system with tools, skills, and MCP configs
 - **Many LLM models** — Anthropic native + compatible OpenAI-style APIs (OpenRouter, Ollama, vLLM, etc.)

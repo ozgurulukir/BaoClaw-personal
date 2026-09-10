@@ -26,7 +26,6 @@ pub enum TaskType {
     RemoteAgent,
     InProcessTeammate,
     LocalWorkflow,
-    MonitorMcp,
     Dream,
 }
 
@@ -67,7 +66,6 @@ impl TaskType {
             TaskType::RemoteAgent => 'r',
             TaskType::InProcessTeammate => 't',
             TaskType::LocalWorkflow => 'w',
-            TaskType::MonitorMcp => 'm',
             TaskType::Dream => 'd',
         }
     }
@@ -96,7 +94,7 @@ pub fn is_valid_task_id(id: &str) -> bool {
         return false;
     }
     let prefix = id.chars().next().unwrap();
-    if !matches!(prefix, 'b' | 'a' | 'r' | 't' | 'w' | 'm' | 'd') {
+    if !matches!(prefix, 'b' | 'a' | 'r' | 't' | 'w' | 'd') {
         return false;
     }
     id[1..]
@@ -241,7 +239,6 @@ mod tests {
             (TaskType::RemoteAgent, 'r'),
             (TaskType::InProcessTeammate, 't'),
             (TaskType::LocalWorkflow, 'w'),
-            (TaskType::MonitorMcp, 'm'),
             (TaskType::Dream, 'd'),
         ];
         for (task_type, expected_prefix) in all_types {

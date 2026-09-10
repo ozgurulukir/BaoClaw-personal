@@ -262,8 +262,7 @@ ls $env:TEMP\baoclaw-sockets\baoclaw.sock
 ```
 ~/.baoclaw/
 ├── bin/
-│   ├── baoclaw-core              # Rust daemon binary
-│   └── mcp-servers               # MCP server start/stop helper
+│   └── baoclaw-core              # Rust daemon binary
 ├── package.json                  # mini npm workspace root
 ├── package-lock.json
 ├── tsconfig.base.json

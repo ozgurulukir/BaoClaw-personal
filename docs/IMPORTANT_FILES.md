@@ -45,7 +45,6 @@ A quick annotated tour of the repository, grouped by area. Verify paths locally 
 
 - **deploy/** — systemd, launchd, and Windows service units, plus `Dockerfile.sandbox` (Node 24 image).
 - **scripts/build-sandbox.sh** — builds the sandbox image/artifacts.
-- **scripts/mcp-servers.sh** — manages MCP server configuration.
 
 ### Docs
 

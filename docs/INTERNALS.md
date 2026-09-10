@@ -448,6 +448,37 @@ Request with primary model
 
 ---
 
+### 6. 🔌 MCP Client (stdio)
+
+`src/mcp/` turns configured MCP servers into first-class engine tools.
+
+#### Boot flow
+
+```
+main(): discover_mcp_servers(cwd)            — mcp.json × 5 locations, first-name-wins dedup
+      → ConnectionManager::start_all         — disabled / non-stdio / commandless → Skipped
+      → per-slot supervisor task             — spawn + initialize + tools/list
+      → boot_and_build_tools()               — one McpToolBridge per Ready-slot tool
+      → build_engine_tools(..., mcp_tools)   — bridges enter before AgentTool/ToolSearchTool
+```
+
+#### Constraints and mechanisms
+
+| Aspect             | Detail                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| ------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Frozen catalog** | Bridges are built once at boot and never added/removed. A failed first attempt means Failed with no bridges (retrying could never produce registered tools); `notifications/tools/list_changed` is logged, not acted on — this keeps the tool set static, which the prompt cache and the snapshot-cloning call sites (AgentTool, ToolSearchTool, cron, teams) rely on                                                     |
+| **Handshake**      | `initialize` (protocol `2024-11-05`, the revision every conforming server must accept) → `notifications/initialized` → `tools/list` with cursor pagination capped at 100 pages. `initialize` and the whole catalog fetch are EACH bounded by `mcp_startup_timeout_secs` (boot stall per server ≈ 2 budgets), and writes carry the same bound so a server that stops reading stdin fails calls instead of wedging the pipe |
+| **Reconnect**      | If a Ready slot's process dies, the supervisor reconnects with bounded exponential backoff (1s→60s, factor 2) up to `mcp_max_restarts`, then Failed. While disconnected the registered tools return error results telling the model nothing changed                                                                                                                                                                       |
+| **Demux**          | One reader task per client multiplexes by JSON-RPC id (pending oneshot map); late responses after timeout/abort are dropped. Server→client requests: `ping` answered `{}`, everything else rejected `-32601` (sampling/roots are out of scope). Non-JSON stdout lines (banners, logs) are skipped; stderr is drained or the server would deadlock on a full pipe                                                          |
+| **Shutdown**       | `shutdown_all()` runs before `std::process::exit` on the signal path — destructors do not run there, so `kill_on_drop` alone would orphan children. Close stdin → 2s grace → kill                                                                                                                                                                                                                                         |
+| **Secrets**        | mcp.json `env` values ride `McpServerInfo.env` with `skip_serializing` (never in `listMcpServers`), applied after the shared sensitive-key env removal so explicit config wins                                                                                                                                                                                                                                            |
+| **Permissions**    | Bridges leave the trait defaults: fail-closed Ask for every call, sequential execution. Whole-tool allow rules work by registry name. Consequence: mutating MCP tools are unavailable on headless engines (cron/teams/sub-agents) unless allow rules pre-exist — same semantics as builtins                                                                                                                               |
+| **Naming**         | `mcp__<server>__<tool>`, segments sanitized to `[A-Za-z0-9_-]`; `scm_list_tools` classifies them as `"type": "mcp"` by prefix                                                                                                                                                                                                                                                                                             |
+| **tool-health**    | Error results (including "server disconnected") feed the failure counters, so a dead server's tools auto-disable after repeated failures and recover on the next success — no special-casing                                                                                                                                                                                                                              |
+| **Session cwd**    | Servers spawn with the daemon's launch cwd and are never respawned on cwd change; project `mcp.json` is resolved against the launch cwd                                                                                                                                                                                                                                                                                   |
+
+---
+
 ### Data Flow Summary
 
 ```

@@ -179,7 +179,7 @@ pub(super) async fn handle_shared_client(
                             scm_list_tools(&shared, &writer, id).await;
                         }
                         ClientMethod::ListMcpServers => {
-                            scm_list_mcp_servers(&work_cwd, &writer, id).await;
+                            scm_list_mcp_servers(&shared, &work_cwd, &writer, id).await;
                         }
                         ClientMethod::ListSkills => {
                             scm_list_skills(&work_cwd, &writer, id).await;
@@ -838,9 +838,14 @@ async fn scm_list_tools(shared: &SharedState, writer: WriterRef<'_>, id: Request
     let tl: Vec<serde_json::Value> = shared
         .engine_tools
         .iter()
-        .map(
-            |t| serde_json::json!({"name": t.name(), "description": t.prompt(), "type": "builtin"}),
-        )
+        .map(|t| {
+            let ty = if t.name().starts_with(baoclaw_core::mcp::MCP_TOOL_PREFIX) {
+                "mcp"
+            } else {
+                "builtin"
+            };
+            serde_json::json!({"name": t.name(), "description": t.prompt(), "type": ty})
+        })
         .collect();
     let mut conn_guard = writer.lock().await;
     let _ = conn_guard
@@ -848,11 +853,36 @@ async fn scm_list_tools(shared: &SharedState, writer: WriterRef<'_>, id: Request
         .await;
 }
 
-async fn scm_list_mcp_servers(work_cwd: &PathBuf, writer: WriterRef<'_>, id: RequestId) {
+async fn scm_list_mcp_servers(
+    shared: &SharedState,
+    work_cwd: &PathBuf,
+    writer: WriterRef<'_>,
+    id: RequestId,
+) {
     let s = discovery::mcp_config::discover_mcp_servers(work_cwd).await;
+    let statuses = shared.mcp_manager.status_map().await;
+    let servers: Vec<serde_json::Value> = s
+        .iter()
+        .map(|info| {
+            // McpServerInfo serializes with `env` skipped, so secrets stay
+            // out of the response; only the runtime status is added here.
+            let mut v = serde_json::to_value(info).unwrap_or(serde_json::Value::Null);
+            let runtime = match statuses.get(&info.name) {
+                Some(st) => serde_json::to_value(st).unwrap_or(serde_json::Value::Null),
+                None => serde_json::json!({
+                    "state": if shared.baoclaw_config.mcp_enabled { "requires_restart" } else { "disabled_by_config" }
+                }),
+            };
+            if let Some(obj) = v.as_object_mut() {
+                obj.insert("runtime".to_string(), runtime);
+            }
+            v
+        })
+        .collect();
+    let count = servers.len();
     let mut conn_guard = writer.lock().await;
     let _ = conn_guard
-        .send_response(id, serde_json::json!({"servers": s, "count": s.len()}))
+        .send_response(id, serde_json::json!({"servers": servers, "count": count}))
         .await;
 }
 

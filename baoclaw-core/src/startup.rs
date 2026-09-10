@@ -375,7 +375,10 @@ pub(super) fn load_config_and_api_client() -> (BaoclawConfig, Arc<UnifiedClient>
 }
 
 /// Build the daemon engine tool list (core tools, AgentTool with the full set,
-/// ToolSearchTool last).
+/// ToolSearchTool last). `mcp_tools` are the MCP bridges built at boot and
+/// enter BEFORE AgentTool/ToolSearchTool so sub-agents and tool search see
+/// them; the list is static afterwards.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn build_engine_tools(
     cwd_str: &str,
     sandbox_config: &Option<Arc<engine::sandbox::SandboxConfig>>,
@@ -383,6 +386,7 @@ pub(super) fn build_engine_tools(
     evolution_engine: &Arc<engine::evolution::EvolutionEngine>,
     kit: &engine::kit::HeadlessEngineKit,
     memory_store: &Arc<engine::memory::MemoryStore>,
+    mcp_tools: Vec<Arc<dyn tools::Tool>>,
 ) -> (
     Vec<Arc<dyn tools::Tool>>,
     permissions::GrantedSearchDirs,
@@ -434,6 +438,11 @@ pub(super) fn build_engine_tools(
             evolution_engine,
         ))),
     ];
+    let core_tools: Vec<Arc<dyn tools::Tool>> = {
+        let mut all = core_tools;
+        all.extend(mcp_tools);
+        all
+    };
 
     // AgentTool gets the full core tool set so sub-agents can write, edit, run bash, etc.
     let agent_tool =
@@ -562,6 +571,7 @@ pub(super) async fn assemble_shared_state(
     cli_thinking_config: ThinkingConfig,
     cli_resume_session_id: Option<String>,
     session_id: String,
+    mcp_manager: Arc<baoclaw_core::mcp::ConnectionManager>,
 ) -> (SharedState, Arc<AtomicBool>) {
     let state_manager = Arc::new(StateManager::new(CoreState {
         session_id: session_id.clone(),
@@ -687,6 +697,7 @@ pub(super) async fn assemble_shared_state(
         tool_result_store,
         headless_kit,
         team_executor,
+        mcp_manager,
     };
 
     (shared, should_exit)
@@ -825,6 +836,7 @@ pub(super) fn start_background_tasks(shared: &SharedState) {
     // ══════════════════════════════════════════════════════════
     {
         let registry = Arc::clone(&shared.session_registry);
+        let mcp_manager = Arc::clone(&shared.mcp_manager);
         tokio::spawn(async move {
             use tokio::signal;
 
@@ -849,6 +861,9 @@ pub(super) fn start_background_tasks(shared: &SharedState) {
 
             eprintln!("[daemon] received shutdown signal, persisting sessions...");
             registry.persist_all().await;
+            // process::exit skips destructors, so MCP children must be killed
+            // explicitly — kill_on_drop never fires on this path.
+            mcp_manager.shutdown_all().await;
             eprintln!("[daemon] shutdown complete, exiting");
             std::process::exit(0);
         });
@@ -864,6 +879,7 @@ pub(super) fn start_background_tasks(shared: &SharedState) {
     #[cfg(target_os = "windows")]
     {
         let reg = Arc::clone(&shared.session_registry);
+        let mcp_manager = Arc::clone(&shared.mcp_manager);
         tokio::spawn(async move {
             loop {
                 tokio::time::sleep(std::time::Duration::from_secs(2)).await;
@@ -871,6 +887,7 @@ pub(super) fn start_background_tasks(shared: &SharedState) {
                     tracing::info!("Windows SCM requested shutdown, persisting sessions...");
                     eprintln!("[daemon] Windows SCM requested shutdown, persisting sessions...");
                     let _ = reg.persist_all().await;
+                    mcp_manager.shutdown_all().await;
                     eprintln!("[daemon] shutdown complete, exiting");
                     std::process::exit(0);
                 }

@@ -54,6 +54,27 @@ fn default_micro_compact_min_chars() -> usize {
     8_192
 }
 
+/// MCP client is on by default; `false` skips discovery and connection.
+fn default_mcp_enabled() -> bool {
+    true
+}
+
+/// Per-handshake-RPC budget (initialize / tools/list page) in seconds.
+fn default_mcp_startup_timeout_secs() -> u64 {
+    10
+}
+
+/// Per tools/call budget in seconds (matches the Bash ceiling so "a long
+/// tool call" has one uniform limit).
+fn default_mcp_call_timeout_secs() -> u64 {
+    300
+}
+
+/// Reconnect attempts after which a previously-ready MCP slot gives up.
+fn default_mcp_max_restarts() -> u32 {
+    10
+}
+
 // ─── ModelProfile ───────────────────────────────────────────────────────────
 
 /// A model configuration profile with its own API credentials and window.
@@ -141,6 +162,23 @@ pub struct BaoclawConfig {
     /// and persisted back to this field.
     #[serde(default = "default_telemetry_enabled")]
     pub telemetry_enabled: bool,
+    /// MCP client master switch. When false, configured MCP servers are not
+    /// connected and their tools are not registered (default true).
+    #[serde(default = "default_mcp_enabled")]
+    pub mcp_enabled: bool,
+    /// Seconds budgeted to each MCP handshake RPC (initialize, tools/list
+    /// page); a hung server cannot stall boot beyond a bounded multiple of
+    /// this (default 10).
+    #[serde(default = "default_mcp_startup_timeout_secs")]
+    pub mcp_startup_timeout_secs: u64,
+    /// Seconds budgeted to a single MCP tools/call (default 300).
+    #[serde(default = "default_mcp_call_timeout_secs")]
+    pub mcp_call_timeout_secs: u64,
+    /// Reconnect attempts for a crashed MCP server process before the slot
+    /// gives up and its tools permanently return errors until restart
+    /// (default 10; backoff is exponential 1s→60s).
+    #[serde(default = "default_mcp_max_restarts")]
+    pub mcp_max_restarts: u32,
 
     // === New: Named model profiles (P1-1) ===
     /// Named model profiles (new format). Each profile has its own api_type,
@@ -241,6 +279,10 @@ impl Default for BaoclawConfig {
             micro_compact_min_age_secs: default_micro_compact_min_age_secs(),
             micro_compact_min_chars: default_micro_compact_min_chars(),
             telemetry_enabled: default_telemetry_enabled(),
+            mcp_enabled: default_mcp_enabled(),
+            mcp_startup_timeout_secs: default_mcp_startup_timeout_secs(),
+            mcp_call_timeout_secs: default_mcp_call_timeout_secs(),
+            mcp_max_restarts: default_mcp_max_restarts(),
             model_profiles: HashMap::new(),
             primary_profile: None,
             fallback_profiles: Vec::new(),
@@ -574,6 +616,10 @@ mod tests {
             micro_compact_min_age_secs: 3_600,
             micro_compact_min_chars: 500,
             telemetry_enabled: false,
+            mcp_enabled: false,
+            mcp_startup_timeout_secs: 5,
+            mcp_call_timeout_secs: 60,
+            mcp_max_restarts: 3,
             openai_base_url: None,
             context_window: 200_000,
             auto_compact_threshold_ratio: 0.7,

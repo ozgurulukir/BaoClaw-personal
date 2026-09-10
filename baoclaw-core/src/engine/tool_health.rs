@@ -123,6 +123,16 @@ impl ToolHealthTracker {
     /// Check if a tool is available (not disabled). A Disabled/Degraded
     /// record older than `recovery_minutes` is lazily reset to Healthy —
     /// the tool gets a fresh start and its next failure re-degrades it.
+    /// Forget a tool's record entirely: its next call starts from a clean
+    /// slate. Used when an MCP server slot reconnects — transport failures
+    /// accumulated while it was down say nothing about the tool itself.
+    pub fn reset_tool(&self, tool_name: &str) {
+        self.records
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .remove(tool_name);
+    }
+
     pub fn is_available(&self, tool_name: &str) -> bool {
         let mut records = self.records.lock().unwrap_or_else(|p| p.into_inner());
         match records.get_mut(tool_name) {
