@@ -131,7 +131,9 @@ Compaction is tried from cheapest to most expensive:
 │   • Triggered when budget = Compact/Blocking                    │
 ├─────────────────────────────────────────────────────────────────┤
 │ Level 3: compact_messages  (1 API call, cache-safe)             │
-│   • Keeps last 10 messages, summarizes older ones via API       │
+│   • Keeps the last 8-30 messages (adaptive, starts at 10; the   │
+│     tracker adjusts from post-compact token ratios), summarizes │
+│     older ones via API                                          │
 │   • Cache-safe forking: reuses system prompt + old messages     │
 │     as API messages → cache prefix reuse on provider side       │
 │   • Summary input truncated to 60,000 chars (~15K tokens)       │
@@ -184,6 +186,11 @@ This split ensures the cached system prompt prefix stays stable across turns —
 6. engine.load_token_baseline(session_id)   // restore calibrated count
 7. engine.seed_session_memory(&old_summary) // carry forward to new session
 ```
+
+**Turn-aligned tails:** the 200-entry cuts in Tier 1 and Tier 3 snap back to
+the nearest complete user turn (`align_cut_to_user_turn`), so a restored tail
+never opens with an assistant tool call whose result was cut off — that would
+be an orphan the API rejects.
 
 **Main session:** the daemon's own engine uses a deterministic `{cwd_hash}-main`
 session id — it never adopts a client surface's transcript (an older
@@ -467,6 +474,7 @@ QueryEngine.submit_message_with_attachments()
           │     ├── 429 → retry / fallback
           │     ├── 5xx → retry / fallback
           │     └── context_overflow → compact + retry
+          ├── validate_and_fix_tool_messages() → strip unpaired blocks
           ├── UnifiedClient.stream()       → Anthropic or OpenAI
           ├── Tool execution               → emit events
           ├── SessionMemory.should_update() → update summary if interval met
@@ -478,6 +486,20 @@ QueryEngine.submit_message_with_attachments()
                 ├── Write pending_review.json  (→ next session)
                 └── Skill extraction if applicable
 ```
+
+### Tool-Use / Tool-Result Pairing Hygiene
+
+A user message whose `tool_result` has no matching assistant `tool_use` (and
+the reverse) is rejected by the API, so pairing is repaired at two stages:
+
+| Stage                 | Where                              | Action                                                                                                                                                                       |
+| --------------------- | ---------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **History load**      | `cleanup_incomplete_tool_calls()`  | Strips results whose call vanished (older-format transcripts, manual edits) and converts string-content user turns to block arrays, stubbing unrecoverable results as errors |
+| **Before every call** | `validate_and_fix_tool_messages()` | Re-checks with the same predicate and drops anything still unpaired, so malformed sequences never reach the API                                                              |
+
+Both stages share one orphan definition (`collect_tool_ids` +
+`strip_orphan_tool_result_blocks`), so a result can never be orphaned by one
+stage's cut and rescued by the other's rule.
 
 ### Event Delivery and Terminal Hand-Off
 
