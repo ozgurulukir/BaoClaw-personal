@@ -2,6 +2,7 @@ import { test, describe, mock } from "node:test";
 import assert from "node:assert/strict";
 import {
   COMMAND_REGISTRY,
+  formatHelp,
   formatSearchResults,
   isRegisteredCommand,
   parseCommand,
@@ -70,7 +71,24 @@ async function buildHandlers(ipc: ReturnType<typeof mockIpcClient>) {
 describe("Telegram /mcp command", () => {
   test("is registered with the refresh usage", () => {
     assert.equal(isRegisteredCommand("/mcp"), true);
-    assert.match(COMMAND_REGISTRY["/mcp"].description, /refresh \[server\]/);
+    assert.match(COMMAND_REGISTRY["/mcp"].usage!, /refresh \[server\]/);
+  });
+
+  test("menu descriptions fit the setMyCommands 32-char cap", () => {
+    for (const [cmd, def] of Object.entries(COMMAND_REGISTRY)) {
+      const len = [...def.description].length;
+      assert.ok(
+        len >= 1 && len <= 32,
+        `${cmd} description is ${len} chars (Telegram allows 1-32): "${def.description}"`,
+      );
+    }
+  });
+
+  test("/help renders the richer usage line when present", () => {
+    const help = formatHelp(COMMAND_REGISTRY);
+    assert.match(help, /MCP servers: \/mcp \[refresh \[server\]\]/);
+    assert.match(help, /Export conversation as Markdown or PDF/);
+    assert.match(help, /Show help/); // description fallback when no usage
   });
 
   const readyList = {
@@ -142,6 +160,25 @@ describe("Telegram /mcp command", () => {
     const handlers = await buildHandlers(ipc);
     const out = await handlers["/mcp"]("bogus", 1);
     assert.match(out!, /usage: \/mcp \[refresh \[server\]\]/);
+    assert.equal(ipc.calls.length, 0);
+  });
+});
+
+describe("Telegram /rate command", () => {
+  test("handler sends evolution.rateTrajectory with the rating", async () => {
+    const ipc = mockIpcClient(() => ({}));
+    const handlers = await buildHandlers(ipc);
+    const out = await handlers["/rate"]("Good", 1);
+    assert.equal(ipc.calls[0].method, "evolution.rateTrajectory");
+    assert.deepEqual(ipc.calls[0].params, { rating: "good" });
+    assert.match(out!, /good/);
+  });
+
+  test("invalid ratings show usage without an RPC", async () => {
+    const ipc = mockIpcClient(() => ({}));
+    const handlers = await buildHandlers(ipc);
+    const out = await handlers["/rate"]("meh", 1);
+    assert.match(out!, /Usage: \/rate/);
     assert.equal(ipc.calls.length, 0);
   });
 });

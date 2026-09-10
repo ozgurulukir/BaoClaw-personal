@@ -5,9 +5,11 @@
  */
 import {
   IpcClient,
+  formatMcpServers,
   formatSearchResults as formatSearchResultsShared,
   formatToolHealth,
   type ControlChannel,
+  type McpServerList,
   type SearchResult,
   type ToolHealthData,
 } from "baoclaw-ipc";
@@ -50,15 +52,6 @@ interface SkillInfo {
   path: string;
   source: string;
   description?: string;
-}
-interface McpServerInfo {
-  name: string;
-  server_type: string;
-  disabled: boolean;
-  source: string;
-  command?: string;
-  url?: string;
-  config_path: string;
 }
 interface PluginInfo {
   name: string;
@@ -169,16 +162,6 @@ function formatSkills(skills: SkillInfo[]): string {
   for (const s of skills) {
     out += `• ${s.name} [${s.source}]\n`;
     if (s.description) out += `  ${s.description}\n`;
-  }
-  return truncate(out);
-}
-
-function formatMcpServers(servers: McpServerInfo[]): string {
-  if (servers.length === 0) return "📋 MCP Servers (0)";
-  let out = `📋 MCP Servers (${servers.length})\n`;
-  for (const srv of servers) {
-    const status = srv.disabled ? "🔴" : "🟢";
-    out += `${status} ${srv.name} [${srv.server_type}] [${srv.source}]\n`;
   }
   return truncate(out);
 }
@@ -471,13 +454,8 @@ async function handleHealth(ctx: CommandContext): Promise<string> {
 }
 
 async function handleMcp(ctx: CommandContext): Promise<string> {
-  const result = await ctx.ipcClient.request<
-    { servers: McpServerInfo[] } | McpServerInfo[]
-  >("listMcpServers");
-  const servers = Array.isArray(result)
-    ? result
-    : ((result as any).servers ?? []);
-  return formatMcpServers(servers);
+  const result = await ctx.ipcClient.request<McpServerList>("listMcpServers");
+  return formatMcpServers(result);
 }
 
 async function handleSkills(ctx: CommandContext): Promise<string> {

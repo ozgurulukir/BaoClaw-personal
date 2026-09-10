@@ -5,9 +5,11 @@
  */
 import { IpcClient } from "baoclaw-ipc/client";
 import {
+  formatMcpServers,
   formatSearchResults as formatSearchResultsShared,
   formatToolHealth,
   type ControlChannel,
+  type McpServerList,
   type SearchResult,
   type ToolHealthData,
 } from "baoclaw-ipc";
@@ -60,16 +62,6 @@ interface SkillInfo {
   path: string;
   source: string; // 'project' | 'global'
   description?: string;
-}
-
-interface McpServerInfo {
-  name: string;
-  server_type: string; // 'stdio' | 'sse'
-  disabled: boolean;
-  source: string;
-  command?: string;
-  url?: string;
-  config_path: string;
 }
 
 interface PluginInfo {
@@ -151,21 +143,6 @@ function truncate(text: string, limit: number = MAX_OUTPUT): string {
   return text.slice(0, limit) + "\n…(output truncated)";
 }
 
-/** Format a generic list (tools/skills/mcp/plugins). */
-function formatItemList(
-  emoji: string,
-  title: string,
-  items: string[],
-  count: number,
-): string {
-  if (count === 0) return `${emoji} *${title}*\nNothing here yet`;
-  let out = `📋 *${title}* (${count})\n`;
-  for (const item of items) {
-    out += `• ${item}\n`;
-  }
-  return truncate(out);
-}
-
 function formatTools(tools: ToolInfo[]): string {
   const count = tools.length;
   if (count === 0) return "📋 *Registered Tools* (0)\nNo registered tools.";
@@ -202,17 +179,6 @@ function formatSkills(skills: SkillInfo[]): string {
     if (s.description) {
       out += `  ${s.description}\n`;
     }
-  }
-  return truncate(out);
-}
-
-function formatMcpServers(servers: McpServerInfo[]): string {
-  const count = servers.length;
-  if (count === 0) return "📋 *MCP Servers* (0)\nNo MCP servers configured.";
-  let out = `📋 *MCP Servers* (${count})\n`;
-  for (const srv of servers) {
-    const status = srv.disabled ? "🔴" : "🟢";
-    out += `${status} ${srv.name}  [${srv.server_type}] [${srv.source}]\n`;
   }
   return truncate(out);
 }
@@ -639,13 +605,8 @@ const mcpCommand: Command = {
   name: "/mcp",
   description: "List MCP servers",
   async handler(ctx) {
-    const result = await ctx.ipcClient.request<
-      { servers: McpServerInfo[] } | McpServerInfo[]
-    >("listMcpServers");
-    const servers = Array.isArray(result)
-      ? result
-      : ((result as any).servers ?? []);
-    return formatMcpServers(servers);
+    const result = await ctx.ipcClient.request<McpServerList>("listMcpServers");
+    return formatMcpServers(result);
   },
 };
 

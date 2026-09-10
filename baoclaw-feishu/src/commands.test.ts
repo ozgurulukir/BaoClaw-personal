@@ -1,4 +1,4 @@
-/** Contract tests for the feishu /search /export /spec /tasks commands
+/** Contract tests for the feishu /search /export /spec /tasks /mcp commands
  * against the daemon's current RPC response shapes. */
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -196,4 +196,26 @@ test("/task_stop sends task_id and honors the stopped flag", async () => {
   assert.equal(ipc.calls[0].method, "taskStop");
   assert.deepEqual(ipc.calls[0].params, { task_id: "t-9" });
   assert.match(out!, /not running or not found/);
+});
+
+test("/mcp renders the shared formatter with live runtime state", async () => {
+  const ipc = mockIpcClient(() => ({
+    servers: [
+      {
+        name: "demo",
+        server_type: "stdio",
+        disabled: false,
+        source: "project",
+        config_path: "/tmp/mcp.json",
+        runtime: { state: "ready", tool_count: 3 },
+      },
+    ],
+    count: 1,
+  }));
+  const out = await dispatch("/mcp", ipc);
+  assert.equal(ipc.calls[0].method, "listMcpServers");
+  assert.equal(ipc.calls[0].params, undefined);
+  assert.match(out!, /🟢 demo/);
+  assert.match(out!, /ready — 3 tools/);
+  assert.doesNotMatch(out!, /undefined/);
 });

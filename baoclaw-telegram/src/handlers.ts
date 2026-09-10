@@ -14,6 +14,7 @@ import {
   formatToolHealth,
   type ControlChannel,
   type DaemonInfo,
+  type McpRefreshResult,
   type McpServerList,
   type SearchResult,
   type ToolHealthData,
@@ -150,7 +151,7 @@ export function createCommandHandlers(
         }
         // Server names may contain spaces; the daemon matches the full name.
         const target = rest.join(" ");
-        await ipcClient.request<McpServerList>("mcpRefresh", {
+        await ipcClient.request<McpRefreshResult>("mcpRefresh", {
           server: target || null,
         });
         await new Promise((r) => setTimeout(r, MCP_REFRESH_SETTLE_MS));
@@ -169,6 +170,20 @@ export function createCommandHandlers(
         "listPlugins",
       );
       return formatPlugins(result.plugins, result.count);
+    } catch (err) {
+      return formatError(err);
+    }
+  }
+
+  async function handleRate(args: string): Promise<string> {
+    const rating = args.trim().toLowerCase();
+    if (!["good", "bad", "neutral"].includes(rating)) {
+      return "Usage: /rate <good|bad|neutral>";
+    }
+    if (!ipcClient.connected) return formatDisconnected();
+    try {
+      await ipcClient.request("evolution.rateTrajectory", { rating });
+      return `✅ Rated last interaction: ${rating}`;
     } catch (err) {
       return formatError(err);
     }
@@ -748,6 +763,7 @@ export function createCommandHandlers(
     "/export": async (args, chatId) => handleExport(chatId, args),
     "/search": (args) => handleSearch(args),
     "/spec": (args) => handleSpec(args),
+    "/rate": (args) => handleRate(args),
   };
 
   return commandHandlers;

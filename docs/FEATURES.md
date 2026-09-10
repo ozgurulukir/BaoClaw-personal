@@ -28,7 +28,7 @@ A closed learning loop:
 - **Trajectory recording** — each query logs its prompt, tool actions, outcome (completed/max-turns/aborted), and duration
 - **Skill auto-generation** — complex successful tasks are extracted as reusable skill candidates
 - **Self-evaluation nudge** — every 15 tasks, the agent reflects on patterns and creates/improves skills
-- **User ratings** — `/rate good|bad|neutral` in the CLI records a rating on the last trajectory for preference data (trajectories are written per query with tool actions and outcome)
+- **User ratings** — `/rate good|bad|neutral` in the CLI and Telegram records a rating on the last trajectory for preference data (trajectories are written per query with tool actions and outcome)
 - **Training-data export** — export trajectories as JSONL in a format that can be adapted for DPO/RLHF fine-tuning
 - **Personal evolution** — skills and trajectories are cross-project (`~/.baoclaw/evolution/`)
 - **Evolve tool** — agent can propose, improve, and promote skills; review generated skills before relying on them
@@ -77,7 +77,7 @@ A closed learning loop:
 
 ### 🔌 Extensible
 
-- **MCP client (stdio / HTTP / SSE)** — the daemon connects configured MCP servers at boot (stdio processes and Streamable HTTP / legacy SSE endpoints) and registers their tools as first-class tools named `mcp__<server>__<tool>`; calls execute against the server with auto-reconnect and live catalog refresh (`/mcp refresh`); tools register as deferred stubs (`mcp_deferred_tools`) that expand to full schemas on first use; surfaced via `/mcp [refresh [server]]` with live per-server state (CLI and Telegram) and an MCP panel in the web UI
+- **MCP client (stdio / HTTP / SSE)** — the daemon connects configured MCP servers at boot (stdio processes and Streamable HTTP / legacy SSE endpoints) and registers their tools as first-class tools named `mcp__<server>__<tool>`; calls execute against the server with auto-reconnect and live catalog refresh (`/mcp refresh`); tools register as deferred stubs (`mcp_deferred_tools`) that expand to full schemas on first use; `/mcp` shows live per-server state in the CLI and every chat gateway (`/mcp refresh [server]` in the CLI and Telegram), plus an MCP panel in the web UI
 - **Skills** — markdown-based skill files loaded into system prompt (personal + project scope)
 - **Plugins** — directory-based plugin system with tools, skills, and MCP configs
 - **Many LLM models** — Anthropic native + compatible OpenAI-style APIs (OpenRouter, Ollama, vLLM, etc.)

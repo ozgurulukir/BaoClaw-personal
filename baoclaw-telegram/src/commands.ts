@@ -82,14 +82,20 @@ export interface SessionState {
 // ═══════════════════════════════════════════════════════════════
 
 export interface CommandDefinition {
+  /** Bot-menu text — Telegram caps setMyCommands descriptions at 32 chars. */
   description: string;
+  /** Richer usage line shown by /help when the menu text is too tight. */
+  usage?: string;
 }
 
 export const COMMAND_REGISTRY: Record<string, CommandDefinition> = {
   "/tools": { description: "List registered tools" },
   "/health": { description: "Tool health: /health [all]" },
   "/skills": { description: "List loaded skills" },
-  "/mcp": { description: "MCP servers: /mcp [refresh [server]]" },
+  "/mcp": {
+    description: "MCP servers (live state)",
+    usage: "MCP servers: /mcp [refresh [server]]",
+  },
   "/plugins": { description: "List installed plugins" },
   "/compact": { description: "Compact the conversation context" },
   "/think": { description: "Toggle extended thinking mode" },
@@ -104,21 +110,42 @@ export const COMMAND_REGISTRY: Record<string, CommandDefinition> = {
   "/clear": { description: "Clear the session" },
   "/shutdown": { description: "Shut down the daemon" },
   "/quit": {
-    description: "Disconnect the Telegram gateway (daemon keeps running)",
+    description: "Disconnect gateway; daemon stays",
+    usage: "Disconnect the Telegram gateway (daemon keeps running)",
   },
   "/memory": { description: "Manage long-term memory" },
-  "/cron": { description: "Cron jobs: /cron add|list|remove|toggle" },
+  "/cron": {
+    description: "Scheduled cron jobs",
+    usage: "Cron jobs: /cron add|list|remove|toggle",
+  },
   "/projects": {
-    description: "Projects: /projects list|<id>|new <path> [desc]",
+    description: "Manage projects",
+    usage: "Projects: /projects list|<id>|new <path> [desc]",
   },
-  "/task": { description: "Background tasks: /task run|list|status|stop" },
-  "/history": { description: "Recent conversation: /history [n]" },
+  "/task": {
+    description: "Background tasks",
+    usage: "Background tasks: /task run|list|status|stop",
+  },
+  "/history": {
+    description: "Recent conversation",
+    usage: "Recent conversation: /history [n]",
+  },
   "/export": {
-    description: "Export conversation as Markdown or PDF (/export pdf)",
+    description: "Export the conversation",
+    usage: "Export conversation as Markdown or PDF (/export pdf)",
   },
-  "/search": { description: "Search conversation history: /search <query>" },
-  "/spec": { description: "Specs: /spec list|new|show|status|run|edit" },
-  "/rate": { description: "Rate the last interaction: /rate good|bad|neutral" },
+  "/search": {
+    description: "Search conversation history",
+    usage: "Search conversation history: /search <query>",
+  },
+  "/spec": {
+    description: "Spec workflow",
+    usage: "Specs: /spec list|new|show|status|run|edit",
+  },
+  "/rate": {
+    description: "Rate the last reply",
+    usage: "Rate the last interaction: /rate good|bad|neutral",
+  },
 };
 
 // ═══════════════════════════════════════════════════════════════
@@ -364,7 +391,7 @@ export function formatDisconnected(): string {
  * Format help output listing all commands with descriptions.
  */
 export function formatHelp(
-  registry: Record<string, { description: string }>,
+  registry: Record<string, { description: string; usage?: string }>,
 ): string {
   // Group commands by category for cleaner display
   const groups: Record<string, string[]> = {
@@ -395,7 +422,7 @@ export function formatHelp(
     out += `${group}\n`;
     for (const cmd of cmds) {
       const def = registry[cmd];
-      if (def) out += `  ${cmd} — ${def.description}\n`;
+      if (def) out += `  ${cmd} — ${def.usage ?? def.description}\n`;
     }
     out += "\n";
   }
@@ -407,7 +434,7 @@ export function formatHelp(
   );
   if (ungrouped.length > 0) {
     for (const [cmd, def] of ungrouped) {
-      out += `${cmd} — ${def.description}\n`;
+      out += `${cmd} — ${def.usage ?? def.description}\n`;
     }
   }
 

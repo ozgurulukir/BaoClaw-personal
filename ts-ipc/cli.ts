@@ -2576,7 +2576,9 @@ async function main() {
             // fall back to the static disabled flag for older daemons.
             const state = srv.runtime?.state;
             const inactive =
-              state === "skipped" || state === "requires_restart";
+              state === "skipped" ||
+              state === "requires_restart" ||
+              state === "disabled_by_config";
             const statusIcon = state
               ? state === "ready"
                 ? `${FG_GREEN}●${RESET}`

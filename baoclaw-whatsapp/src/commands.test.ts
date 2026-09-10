@@ -1,6 +1,6 @@
 /** Contract tests for the automation command family (/task, /tasks,
- * /task_stop, /history) against the daemon's taskCreate/taskStop/taskList/
- * talkTail RPC shapes. */
+ * /task_stop, /history) and /mcp against the daemon's taskCreate/taskStop/
+ * taskList/talkTail/listMcpServers RPC shapes. */
 import test from "node:test";
 import assert from "node:assert/strict";
 import { dispatchCommand, type CommandContext } from "./commands.js";
@@ -120,4 +120,26 @@ test("/task with no args shows usage, no RPC", async () => {
   const out = await dispatchCommand(makeCtx("/task", ipc));
   assert.match(out!, /Usage/);
   assert.equal(ipc.calls.length, 0);
+});
+
+test("/mcp renders the shared formatter with live runtime state", async () => {
+  const ipc = mockIpcClient(() => ({
+    servers: [
+      {
+        name: "demo",
+        server_type: "stdio",
+        disabled: false,
+        source: "project",
+        config_path: "/tmp/mcp.json",
+        runtime: { state: "ready", tool_count: 3 },
+      },
+    ],
+    count: 1,
+  }));
+  const out = await dispatchCommand(makeCtx("/mcp", ipc));
+  assert.equal(ipc.calls[0].method, "listMcpServers");
+  assert.equal(ipc.calls[0].params, undefined);
+  assert.match(out!, /🟢 demo/);
+  assert.match(out!, /ready — 3 tools/);
+  assert.doesNotMatch(out!, /undefined/);
 });
