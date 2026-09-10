@@ -10,9 +10,11 @@ import * as path from "path";
 import {
   DaemonConnector,
   IpcClient,
+  formatMcpServers,
   formatToolHealth,
   type ControlChannel,
   type DaemonInfo,
+  type McpServerList,
   type SearchResult,
   type ToolHealthData,
 } from "baoclaw-ipc";
@@ -22,7 +24,6 @@ import {
   COMMAND_REGISTRY,
   formatTools,
   formatSkills,
-  formatMcpServers,
   formatPlugins,
   formatCompact,
   formatGitStatus,
@@ -135,13 +136,27 @@ export function createCommandHandlers(
     }
   }
 
-  async function handleMcp(): Promise<string> {
+  // mcpRefresh replies with the pre-refresh snapshot; reconnects settle async.
+  const MCP_REFRESH_SETTLE_MS = 2000;
+
+  async function handleMcp(args: string): Promise<string> {
     if (!ipcClient.connected) return formatDisconnected();
     try {
-      const result = await ipcClient.request<{ servers: any[]; count: number }>(
-        "listMcpServers",
-      );
-      return formatMcpServers(result.servers, result.count);
+      const requestArgs = args.trim();
+      if (requestArgs) {
+        const [verb, ...rest] = requestArgs.split(/\s+/);
+        if (verb !== "refresh") {
+          return `Unknown argument: ${verb} — usage: /mcp [refresh [server]]`;
+        }
+        // Server names may contain spaces; the daemon matches the full name.
+        const target = rest.join(" ");
+        await ipcClient.request<McpServerList>("mcpRefresh", {
+          server: target || null,
+        });
+        await new Promise((r) => setTimeout(r, MCP_REFRESH_SETTLE_MS));
+      }
+      const result = await ipcClient.request<McpServerList>("listMcpServers");
+      return formatMcpServers(result);
     } catch (err) {
       return formatError(err);
     }
@@ -710,7 +725,7 @@ export function createCommandHandlers(
     "/tools": (args) => handleTools(),
     "/health": (args) => handleHealth(args),
     "/skills": (args) => handleSkills(),
-    "/mcp": (args) => handleMcp(),
+    "/mcp": (args) => handleMcp(args),
     "/plugins": (args) => handlePlugins(),
     "/compact": (args) => handleCompact(),
     "/think": (args) => handleThink(),

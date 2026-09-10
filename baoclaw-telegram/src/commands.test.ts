@@ -1,4 +1,4 @@
-import { test, describe } from "node:test";
+import { test, describe, mock } from "node:test";
 import assert from "node:assert/strict";
 import {
   COMMAND_REGISTRY,
@@ -33,20 +33,120 @@ describe("Telegram /health command", () => {
   });
 });
 
-describe("/search contract", () => {
-  /** Minimal IpcClient double: records calls, replies by method. */
-  function mockIpcClient(respond: (method: string) => unknown) {
-    const calls: Array<{ method: string; params: unknown }> = [];
-    return {
-      calls,
-      connected: true,
-      async request<T>(method: string, params?: unknown): Promise<T> {
-        calls.push({ method, params });
-        return respond(method) as T;
-      },
-    };
-  }
+/** Minimal IpcClient double: records calls, replies by method. */
+function mockIpcClient(respond: (method: string) => unknown) {
+  const calls: Array<{ method: string; params: unknown }> = [];
+  return {
+    calls,
+    connected: true,
+    async request<T>(method: string, params?: unknown): Promise<T> {
+      calls.push({ method, params });
+      return respond(method) as T;
+    },
+  };
+}
 
+async function buildHandlers(ipc: ReturnType<typeof mockIpcClient>) {
+  const { createCommandHandlers } = await import("./handlers.js");
+  return createCommandHandlers({
+    ipcClient: ipc as never,
+    control: {},
+    daemonInfo: {
+      pid: 1,
+      session_id: "s",
+      cwd: "/tmp",
+      startTime: 0,
+      logFile: "",
+      name: "t",
+    },
+    botUsername: "testbot",
+    sessionState: { resumed: false, messageCount: 0, sessionId: "s" },
+    daemonConnector: {},
+    sendDocument: async () => {},
+    quitGateway: () => {},
+  } as never);
+}
+
+describe("Telegram /mcp command", () => {
+  test("is registered with the refresh usage", () => {
+    assert.equal(isRegisteredCommand("/mcp"), true);
+    assert.match(COMMAND_REGISTRY["/mcp"].description, /refresh \[server\]/);
+  });
+
+  const readyList = {
+    servers: [
+      {
+        name: "demo",
+        server_type: "stdio",
+        disabled: false,
+        source: "project",
+        config_path: "/tmp/mcp.json",
+        runtime: { state: "ready", tool_count: 3 },
+      },
+    ],
+    count: 1,
+  };
+
+  test("handler lists live runtime state via listMcpServers", async () => {
+    const ipc = mockIpcClient(() => readyList);
+    const handlers = await buildHandlers(ipc);
+    const out = await handlers["/mcp"]("", 1);
+    assert.equal(ipc.calls[0].method, "listMcpServers");
+    assert.equal(ipc.calls[0].params, undefined);
+    assert.match(out!, /🟢 demo/);
+    assert.match(out!, /ready — 3 tools/);
+    assert.doesNotMatch(out!, /undefined/);
+  });
+
+  test("refresh kicks mcpRefresh then re-lists the settled state", async () => {
+    mock.timers.enable({ apis: ["setTimeout"] });
+    try {
+      const ipc = mockIpcClient((method) =>
+        method === "mcpRefresh" ? { servers: [], count: 0 } : readyList,
+      );
+      const handlers = await buildHandlers(ipc);
+      const pending = handlers["/mcp"]("refresh my server", 1);
+      // Let the handler reach its settle timer before advancing mocked time.
+      await new Promise((r) => setImmediate(r));
+      mock.timers.tick(2000);
+      const out = await pending;
+      assert.equal(ipc.calls[0].method, "mcpRefresh");
+      assert.deepEqual(ipc.calls[0].params, { server: "my server" });
+      assert.equal(ipc.calls[1].method, "listMcpServers");
+      assert.match(out!, /ready — 3 tools/);
+    } finally {
+      mock.timers.reset();
+    }
+  });
+
+  test("refresh without a target refreshes every server", async () => {
+    mock.timers.enable({ apis: ["setTimeout"] });
+    try {
+      const ipc = mockIpcClient((method) =>
+        method === "mcpRefresh" ? { servers: [], count: 0 } : readyList,
+      );
+      const handlers = await buildHandlers(ipc);
+      const pending = handlers["/mcp"]("refresh", 1);
+      // Let the handler reach its settle timer before advancing mocked time.
+      await new Promise((r) => setImmediate(r));
+      mock.timers.tick(2000);
+      await pending;
+      assert.deepEqual(ipc.calls[0].params, { server: null });
+    } finally {
+      mock.timers.reset();
+    }
+  });
+
+  test("unknown subcommands return usage without an RPC", async () => {
+    const ipc = mockIpcClient(() => readyList);
+    const handlers = await buildHandlers(ipc);
+    const out = await handlers["/mcp"]("bogus", 1);
+    assert.match(out!, /usage: \/mcp \[refresh \[server\]\]/);
+    assert.equal(ipc.calls.length, 0);
+  });
+});
+
+describe("/search contract", () => {
   test("formatters use the daemon shapes (no entry_type/context)", () => {
     const rows = [
       {
@@ -74,7 +174,6 @@ describe("/search contract", () => {
   });
 
   test("handler unwraps the {results} envelope via the dispatch table", async () => {
-    const { createCommandHandlers } = await import("./handlers.js");
     const ipc = mockIpcClient(() => ({
       results: [
         {
@@ -86,23 +185,7 @@ describe("/search contract", () => {
       ],
       count: 1,
     }));
-    const handlers = createCommandHandlers({
-      ipcClient: ipc as never,
-      control: {},
-      daemonInfo: {
-        pid: 1,
-        session_id: "s",
-        cwd: "/tmp",
-        startTime: 0,
-        logFile: "",
-        name: "t",
-      },
-      botUsername: "testbot",
-      sessionState: { resumed: false, messageCount: 0, sessionId: "s" },
-      daemonConnector: {},
-      sendDocument: async () => {},
-      quitGateway: () => {},
-    } as never);
+    const handlers = await buildHandlers(ipc);
     const out = await handlers["/search"]("probe", 1);
     assert.equal(ipc.calls[0].method, "searchHistory");
     assert.deepEqual((ipc.calls[0].params as { query: string }).query, "probe");

@@ -26,16 +26,6 @@ export interface SkillInfo {
   description?: string;
 }
 
-export interface McpServerInfo {
-  name: string;
-  server_type: string; // 'stdio' | 'sse'
-  disabled: boolean;
-  source: string;
-  command?: string;
-  url?: string;
-  config_path: string;
-}
-
 export interface PluginInfo {
   name: string;
   version?: string;
@@ -99,7 +89,7 @@ export const COMMAND_REGISTRY: Record<string, CommandDefinition> = {
   "/tools": { description: "List registered tools" },
   "/health": { description: "Tool health: /health [all]" },
   "/skills": { description: "List loaded skills" },
-  "/mcp": { description: "List MCP servers" },
+  "/mcp": { description: "MCP servers: /mcp [refresh [server]]" },
   "/plugins": { description: "List installed plugins" },
   "/compact": { description: "Compact the conversation context" },
   "/think": { description: "Toggle extended thinking mode" },
@@ -208,22 +198,6 @@ export function formatSkills(skills: SkillInfo[], count: number): string {
     if (s.description) {
       out += `  ${s.description}\n`;
     }
-  }
-  return out;
-}
-
-/**
- * Format a list of MCP servers as plain text.
- */
-export function formatMcpServers(
-  servers: McpServerInfo[],
-  count: number,
-): string {
-  if (count === 0) return "No MCP servers configured.";
-  let out = `🌐 MCP Servers (${count})\n\n`;
-  for (const srv of servers) {
-    const status = srv.disabled ? "🔴" : "🟢";
-    out += `${status} ${srv.name}  [${srv.server_type}] [${srv.source}]\n`;
   }
   return out;
 }

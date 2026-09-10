@@ -682,36 +682,36 @@ baoclaw
 
 ## 完整命令列表
 
-| 命令             | 说明                                          |
-| ---------------- | --------------------------------------------- |
-| `/projects`      | 项目管理：list, <id>, new <路径> [描述], desc |
-| `/tools`         | 列出已注册的工具                              |
-| `/mcp`           | 列出 MCP 服务器                               |
-| `/skills`        | 列出已加载的技能                              |
-| `/plugins`       | 列出已安装的插件                              |
-| `/model [名称]`  | 查看或切换模型                                |
-| `/think`         | 切换扩展思考模式                              |
-| `/compact`       | 压缩对话上下文                                |
-| `/memory`        | 长期记忆：list, add, delete, clear            |
-| `/cron`          | 定时任务：add, list, remove, toggle           |
-| `/diff`          | 查看 git diff                                 |
-| `/commit <消息>` | 暂存并提交                                    |
-| `/git`           | 查看 git 状态                                 |
-| `/task`          | 后台任务：run, list, status, stop             |
-| `/tasks`         | `/task` 的完整别名                            |
-| `/spec`          | 规格工作流：list、new、show、status、run      |
-| `/search`        | 搜索对话历史：/search <查询>                  |
-| `/export`        | 导出会话记录为 Markdown                       |
-| `/status`        | 守护进程连接与会话概览                        |
-| `/voice`         | 语音输入（需要 whisper.cpp）                  |
-| `/telegram`      | 管理 Telegram 网关                            |
-| `/telemetry`     | 遥测：status、on/off、stats、trends、export   |
-| `@file.pdf`      | 附加文件进行问答                              |
-| `/abort`         | 取消当前请求（或按 Ctrl+C）                   |
-| `/clear`         | 清屏                                          |
-| `/help`          | 显示所有命令                                  |
-| `/quit`          | 断开连接（守护进程保持运行）                  |
-| `/shutdown`      | 停止守护进程                                  |
+| 命令                      | 说明                                          |
+| ------------------------- | --------------------------------------------- |
+| `/projects`               | 项目管理：list, <id>, new <路径> [描述], desc |
+| `/tools`                  | 列出已注册的工具                              |
+| `/mcp [refresh [服务器]]` | 列出 MCP 服务器（实时状态）· 刷新/重连        |
+| `/skills`                 | 列出已加载的技能                              |
+| `/plugins`                | 列出已安装的插件                              |
+| `/model [名称]`           | 查看或切换模型                                |
+| `/think`                  | 切换扩展思考模式                              |
+| `/compact`                | 压缩对话上下文                                |
+| `/memory`                 | 长期记忆：list, add, delete, clear            |
+| `/cron`                   | 定时任务：add, list, remove, toggle           |
+| `/diff`                   | 查看 git diff                                 |
+| `/commit <消息>`          | 暂存并提交                                    |
+| `/git`                    | 查看 git 状态                                 |
+| `/task`                   | 后台任务：run, list, status, stop             |
+| `/tasks`                  | `/task` 的完整别名                            |
+| `/spec`                   | 规格工作流：list、new、show、status、run      |
+| `/search`                 | 搜索对话历史：/search <查询>                  |
+| `/export`                 | 导出会话记录为 Markdown                       |
+| `/status`                 | 守护进程连接与会话概览                        |
+| `/voice`                  | 语音输入（需要 whisper.cpp）                  |
+| `/telegram`               | 管理 Telegram 网关                            |
+| `/telemetry`              | 遥测：status、on/off、stats、trends、export   |
+| `@file.pdf`               | 附加文件进行问答                              |
+| `/abort`                  | 取消当前请求（或按 Ctrl+C）                   |
+| `/clear`                  | 清屏                                          |
+| `/help`                   | 显示所有命令                                  |
+| `/quit`                   | 断开连接（守护进程保持运行）                  |
+| `/shutdown`               | 停止守护进程                                  |
 
 ## 定时任务示例
 

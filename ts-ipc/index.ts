@@ -26,3 +26,10 @@ export {
   type FormatSearchResultsOptions,
   type SearchResult,
 } from "./search.js";
+export {
+  formatMcpServers,
+  type McpRefreshResult,
+  type McpServerInfo,
+  type McpServerList,
+  type McpServerRuntime,
+} from "./mcp.js";

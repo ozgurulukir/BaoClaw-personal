@@ -18,6 +18,7 @@ import {
 } from "./daemon.js";
 import { formatToolHealth, type ToolHealthData } from "./toolHealth.js";
 import type { SearchResult } from "./search.js";
+import type { McpRefreshResult, McpServerList } from "./mcp.js";
 import * as fs from "fs";
 import * as os from "os";
 // @ts-ignore — pdf-parse and mammoth loaded dynamically for CJS compat
@@ -2545,13 +2546,9 @@ async function main() {
             return;
           }
           const target = rest.join(" ");
-          const result = await client.request<{
-            servers: Array<{
-              name: string;
-              runtime?: { state: string; reason?: string };
-            }>;
-            count: number;
-          }>("mcpRefresh", { server: target || null });
+          const result = await client.request<McpRefreshResult>("mcpRefresh", {
+            server: target || null,
+          });
           console.log(
             `\n${FG_ORANGE}${BOLD}MCP refresh requested${RESET} ${DIM}(${result.count})${RESET}\n`,
           );
@@ -2564,25 +2561,7 @@ async function main() {
           rl.prompt();
           return;
         }
-        const result = await client.request<{
-          servers: Array<{
-            name: string;
-            command?: string;
-            args?: string[];
-            server_type: string;
-            url?: string;
-            disabled: boolean;
-            source: string;
-            config_path: string;
-            runtime?: {
-              state: string;
-              tool_count?: number;
-              restarts?: number;
-              reason?: string;
-            };
-          }>;
-          count: number;
-        }>("listMcpServers");
+        const result = await client.request<McpServerList>("listMcpServers");
         if (result.count === 0) {
           console.log(`\n${DIM}No MCP servers configured.${RESET}`);
           console.log(

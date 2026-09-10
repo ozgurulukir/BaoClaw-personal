@@ -77,7 +77,7 @@ A closed learning loop:
 
 ### 🔌 Extensible
 
-- **MCP client (stdio / HTTP / SSE)** — the daemon connects configured MCP servers at boot (stdio processes and Streamable HTTP / legacy SSE endpoints) and registers their tools as first-class tools named `mcp__<server>__<tool>`; calls execute against the server with auto-reconnect and live catalog refresh (`/mcp refresh`); tools register as deferred stubs (`mcp_deferred_tools`) that expand to full schemas on first use
+- **MCP client (stdio / HTTP / SSE)** — the daemon connects configured MCP servers at boot (stdio processes and Streamable HTTP / legacy SSE endpoints) and registers their tools as first-class tools named `mcp__<server>__<tool>`; calls execute against the server with auto-reconnect and live catalog refresh (`/mcp refresh`); tools register as deferred stubs (`mcp_deferred_tools`) that expand to full schemas on first use; surfaced via `/mcp [refresh [server]]` with live per-server state (CLI and Telegram) and an MCP panel in the web UI
 - **Skills** — markdown-based skill files loaded into system prompt (personal + project scope)
 - **Plugins** — directory-based plugin system with tools, skills, and MCP configs
 - **Many LLM models** — Anthropic native + compatible OpenAI-style APIs (OpenRouter, Ollama, vLLM, etc.)
@@ -259,57 +259,58 @@ loop — each carries an inline status note and a tracking issue.
 
 ### CLI Commands
 
-| Command         | Description                                  |
-| --------------- | -------------------------------------------- |
-| `/projects`     | Project management: list, switch, new, desc  |
-| `/tools`        | List registered tools                        |
-| `/mcp`          | List MCP servers                             |
-| `/skills`       | List loaded skills                           |
-| `/plugins`      | List installed plugins                       |
-| `/model [name]` | Show or switch model                         |
-| `/think`        | Toggle extended thinking mode                |
-| `/compact`      | Compress conversation context                |
-| `/memory`       | Long-term memory: list, add, delete, clear   |
-| `/cron`         | Scheduled tasks: add, list, remove, toggle   |
-| `/diff`         | Git diff summary                             |
-| `/commit <msg>` | Stage all and commit                         |
-| `/git`          | Git status (branch, changes)                 |
-| `/task`         | Background tasks: run, list, status, stop    |
-| `/tasks`        | Full alias of `/task`                        |
-| `/spec`         | Spec workflow: list, new, show, status, run  |
-| `/search`       | Search conversation history: /search <query> |
-| `/export [p]`   | Export transcript to Markdown                |
-| `/status`       | Daemon connection & session overview         |
-| `/voice`        | Voice input (requires whisper.cpp)           |
-| `/telegram`     | Manage Telegram gateway: start, stop, status |
-| `/telemetry`    | Telemetry: status, on/off, stats, trends     |
-| `@file.pdf`     | Attach file for Q&A (PDF, DOCX, images)      |
-| `/abort`        | Cancel current request (or press Ctrl+C)     |
-| `/clear`        | Clear screen                                 |
-| `/help`         | Show all commands                            |
-| `/quit`         | Disconnect (daemon keeps running)            |
-| `/shutdown`     | Stop the daemon process                      |
+| Command                   | Description                                     |
+| ------------------------- | ----------------------------------------------- |
+| `/projects`               | Project management: list, switch, new, desc     |
+| `/tools`                  | List registered tools                           |
+| `/mcp [refresh [server]]` | List MCP servers · refresh/reconnect one or all |
+| `/skills`                 | List loaded skills                              |
+| `/plugins`                | List installed plugins                          |
+| `/model [name]`           | Show or switch model                            |
+| `/think`                  | Toggle extended thinking mode                   |
+| `/compact`                | Compress conversation context                   |
+| `/memory`                 | Long-term memory: list, add, delete, clear      |
+| `/cron`                   | Scheduled tasks: add, list, remove, toggle      |
+| `/diff`                   | Git diff summary                                |
+| `/commit <msg>`           | Stage all and commit                            |
+| `/git`                    | Git status (branch, changes)                    |
+| `/task`                   | Background tasks: run, list, status, stop       |
+| `/tasks`                  | Full alias of `/task`                           |
+| `/spec`                   | Spec workflow: list, new, show, status, run     |
+| `/search`                 | Search conversation history: /search <query>    |
+| `/export [p]`             | Export transcript to Markdown                   |
+| `/status`                 | Daemon connection & session overview            |
+| `/voice`                  | Voice input (requires whisper.cpp)              |
+| `/telegram`               | Manage Telegram gateway: start, stop, status    |
+| `/telemetry`              | Telemetry: status, on/off, stats, trends        |
+| `@file.pdf`               | Attach file for Q&A (PDF, DOCX, images)         |
+| `/abort`                  | Cancel current request (or press Ctrl+C)        |
+| `/clear`                  | Clear screen                                    |
+| `/help`                   | Show all commands                               |
+| `/quit`                   | Disconnect (daemon keeps running)               |
+| `/shutdown`               | Stop the daemon process                         |
 
 ### Telegram Commands
 
 The following CLI commands are also available in Telegram:
 
-| Command                              | Description                                 |
-| ------------------------------------ | ------------------------------------------- |
-| `/tools` `/skills` `/mcp` `/plugins` | List resources                              |
-| `/model [name]`                      | Show or switch model                        |
-| `/think`                             | Toggle extended thinking                    |
-| `/compact`                           | Compress context                            |
-| `/memory`                            | Manage memories                             |
-| `/cron`                              | Manage scheduled tasks                      |
-| `/projects`                          | Project management: list, switch, new, desc |
-| `/task`                              | Manage background tasks                     |
-| `/diff` `/commit` `/git`             | Git operations                              |
-| `/clear`                             | Clear the conversation history              |
-| `/abort`                             | Cancel current task                         |
-| `/status`                            | Gateway status                              |
-| `/help`                              | Show all commands                           |
-| 📎 Upload file                       | Send PDF/DOCX/image for Q&A                 |
+| Command                       | Description                                 |
+| ----------------------------- | ------------------------------------------- |
+| `/tools` `/skills` `/plugins` | List resources                              |
+| `/mcp [refresh [server]]`     | MCP servers with live state · refresh       |
+| `/model [name]`               | Show or switch model                        |
+| `/think`                      | Toggle extended thinking                    |
+| `/compact`                    | Compress context                            |
+| `/memory`                     | Manage memories                             |
+| `/cron`                       | Manage scheduled tasks                      |
+| `/projects`                   | Project management: list, switch, new, desc |
+| `/task`                       | Manage background tasks                     |
+| `/diff` `/commit` `/git`      | Git operations                              |
+| `/clear`                      | Clear the conversation history              |
+| `/abort`                      | Cancel current task                         |
+| `/status`                     | Gateway status                              |
+| `/help`                       | Show all commands                           |
+| 📎 Upload file                | Send PDF/DOCX/image for Q&A                 |
 
 ### Telegram Setup
 

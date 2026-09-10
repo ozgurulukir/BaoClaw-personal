@@ -1851,6 +1851,114 @@ window.panelCronRemove = function (id) {
   panelBody.innerHTML = '<div class="panel-empty">Removing...</div>';
 };
 
+// ── 7.6 MCP Servers Panel ──
+// Plain script: cannot import ts-ipc/mcp.ts — the state→color grouping
+// must stay field-compatible with mcp.ts's statusGlyph semantics.
+let mcpRelistTimer = null;
+// Rows currently rendered; row buttons pass the index (server names can
+// contain quotes that esc() does not JS-escape for inline handlers).
+let mcpPanelServers = [];
+
+$("btn-mcp").onclick = () => {
+  clearTimeout(mcpRelistTimer);
+  mcpRelistTimer = null;
+  openPanel(
+    "🔌 MCP Servers",
+    '<div id="panel-mcp-info" class="panel-empty">Loading...</div>' +
+      '<div style="margin-top:12px;border-top:1px solid var(--border);padding-top:12px">' +
+      '<button id="panel-mcp-refresh-all">Refresh All</button>' +
+      '<span id="panel-mcp-status" style="margin-left:8px;color:var(--text-dim)"></span></div>',
+  );
+  $("panel-mcp-refresh-all").onclick = () => requestMcpRefresh(null);
+  panelRpc("listMcpServers"); // no params: unit-variant RPC (see panelRpc)
+};
+
+function mcpStateColor(state) {
+  if (state === "ready") return "var(--green)";
+  if (state === "connecting") return "var(--accent)";
+  if (state === "failed" || state === "disconnected") return "var(--red)";
+  return "var(--text-dim)"; // skipped / requires_restart / disabled_by_config
+}
+
+function renderMcpPanel(data) {
+  const el = $("panel-mcp-info");
+  if (!el) return; // panel closed or content replaced mid-settle
+  const st = $("panel-mcp-status");
+  if (st) st.textContent = "";
+  if (data.error) {
+    el.innerHTML = panelError(data.error);
+    return;
+  }
+  mcpPanelServers = data.servers || [];
+  const rows = mcpPanelServers
+    .map((s, i) => {
+      const rt = s.runtime || {};
+      const state = rt.state || null;
+      const color = state
+        ? mcpStateColor(state)
+        : s.disabled
+          ? "var(--text-dim)"
+          : "var(--green)";
+      const cmd = s.command
+        ? (s.command + " " + (s.args || []).join(" ")).trim()
+        : "";
+      const target = cmd || s.url || "";
+      const meta = [];
+      if (state) meta.push(state);
+      if (rt.tool_count) meta.push(rt.tool_count + " tools");
+      if (rt.restarts) meta.push(rt.restarts + " restarts");
+      if (rt.reason) meta.push(rt.reason);
+      let h =
+        '<div class="panel-item"><div class="panel-item-text"><div>' +
+        '<span style="color:' +
+        color +
+        '">●</span> <b>' +
+        esc(s.name) +
+        "</b>" +
+        ' <span style="color:var(--text-dim)">[' +
+        esc(s.server_type) +
+        "] [" +
+        esc(s.source) +
+        "]</span></div>";
+      if (target)
+        h +=
+          '<div class="panel-item-id">' +
+          esc(target.length > 60 ? target.slice(0, 60) + "…" : target) +
+          "</div>";
+      if (meta.length)
+        h += '<div class="panel-item-id">' + esc(meta.join(" — ")) + "</div>";
+      h +=
+        '</div><div class="panel-item-actions"><button class="btn-secondary" onclick="panelMcpRefresh(' +
+        i +
+        ')">Refresh</button></div></div>';
+      return h;
+    })
+    .join("");
+  el.innerHTML =
+    rows || '<div class="panel-empty">No MCP servers configured</div>';
+}
+
+// mcpRefresh replies with the PRE-refresh snapshot; re-list once states settle.
+function requestMcpRefresh(name) {
+  panelRpc("mcpRefresh", { server: name });
+  const st = $("panel-mcp-status");
+  if (st)
+    st.textContent = name
+      ? "Refreshing " + name + "…"
+      : "Refreshing all servers…";
+  clearTimeout(mcpRelistTimer);
+  mcpRelistTimer = setTimeout(() => {
+    mcpRelistTimer = null;
+    if (panelOverlay.classList.contains("hidden")) return;
+    if (!$("panel-mcp-info")) return; // another panel replaced the content
+    panelRpc("listMcpServers");
+  }, 2000);
+}
+window.panelMcpRefresh = function (i) {
+  const s = mcpPanelServers[i];
+  if (s) requestMcpRefresh(s.name);
+};
+
 // ── 7.7 Background Tasks Panel ──
 $("btn-tasks").onclick = () => {
   openPanel("📋 Background Tasks", '<div class="panel-empty">Loading...</div>');
@@ -2093,6 +2201,16 @@ handleTabMessage = function (tab, msg) {
       renderTasksPanel(data.tasks || data.items || []);
     } else if (method === "taskCreate" || method === "taskStop") {
       panelRpc("taskList");
+    } else if (method === "listMcpServers") {
+      renderMcpPanel(data);
+    } else if (method === "mcpRefresh") {
+      // The relist timer was scheduled at request time; surface the result.
+      const st = $("panel-mcp-status");
+      if (st) {
+        if (data.error) st.innerHTML = panelError(data.error);
+        else
+          st.textContent = "Refresh requested — waiting for states to settle…";
+      }
     } else if (method === "projectsNew") {
       const el = $("panel-proj-result");
       if (el) {
