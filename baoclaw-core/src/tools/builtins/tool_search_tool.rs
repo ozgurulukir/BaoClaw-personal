@@ -2,16 +2,27 @@ use async_trait::async_trait;
 use serde_json::{json, Value};
 use std::sync::Arc;
 
+use crate::tools::registry::{ToolRegistryHandle, ToolSource};
 use crate::tools::trait_def::*;
 
 /// Tool search — searches available tools by name, description, and aliases
 pub struct ToolSearchTool {
-    tools: Vec<Arc<dyn Tool>>,
+    tools: ToolSource,
 }
 
 impl ToolSearchTool {
     pub fn new(tools: Vec<Arc<dyn Tool>>) -> Self {
-        Self { tools }
+        Self {
+            tools: ToolSource::Static(tools),
+        }
+    }
+
+    /// Live-catalog variant: searches always reflect the current registry
+    /// (minus this tool itself).
+    pub fn with_registry(registry: ToolRegistryHandle) -> Self {
+        Self {
+            tools: ToolSource::Registry(registry),
+        }
     }
 }
 
@@ -63,8 +74,8 @@ impl Tool for ToolSearchTool {
             .ok_or_else(|| ToolError::ExecutionFailed("Missing 'query'".to_string()))?
             .to_lowercase();
 
-        let matches: Vec<Value> = self
-            .tools
+        let tools = self.tools.resolve_without(&["ToolSearchTool"]);
+        let matches: Vec<Value> = tools
             .iter()
             .filter(|t| {
                 t.name().to_lowercase().contains(&query)
@@ -74,11 +85,20 @@ impl Tool for ToolSearchTool {
                         .any(|a| a.to_lowercase().contains(&query))
             })
             .map(|t| {
-                json!({
+                let mut entry = json!({
                     "name": t.name(),
                     "description": t.prompt(),
                     "aliases": t.aliases(),
-                })
+                });
+                // Deferred tools are advertised elsewhere as stubs; the
+                // schema here is how the model learns the argument contract
+                // (activation pins the full schema for the rest of the
+                // query).
+                if t.is_deferred() {
+                    entry["input_schema"] =
+                        serde_json::to_value(t.input_schema()).unwrap_or_default();
+                }
+                entry
             })
             .collect();
 

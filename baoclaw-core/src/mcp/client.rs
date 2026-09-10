@@ -1,33 +1,37 @@
-//! Stdio MCP client: spawns a server process, performs the initialize
-//! handshake, and multiplexes JSON-RPC requests over the child's stdin/stdout
-//! (NDJSON framing, shared with the daemon's own IPC protocol layer).
+//! Transport-agnostic MCP protocol client: performs the initialize
+//! handshake, multiplexes JSON-RPC requests by id over whatever transport
+//! [`super::transport`] provides (stdio, Streamable HTTP, legacy SSE),
+//! answers server pings, rejects server→client requests, and surfaces
+//! `tools/list_changed` as a signal for the live catalog.
 
 use std::collections::HashMap;
-use std::process::Stdio;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
 use serde_json::{json, Value};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::{oneshot, watch, Mutex};
 
-use crate::ipc::protocol::{
-    decode_ndjson_line, encode_ndjson, JsonRpcErrorResponse, JsonRpcMessage, JsonRpcNotification,
-    JsonRpcRequest, JsonRpcResponse, RequestId,
-};
+use crate::discovery::mcp_config::McpServerInfo;
+use crate::ipc::protocol::{JsonRpcMessage, JsonRpcNotification, JsonRpcRequest, RequestId};
 
+use super::demux::{route_inbound, ListChangedSignal, PendingMap};
+use super::transport::{open_connection, McpSender};
 use super::types::{map_call_result, parse_tool_defs, CallToolOutcome, McpToolDef};
-use super::{MCP_CLIENT_NAME, MCP_MAX_LIST_PAGES, MCP_PROTOCOL_VERSION};
+use super::{MCP_CLIENT_NAME, MCP_MAX_LIST_PAGES, MCP_PROTOCOL_VERSION, MCP_PROTOCOL_VERSION_HTTP};
 
 #[derive(Debug, thiserror::Error)]
 pub enum McpError {
     #[error("MCP spawn failed: {0}")]
     Spawn(String),
+    #[error("MCP connect failed: {0}")]
+    Connect(String),
     #[error("MCP request timed out after {0}ms")]
     Timeout(u64),
     #[error("MCP connection closed")]
     Closed,
+    #[error("MCP call cancelled")]
+    Cancelled,
     #[error("MCP server error {code}: {message}")]
     Remote { code: i32, message: String },
     #[error("MCP io error: {0}")]
@@ -38,180 +42,112 @@ pub enum McpError {
     Protocol(String),
 }
 
-/// A write failure with a closed/reset pipe means the server is gone —
-/// surface that as Closed so callers treat it as a lifecycle event, not an
-/// incidental IO error.
-fn map_write_error(e: std::io::Error) -> McpError {
-    if matches!(
-        e.kind(),
-        std::io::ErrorKind::BrokenPipe | std::io::ErrorKind::ConnectionReset
-    ) {
-        McpError::Closed
-    } else {
-        McpError::Io(e)
-    }
-}
+/// Grace period for replying to server→client requests before treating the
+/// connection as dead (a wedged reply write means nobody is reading).
+const REPLY_WRITE_BUDGET: Duration = Duration::from_secs(5);
 
-pub struct StdioMcpClient {
+pub struct McpClient {
     inner: Arc<ClientInner>,
 }
 
 struct ClientInner {
     server_name: String,
-    /// `None` once shutdown began: writers see Closed and the dropped pipe
-    /// signals well-behaved servers to exit.
-    stdin: Mutex<Option<tokio::process::ChildStdin>>,
+    /// `None` once shutdown began: writers see Closed.
+    sender: Mutex<Option<Arc<dyn McpSender>>>,
     /// In-flight request demux. std Mutex: never held across an await.
-    pending: std::sync::Mutex<HashMap<RequestId, oneshot::Sender<JsonRpcMessage>>>,
+    pending: PendingMap,
     next_id: AtomicI64,
-    child: Mutex<Option<tokio::process::Child>>,
-    /// Set by the reader task when stdout hits EOF (child gone).
-    done: watch::Receiver<bool>,
+    /// Bumped on `notifications/tools/list_changed`; the supervisor watches.
+    list_changed_tx: watch::Sender<u64>,
+    list_changed_signal: ListChangedSignal,
+    /// Set when the inbound channel ends (connection dead).
+    done_rx: watch::Receiver<bool>,
 }
 
-impl StdioMcpClient {
-    /// Spawn `command args`, perform the initialize handshake, fetch the tool
-    /// catalog, and start the reader task.
+impl McpClient {
+    /// Open a connection for a discovered server entry, perform the
+    /// initialize handshake, and fetch the tool catalog.
     ///
-    /// `env` comes from the server's mcp.json entry (values are secrets —
-    /// never logged). It is applied AFTER the sensitive-key removals so an
-    /// explicitly configured value wins: the sanitization targets accidental
-    /// daemon-credential leakage, not deliberate operator config.
-    ///
-    /// `startup_timeout` bounds EACH handshake RPC (initialize, tools/list
-    /// page), so a hung server cannot stall boot beyond a bounded multiple of
-    /// it. On any failure the child is killed before returning the error.
-    pub async fn spawn(
-        server_name: &str,
-        command: &str,
-        args: &[String],
-        env: &HashMap<String, String>,
+    /// `startup_timeout` bounds the initialize request AND the whole catalog
+    /// fetch, so a hung server cannot stall boot beyond a bounded multiple
+    /// of it. On any failure the connection is closed before returning the
+    /// error.
+    pub async fn connect(
+        spec: &McpServerInfo,
         startup_timeout: Duration,
     ) -> Result<(Self, Vec<McpToolDef>), McpError> {
-        let mut cmd = tokio::process::Command::new(command);
-        cmd.args(args);
-        for key in crate::tools::builtins::bash_tool::SENSITIVE_ENV_KEYS {
-            cmd.env_remove(key);
-        }
-        cmd.envs(env);
-        cmd.kill_on_drop(true)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
+        let (sender, inbound_rx) = open_connection(spec, startup_timeout).await?;
+        // Streamable HTTP was introduced by the 2025-03-26 revision; stdio
+        // and legacy SSE keep the original (every conforming server accepts
+        // it, newer revisions can be rejected outright).
+        let protocol_version = if spec.server_type == "http" {
+            MCP_PROTOCOL_VERSION_HTTP
+        } else {
+            MCP_PROTOCOL_VERSION
+        };
+        Self::open(
+            &spec.name,
+            protocol_version,
+            sender,
+            inbound_rx,
+            startup_timeout,
+        )
+        .await
+    }
 
-        let mut child = cmd
-            .spawn()
-            .map_err(|e| McpError::Spawn(format!("failed to spawn '{command}': {e}")))?;
-
-        let stdin = child.stdin.take();
-        let stdout = child
-            .stdout
-            .take()
-            .ok_or_else(|| McpError::Spawn("child stdout not captured".into()))?;
-        let stderr = child
-            .stderr
-            .take()
-            .ok_or_else(|| McpError::Spawn("child stderr not captured".into()))?;
-
-        // Drain stderr in the background: a server blocking on a full stderr
-        // pipe would freeze the protocol. Values are never logged.
-        let err_name = server_name.to_string();
-        tokio::spawn(async move {
-            let mut lines = BufReader::new(stderr).lines();
-            while let Ok(Some(line)) = lines.next_line().await {
-                let shown = if line.chars().count() > 500 {
-                    let t: String = line.chars().take(500).collect();
-                    format!("{t}…")
-                } else {
-                    line
-                };
-                eprintln!("[mcp:{err_name}] {shown}");
-            }
-        });
-
+    /// Run the protocol client over an established transport.
+    async fn open(
+        server_name: &str,
+        protocol_version: &'static str,
+        sender: Arc<dyn McpSender>,
+        mut inbound_rx: tokio::sync::mpsc::Receiver<JsonRpcMessage>,
+        startup_timeout: Duration,
+    ) -> Result<(Self, Vec<McpToolDef>), McpError> {
         let (done_tx, done_rx) = watch::channel(false);
+        let (list_changed_tx, _) = watch::channel(0u64);
         let client = Self {
             inner: Arc::new(ClientInner {
                 server_name: server_name.to_string(),
-                stdin: Mutex::new(stdin),
+                sender: Mutex::new(Some(Arc::clone(&sender))),
                 pending: std::sync::Mutex::new(HashMap::new()),
                 next_id: AtomicI64::new(1),
-                child: Mutex::new(Some(child)),
-                done: done_rx,
+                list_changed_tx,
+                list_changed_signal: ListChangedSignal::default(),
+                done_rx,
             }),
         };
 
-        // Reader task: demux responses, auto-answer pings, reject
-        // server→client requests, tolerate non-JSON stdout lines.
+        // Reader loop: inbound channel → routing → bounded reply writes.
+        // Channel end (EOF / transport death) or a stuck reply fails every
+        // in-flight request and marks the connection done.
         let reader_inner = Arc::clone(&client.inner);
         tokio::spawn(async move {
-            let mut lines = BufReader::new(stdout).lines();
-            while let Ok(Some(line)) = lines.next_line().await {
-                match decode_ndjson_line(&line) {
-                    Ok(JsonRpcMessage::Response(resp)) => {
-                        let tx = reader_inner.pending.lock().unwrap().remove(&resp.id);
-                        if let Some(tx) = tx {
-                            let _ = tx.send(JsonRpcMessage::Response(resp));
-                        }
+            while let Some(msg) = inbound_rx.recv().await {
+                if let Some(reply) = route_inbound(
+                    &reader_inner.pending,
+                    &reader_inner.list_changed_tx,
+                    &reader_inner.list_changed_signal,
+                    msg,
+                ) {
+                    let sender = {
+                        let g = reader_inner.sender.lock().await;
+                        g.as_ref().map(Arc::clone)
+                    };
+                    let delivered = match sender {
+                        Some(s) => s.send(&reply, REPLY_WRITE_BUDGET).await.is_ok(),
+                        None => false,
+                    };
+                    if !delivered {
+                        break;
                     }
-                    Ok(JsonRpcMessage::ErrorResponse(err)) => {
-                        if let Some(id) = &err.id {
-                            let tx = reader_inner.pending.lock().unwrap().remove(id);
-                            if let Some(tx) = tx {
-                                let _ = tx.send(JsonRpcMessage::ErrorResponse(err));
-                            }
-                        }
-                    }
-                    Ok(JsonRpcMessage::Request(req)) => {
-                        // Server→client requests are out of scope: ping is
-                        // answered, everything else (sampling, roots, ...)
-                        // gets method-not-found so the server can degrade.
-                        let reply = if req.method == "ping" {
-                            encode_ndjson(&JsonRpcResponse::success(req.id.clone(), json!({})))
-                        } else {
-                            encode_ndjson(&JsonRpcErrorResponse::new(
-                                Some(req.id.clone()),
-                                -32601,
-                                "server-to-client requests are not supported".into(),
-                            ))
-                        };
-                        if let Ok(line) = reply {
-                            let write = async {
-                                let mut g = reader_inner.stdin.lock().await;
-                                if let Some(s) = g.as_mut() {
-                                    s.write_all(&line).await?;
-                                }
-                                Ok::<(), std::io::Error>(())
-                            };
-                            // The connection is dead if we cannot write a
-                            // reply promptly; stop the reader so EOF cleanup
-                            // fails every in-flight request.
-                            if tokio::time::timeout(Duration::from_secs(5), write)
-                                .await
-                                .is_err()
-                            {
-                                break;
-                            }
-                        }
-                    }
-                    Ok(JsonRpcMessage::Notification(n)) => {
-                        if n.method == "notifications/tools/list_changed" {
-                            eprintln!(
-                                "[mcp:{}] tools list changed notification ignored (tool set is frozen at boot)",
-                                reader_inner.server_name
-                            );
-                        }
-                    }
-                    // Non-JSON stdout (banners, log output): skip silently.
-                    Err(_) => {}
                 }
             }
-            // EOF: the child is gone — fail every in-flight request.
+            // Channel ended: the connection is gone — fail everything.
             reader_inner.pending.lock().unwrap().clear();
             let _ = done_tx.send(true);
         });
 
-        match Self::handshake_and_list(&client, startup_timeout).await {
+        match Self::handshake_and_list(&client, protocol_version, startup_timeout).await {
             Ok(tools) => Ok((client, tools)),
             Err(e) => {
                 client.shutdown().await;
@@ -222,13 +158,14 @@ impl StdioMcpClient {
 
     async fn handshake_and_list(
         client: &Self,
+        protocol_version: &'static str,
         startup_timeout: Duration,
     ) -> Result<Vec<McpToolDef>, McpError> {
         let init_result = client
             .request(
                 "initialize",
                 json!({
-                    "protocolVersion": MCP_PROTOCOL_VERSION,
+                    "protocolVersion": protocol_version,
                     "capabilities": {},
                     "clientInfo": {"name": MCP_CLIENT_NAME, "version": env!("CARGO_PKG_VERSION")}
                 }),
@@ -262,46 +199,83 @@ impl StdioMcpClient {
         params: Value,
         timeout: Duration,
     ) -> Result<Value, McpError> {
+        self.request_internal(method, params, timeout, None).await
+    }
+
+    async fn request_internal(
+        &self,
+        method: &str,
+        params: Value,
+        timeout: Duration,
+        abort: Option<watch::Receiver<bool>>,
+    ) -> Result<Value, McpError> {
         let id = RequestId::Number(self.inner.next_id.fetch_add(1, Ordering::Relaxed));
         let (tx, rx) = oneshot::channel();
         self.inner.pending.lock().unwrap().insert(id.clone(), tx);
 
-        let line = encode_ndjson(&JsonRpcRequest {
-            jsonrpc: "2.0".to_string(),
-            method: method.to_string(),
-            params,
-            id: id.clone(),
-        })
-        .map_err(McpError::from)?;
-
-        let write = async {
-            let mut g = self.inner.stdin.lock().await;
-            match g.as_mut() {
-                Some(s) => s.write_all(&line).await.map_err(map_write_error),
-                None => Err(McpError::Closed),
-            }
+        // Clone the sender under the lock and drop the guard BEFORE sending:
+        // an HTTP send spans the whole POST round trip, and holding the mutex
+        // across it would serialize every request and defer the abort select
+        // until after delivery.
+        let sender = {
+            let g = self.inner.sender.lock().await;
+            g.as_ref().map(Arc::clone)
         };
-        // A write that outlives the budget means the server stopped
-        // reading stdin: fail the call instead of wedging the pipe.
-        if tokio::time::timeout(timeout, write).await.is_err() {
+        let Some(sender) = sender else {
             self.inner.pending.lock().unwrap().remove(&id);
-            return Err(McpError::Timeout(timeout.as_millis() as u64));
+            return Err(McpError::Closed);
+        };
+        {
+            let msg = JsonRpcRequest {
+                jsonrpc: "2.0".to_string(),
+                method: method.to_string(),
+                params,
+                id: id.clone(),
+            };
+            if let Err(e) = sender.send(&JsonRpcMessage::Request(msg), timeout).await {
+                self.inner.pending.lock().unwrap().remove(&id);
+                return Err(e);
+            }
         }
 
-        match tokio::time::timeout(timeout, rx).await {
-            Ok(Ok(msg)) => match msg {
-                JsonRpcMessage::Response(resp) => Ok(resp.result),
-                JsonRpcMessage::ErrorResponse(err) => Err(McpError::Remote {
-                    code: err.error.code,
-                    message: err.error.message,
-                }),
-                _ => Err(McpError::Protocol("mismatched JSON-RPC message".into())),
-            },
-            // Sender dropped: the reader drained pending at EOF.
-            Ok(Err(_)) => Err(McpError::Closed),
-            Err(_) => {
+        let await_response = rx;
+        tokio::select! {
+            res = tokio::time::timeout(timeout, await_response) => {
+                match res {
+                    Ok(Ok(msg)) => match msg {
+                        JsonRpcMessage::Response(resp) => Ok(resp.result),
+                        JsonRpcMessage::ErrorResponse(err) => Err(McpError::Remote {
+                            code: err.error.code,
+                            message: err.error.message,
+                        }),
+                        _ => Err(McpError::Protocol("mismatched JSON-RPC message".into())),
+                    },
+                    // Sender dropped: the reader drained pending at EOF.
+                    Ok(Err(_)) => Err(McpError::Closed),
+                    Err(_) => {
+                        self.inner.pending.lock().unwrap().remove(&id);
+                        Err(McpError::Timeout(timeout.as_millis() as u64))
+                    }
+                }
+            }
+            _ = wait_for_abort(abort) => {
+                // Tell the server to stop the work, then fail the call.
+                // Best-effort: the user-visible abort never waits on a
+                // wedged server. The pending entry is removed first so the
+                // late tools/call response (or -32800) is dropped.
                 self.inner.pending.lock().unwrap().remove(&id);
-                Err(McpError::Timeout(timeout.as_millis() as u64))
+                let notify = self.notify(
+                    "notifications/cancelled",
+                    json!({"requestId": id_number(&id), "reason": "user requested cancellation"}),
+                    Duration::from_secs(2),
+                );
+                if let Err(e) = notify.await {
+                    eprintln!(
+                        "[mcp:{}] cancel notification failed: {e}",
+                        self.inner.server_name
+                    );
+                }
+                Err(McpError::Cancelled)
             }
         }
     }
@@ -312,18 +286,16 @@ impl StdioMcpClient {
         params: Value,
         timeout: Duration,
     ) -> Result<(), McpError> {
-        let line =
-            encode_ndjson(&JsonRpcNotification::new(method, params)).map_err(McpError::from)?;
-        let write = async {
-            let mut g = self.inner.stdin.lock().await;
-            match g.as_mut() {
-                Some(s) => s.write_all(&line).await.map_err(map_write_error),
-                None => Err(McpError::Closed),
-            }
+        let sender = {
+            let g = self.inner.sender.lock().await;
+            g.as_ref().map(Arc::clone)
         };
-        match tokio::time::timeout(timeout, write).await {
-            Ok(res) => res,
-            Err(_) => Err(McpError::Timeout(timeout.as_millis() as u64)),
+        match sender {
+            Some(s) => {
+                let msg = JsonRpcNotification::new(method, params);
+                s.send(&JsonRpcMessage::Notification(msg), timeout).await
+            }
+            None => Err(McpError::Closed),
         }
     }
 
@@ -371,64 +343,108 @@ impl StdioMcpClient {
         Ok(map_call_result(&result))
     }
 
-    /// Resolves when the reader task ends (process exited / stdout EOF).
-    pub async fn wait_closed(&self) {
-        let _ = self.inner.done.clone().wait_for(|v| *v).await;
+    /// [`Self::call_tool`] with abort support: on the abort signal the
+    /// server is told `notifications/cancelled {requestId}` and the call
+    /// fails deterministically with [`McpError::Cancelled`]. If the response
+    /// races the abort and wins, the result is returned normally (the server
+    /// completed anyway; cancellation would be redundant).
+    pub async fn call_tool_cancellable(
+        &self,
+        tool_name: &str,
+        arguments: Value,
+        timeout: Duration,
+        abort: Option<watch::Receiver<bool>>,
+    ) -> Result<CallToolOutcome, McpError> {
+        let result = self
+            .request_internal(
+                "tools/call",
+                json!({"name": tool_name, "arguments": arguments}),
+                timeout,
+                abort,
+            )
+            .await?;
+        Ok(map_call_result(&result))
     }
 
-    /// Close stdin (well-behaved servers exit), then force-kill after a grace
-    /// period so a stuck child cannot outlive the daemon.
+    /// Watch handle for `notifications/tools/list_changed`: the value
+    /// increments on every notification; a supervisor compares against the
+    /// value it last observed.
+    pub fn list_changed(&self) -> watch::Receiver<u64> {
+        self.inner.list_changed_tx.subscribe()
+    }
+
+    /// Resolves when the inbound channel ends (connection dead).
+    pub async fn wait_closed(&self) {
+        let _ = self.inner.done_rx.clone().wait_for(|v| *v).await;
+    }
+
+    /// Terminate the transport. Idempotent.
     pub async fn shutdown(&self) {
-        {
-            let mut g = self.inner.stdin.lock().await;
-            *g = None; // dropping the pipe closes it
+        let sender = {
+            let mut g = self.inner.sender.lock().await;
+            g.take()
+        };
+        if let Some(sender) = sender {
+            sender.close().await;
         }
-        let mut guard = self.inner.child.lock().await;
-        if let Some(mut child) = guard.take() {
-            match tokio::time::timeout(Duration::from_secs(2), child.wait()).await {
-                Ok(_) => {}
-                Err(_) => {
-                    child.start_kill().ok();
-                }
-            }
-        }
+    }
+}
+
+/// The abort-watch wait used by [`McpClient::request_internal`]: resolves
+/// only when the signal turns true; a dropped sender (engine gone without
+/// aborting) is NOT an abort.
+async fn wait_for_abort(abort: Option<watch::Receiver<bool>>) {
+    match abort {
+        Some(rx) => crate::engine::abort_helpers::wait_for_abort(rx).await,
+        None => std::future::pending::<()>().await,
+    }
+}
+
+/// The JSON wire value of a request id for notifications/cancelled.
+fn id_number(id: &RequestId) -> Value {
+    serde_json::to_value(id).unwrap_or(Value::Null)
+}
+
+/// Helper used by tests to build a stdio server spec.
+#[cfg(test)]
+pub(crate) fn stdio_spec(name: &str, command: &str, env: HashMap<String, String>) -> McpServerInfo {
+    McpServerInfo {
+        name: name.to_string(),
+        command: Some(command.to_string()),
+        args: vec![],
+        server_type: "stdio".to_string(),
+        url: None,
+        disabled: false,
+        source: "user".to_string(),
+        config_path: "test".to_string(),
+        env,
+        headers: HashMap::new(),
     }
 }
 
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
-    use std::future::Future;
-    use std::path::{Path, PathBuf};
+    use std::path::Path;
 
-    /// Write a POSIX-sh fake MCP server into a tempdir and return its path
-    /// for use as the mcp.json `command`. Scripts echo the request id back
+    /// Write a POSIX-sh fake MCP server into a tempdir and return its spec
+    /// for use with [`McpClient::connect`]. Scripts echo the request id back
     /// from the raw line (no jq dependency) so the demux matches.
-    fn write_fake_server(dir: &Path, name: &str, script: &str) -> PathBuf {
+    fn write_fake_server(dir: &Path, name: &str, script: &str) -> McpServerInfo {
         let path = dir.join(name);
         std::fs::write(&path, script).unwrap();
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
-        path
+        stdio_spec("fake", path.to_str().unwrap(), HashMap::new())
     }
 
-    fn spawn_at(
-        cmd: &Path,
+    async fn connect_at(
+        spec: &McpServerInfo,
         startup_timeout: Duration,
-    ) -> impl Future<Output = (StdioMcpClient, Vec<McpToolDef>)> {
-        let path = cmd.to_path_buf();
-        async move {
-            let (client, tools) = StdioMcpClient::spawn(
-                "fake",
-                path.to_str().unwrap(),
-                &[],
-                &HashMap::new(),
-                startup_timeout,
-            )
+    ) -> (McpClient, Vec<McpToolDef>) {
+        McpClient::connect(spec, startup_timeout)
             .await
-            .expect("spawn + handshake");
-            (client, tools)
-        }
+            .expect("connect + handshake")
     }
 
     /// Happy-path server. After the initialize response it fires two
@@ -487,10 +503,10 @@ exit 0
 "#;
 
     #[tokio::test]
-    async fn spawn_handshake_list_and_verify_ping_sampling_handling() {
+    async fn connect_handshake_list_and_verify_ping_sampling_handling() {
         let dir = tempfile::TempDir::new().unwrap();
-        let cmd = write_fake_server(dir.path(), "happy.sh", HAPPY_SERVER);
-        let (client, tools) = spawn_at(&cmd, Duration::from_secs(5)).await;
+        let spec = write_fake_server(dir.path(), "happy.sh", HAPPY_SERVER);
+        let (client, tools) = connect_at(&spec, Duration::from_secs(5)).await;
         assert_eq!(tools.len(), 1);
         assert_eq!(tools[0].name, "echo_tool");
         assert_eq!(
@@ -535,8 +551,8 @@ done
     #[tokio::test]
     async fn banner_tolerance() {
         let dir = tempfile::TempDir::new().unwrap();
-        let cmd = write_fake_server(dir.path(), "banner.sh", BANNER_SERVER);
-        let (client, tools) = spawn_at(&cmd, Duration::from_secs(5)).await;
+        let spec = write_fake_server(dir.path(), "banner.sh", BANNER_SERVER);
+        let (client, tools) = connect_at(&spec, Duration::from_secs(5)).await;
         assert_eq!(tools.len(), 1);
         client.shutdown().await;
     }
@@ -569,8 +585,8 @@ done
     #[tokio::test]
     async fn cursor_pagination_fetches_all_pages() {
         let dir = tempfile::TempDir::new().unwrap();
-        let cmd = write_fake_server(dir.path(), "paged.sh", PAGED_SERVER);
-        let (client, tools) = spawn_at(&cmd, Duration::from_secs(5)).await;
+        let spec = write_fake_server(dir.path(), "paged.sh", PAGED_SERVER);
+        let (client, tools) = connect_at(&spec, Duration::from_secs(5)).await;
         let names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
         assert_eq!(names, vec!["t1", "t2"]);
         client.shutdown().await;
@@ -579,15 +595,8 @@ done
     #[tokio::test]
     async fn boot_timeout_on_slow_server() {
         let dir = tempfile::TempDir::new().unwrap();
-        let cmd = write_fake_server(dir.path(), "slow.sh", "#!/bin/sh\nsleep 30\n");
-        let result = StdioMcpClient::spawn(
-            "fake",
-            cmd.to_str().unwrap(),
-            &[],
-            &HashMap::new(),
-            Duration::from_millis(300),
-        )
-        .await;
+        let spec = write_fake_server(dir.path(), "slow.sh", "#!/bin/sh\nsleep 30\n");
+        let result = McpClient::connect(&spec, Duration::from_millis(300)).await;
         match result {
             Err(McpError::Timeout(_)) => {}
             Err(other) => panic!("expected Timeout, got {other}"),
@@ -613,15 +622,8 @@ done
     #[tokio::test]
     async fn crash_during_handshake_maps_to_closed() {
         let dir = tempfile::TempDir::new().unwrap();
-        let cmd = write_fake_server(dir.path(), "crash.sh", CRASH_AFTER_INIT_SERVER);
-        let result = StdioMcpClient::spawn(
-            "fake",
-            cmd.to_str().unwrap(),
-            &[],
-            &HashMap::new(),
-            Duration::from_secs(5),
-        )
-        .await;
+        let spec = write_fake_server(dir.path(), "crash.sh", CRASH_AFTER_INIT_SERVER);
+        let result = McpClient::connect(&spec, Duration::from_secs(5)).await;
         match result {
             Err(McpError::Closed) | Err(McpError::Timeout(_)) => {}
             Err(other) => panic!("expected Closed/Timeout, got {other}"),

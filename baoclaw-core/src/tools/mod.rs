@@ -2,6 +2,7 @@
 
 pub mod builtins;
 pub mod executor;
+pub mod registry;
 pub mod trait_def;
 
 pub use trait_def::Tool;

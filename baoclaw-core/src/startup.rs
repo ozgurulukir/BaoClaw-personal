@@ -374,21 +374,21 @@ pub(super) fn load_config_and_api_client() -> (BaoclawConfig, Arc<UnifiedClient>
     (baoclaw_config, api_client)
 }
 
-/// Build the daemon engine tool list (core tools, AgentTool with the full set,
-/// ToolSearchTool last). `mcp_tools` are the MCP bridges built at boot and
-/// enter BEFORE AgentTool/ToolSearchTool so sub-agents and tool search see
-/// them; the list is static afterwards.
+/// Build the daemon's live tool registry: builtin head, MCP buckets
+/// published by the connection manager, and the pinned tail (AgentTool with
+/// the registry view, ToolSearchTool last). Consumers snapshot per unit of
+/// work, so later MCP catalog refreshes are observed without a restart.
 #[allow(clippy::too_many_arguments)]
-pub(super) fn build_engine_tools(
+pub(super) async fn build_engine_registry(
     cwd_str: &str,
     sandbox_config: &Option<Arc<engine::sandbox::SandboxConfig>>,
     api_client: &Arc<UnifiedClient>,
     evolution_engine: &Arc<engine::evolution::EvolutionEngine>,
     kit: &engine::kit::HeadlessEngineKit,
     memory_store: &Arc<engine::memory::MemoryStore>,
-    mcp_tools: Vec<Arc<dyn tools::Tool>>,
+    mcp_manager: &Arc<baoclaw_core::mcp::ConnectionManager>,
 ) -> (
-    Vec<Arc<dyn tools::Tool>>,
+    tools::registry::ToolRegistryHandle,
     permissions::GrantedSearchDirs,
     permissions::GrantedWriteDirs,
 ) {
@@ -438,29 +438,27 @@ pub(super) fn build_engine_tools(
             evolution_engine,
         ))),
     ];
-    let core_tools: Vec<Arc<dyn tools::Tool>> = {
-        let mut all = core_tools;
-        all.extend(mcp_tools);
-        all
-    };
+    let registry = tools::registry::ToolRegistry::new(core_tools);
 
-    // AgentTool gets the full core tool set so sub-agents can write, edit, run bash, etc.
-    let agent_tool =
-        AgentTool::new_with_full_tools(Arc::clone(api_client), core_tools.clone(), kit.clone());
+    // MCP buckets publish into the registry before the tail exists; the
+    // tail tools hold the handle and see every later refresh.
+    mcp_manager.attach_registry(registry.clone());
+    let published = mcp_manager.boot_and_register().await;
+    if published > 0 {
+        eprintln!("MCP tools registered: {published}");
+    }
 
-    let mut engine_tools: Vec<Arc<dyn tools::Tool>> = core_tools;
-    engine_tools.push(Arc::new(agent_tool));
+    registry.install_tail(vec![
+        Arc::new(AgentTool::new_with_registry(
+            Arc::clone(api_client),
+            registry.clone(),
+            kit.clone(),
+        )),
+        Arc::new(ToolSearchTool::with_registry(registry.clone())),
+    ]);
+    eprintln!("Total tools registered: {}", registry.len());
 
-    // ToolSearchTool needs the full tool list, so register it last
-    let engine_tools: Vec<Arc<dyn tools::Tool>> = {
-        let mut all = engine_tools;
-
-        all.push(Arc::new(ToolSearchTool::new(all.clone())));
-        eprintln!("Total tools registered: {}", all.len());
-        all
-    };
-
-    (engine_tools, granted_search_dirs, granted_write_dirs)
+    (registry, granted_search_dirs, granted_write_dirs)
 }
 
 /// Load skill prompt and the user profile; combine them into the
@@ -556,7 +554,7 @@ pub(super) async fn assemble_shared_state(
     is_daemon: bool,
     baoclaw_config: BaoclawConfig,
     api_client: Arc<UnifiedClient>,
-    engine_tools: Vec<Arc<dyn tools::Tool>>,
+    tool_registry: tools::registry::ToolRegistryHandle,
     granted_search_dirs: permissions::GrantedSearchDirs,
     granted_write_dirs: permissions::GrantedWriteDirs,
     tool_health: engine::tool_health::ToolHealthHandle,
@@ -649,9 +647,9 @@ pub(super) async fn assemble_shared_state(
     // AgentTool can already carry it; here it just flows into SharedState.
 
     // Create TaskManager for background task execution
-    let task_manager = Arc::new(TaskManager::new(
+    let task_manager = Arc::new(TaskManager::with_registry(
         Arc::clone(&api_client),
-        engine_tools.clone(),
+        Arc::clone(&tool_registry),
         headless_kit.clone(),
     ));
 
@@ -669,7 +667,7 @@ pub(super) async fn assemble_shared_state(
     ));
 
     let shared = SharedState {
-        engine_tools,
+        tool_registry,
         api_client,
         permission_gate,
         permission_manager,
@@ -709,7 +707,7 @@ pub(super) async fn assemble_shared_state(
 pub(super) async fn start_cron_scheduler(shared: &SharedState) {
     {
         let cron_manager = Arc::clone(&shared.cron_manager);
-        let cron_tools = shared.engine_tools.clone();
+        let cron_registry = Arc::clone(&shared.tool_registry);
         let cron_api_client = Arc::clone(&shared.api_client);
         let cron_model = shared.baoclaw_config.model.clone();
         let cron_thinking_config = shared.cli_thinking_config.clone();
@@ -719,7 +717,7 @@ pub(super) async fn start_cron_scheduler(shared: &SharedState) {
         let run_fn: Arc<
             dyn Fn(String, Option<String>) -> tokio::task::JoinHandle<String> + Send + Sync,
         > = Arc::new(move |prompt: String, cwd: Option<String>| {
-            let tools = cron_tools.clone();
+            let tools = cron_registry.snapshot();
             let api_client = Arc::clone(&cron_api_client);
             let model = cron_model.clone();
             let thinking_config = cron_thinking_config.clone();
@@ -738,6 +736,7 @@ pub(super) async fn start_cron_scheduler(shared: &SharedState) {
 
                 let mut engine = QueryEngine::new(QueryEngineConfig {
                     cwd: cwd_path,
+                    tool_registry: None,
                     tools,
                     api_client,
                     model,

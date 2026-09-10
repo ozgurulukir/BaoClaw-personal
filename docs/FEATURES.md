@@ -77,7 +77,7 @@ A closed learning loop:
 
 ### 🔌 Extensible
 
-- **MCP client (stdio)** — the daemon spawns configured stdio MCP servers at boot and registers their tools as first-class tools named `mcp__<server>__<tool>`; tool calls execute against the server process (auto-reconnect with bounded backoff, `/mcp` shows live state). SSE/HTTP servers are discovered and listed but not executed
+- **MCP client (stdio / HTTP / SSE)** — the daemon connects configured MCP servers at boot (stdio processes and Streamable HTTP / legacy SSE endpoints) and registers their tools as first-class tools named `mcp__<server>__<tool>`; calls execute against the server with auto-reconnect and live catalog refresh (`/mcp refresh`); tools register as deferred stubs (`mcp_deferred_tools`) that expand to full schemas on first use
 - **Skills** — markdown-based skill files loaded into system prompt (personal + project scope)
 - **Plugins** — directory-based plugin system with tools, skills, and MCP configs
 - **Many LLM models** — Anthropic native + compatible OpenAI-style APIs (OpenRouter, Ollama, vLLM, etc.)

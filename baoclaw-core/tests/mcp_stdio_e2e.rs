@@ -76,10 +76,13 @@ async fn mcp_tool_survives_discovery_connect_and_dispatch() {
     let servers = discover_mcp_servers_in(Some(home.path()), project.path()).await;
     assert_eq!(servers.len(), 1, "discovery must find the fake server");
 
-    // 2. Connect + build bridges.
+    // 2. Connect + publish buckets into a registry.
     let manager = ConnectionManager::start_all(servers, McpLaunchConfig::default(), None).await;
-    let bridges = manager.boot_and_build_tools().await;
-    assert_eq!(bridges.len(), 1, "one server, one tool → one bridge");
+    let registry = baoclaw_core::tools::registry::ToolRegistry::new(vec![]);
+    manager.attach_registry(registry.clone());
+    let published = manager.boot_and_register().await;
+    assert_eq!(published, 1, "one server, one tool → one bridge");
+    let bridges = registry.snapshot();
     assert_eq!(
         bridges[0].name(),
         format!("{MCP_TOOL_PREFIX}fake__echo_tool")

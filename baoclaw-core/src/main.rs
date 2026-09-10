@@ -41,7 +41,7 @@ use state::manager::StateManager;
 /// Shared state cloned into each spawned client task.
 #[derive(Clone)]
 struct SharedState {
-    engine_tools: Vec<Arc<dyn tools::Tool>>,
+    tool_registry: tools::registry::ToolRegistryHandle,
     api_client: Arc<UnifiedClient>,
     permission_gate: PermissionGate,
     permission_manager: Arc<tokio::sync::RwLock<permissions::manager::PermissionManager>>,
@@ -79,7 +79,8 @@ struct SharedState {
     headless_kit: engine::kit::HeadlessEngineKit,
     /// Team executor for managing sub-agent teams.
     team_executor: Arc<engine::team::TeamManager>,
-    /// MCP stdio server connections; the tool catalog was frozen at boot.
+    /// MCP server connections (stdio/http/sse); buckets publish into the
+    /// engine's live ToolRegistry.
     mcp_manager: Arc<baoclaw_core::mcp::ConnectionManager>,
 }
 
@@ -252,7 +253,8 @@ fn build_shared_engine(
 ) -> QueryEngine {
     QueryEngine::new(QueryEngineConfig {
         cwd,
-        tools: shared.engine_tools.clone(),
+        tools: shared.tool_registry.snapshot(),
+        tool_registry: Some(Arc::clone(&shared.tool_registry)),
         api_client: Arc::clone(&shared.api_client),
         model,
         thinking_config: shared.cli_thinking_config.clone(),
@@ -1201,8 +1203,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // MCP eager boot connect. Each handshake RPC is bounded by
     // mcp_startup_timeout_secs, so a hung server cannot stall daemon startup;
-    // a server that fails its first attempt simply registers no tools. The
-    // tool catalog is frozen after this point (reconnects never re-register).
+    // a server that fails its first attempt registers no tools until a
+    // reconnect or /mcp refresh succeeds. Buckets publish into the live
+    // registry, so later catalog refreshes reach engines without a restart.
     let mcp_servers = if baoclaw_config.mcp_enabled {
         baoclaw_core::discovery::mcp_config::discover_mcp_servers(std::path::Path::new(
             &opts.cwd_str,
@@ -1217,21 +1220,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Some(Arc::clone(&tool_health)),
     )
     .await;
-    let mcp_tools = mcp_manager.boot_and_build_tools().await;
-    if !mcp_tools.is_empty() {
-        eprintln!("MCP tools registered: {}", mcp_tools.len());
-    }
 
-    // Build engine tools (core tools + AgentTool + ToolSearchTool)
-    let (engine_tools, granted_search_dirs, granted_write_dirs) = startup::build_engine_tools(
+    // Build the live tool registry (core tools + MCP buckets + AgentTool +
+    // ToolSearchTool tail).
+    let (tool_registry, granted_search_dirs, granted_write_dirs) = startup::build_engine_registry(
         &opts.cwd_str,
         &opts.sandbox_config,
         &api_client,
         &evolution_engine,
         &headless_kit,
         &memory_store,
-        mcp_tools,
-    );
+        &mcp_manager,
+    )
+    .await;
 
     // Write metadata file for discovery by CLI
     write_meta(&socket_path, &opts.cwd_str, &session_id);
@@ -1241,7 +1242,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         opts.is_daemon,
         baoclaw_config,
         api_client,
-        engine_tools,
+        tool_registry,
         granted_search_dirs,
         granted_write_dirs,
         tool_health,

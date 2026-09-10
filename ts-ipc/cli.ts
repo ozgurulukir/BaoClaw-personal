@@ -2515,8 +2515,11 @@ async function main() {
                 ? tool.description.slice(0, 60) + "…"
                 : tool.description
               : "";
+            const marker = (tool as { deferred?: boolean }).deferred
+              ? ` ${DIM}(deferred)${RESET}`
+              : "";
             console.log(
-              `  ${FG_WHITE}${tool.name}${RESET}  ${DIM}${desc}${RESET}`,
+              `  ${FG_WHITE}${tool.name}${RESET}  ${DIM}${desc}${RESET}${marker}`,
             );
           }
           console.log();
@@ -2528,8 +2531,39 @@ async function main() {
       return;
     };
 
-    const cmd_mcp = async (): Promise<void> => {
+    const cmd_mcp = async (args?: string): Promise<void> => {
       try {
+        const requestArgs = args?.trim();
+        if (requestArgs) {
+          // "/mcp refresh [name]" — kick a catalog refresh / reconnect.
+          const [verb, ...rest] = requestArgs.split(/\s+/);
+          if (verb !== "refresh") {
+            console.log(
+              `${FG_RED}Unknown argument: ${verb}${RESET} — usage: /mcp [refresh [server]]`,
+            );
+            rl.prompt();
+            return;
+          }
+          const target = rest.join(" ");
+          const result = await client.request<{
+            servers: Array<{
+              name: string;
+              runtime?: { state: string; reason?: string };
+            }>;
+            count: number;
+          }>("mcpRefresh", { server: target || null });
+          console.log(
+            `\n${FG_ORANGE}${BOLD}MCP refresh requested${RESET} ${DIM}(${result.count})${RESET}\n`,
+          );
+          for (const srv of result.servers) {
+            console.log(
+              `  ${srv.runtime?.state ?? "?"} ${FG_WHITE}${srv.name}${RESET} ${DIM}${srv.runtime?.reason ?? ""}${RESET}`,
+            );
+          }
+          console.log();
+          rl.prompt();
+          return;
+        }
         const result = await client.request<{
           servers: Array<{
             name: string;
@@ -5984,7 +6018,7 @@ async function main() {
       {
         names: ["/mcp"],
         section: "Tools & Extensions",
-        help: "List MCP servers",
+        help: "List MCP servers (/mcp refresh [server] refreshes)",
         handler: cmd_mcp,
       },
       {

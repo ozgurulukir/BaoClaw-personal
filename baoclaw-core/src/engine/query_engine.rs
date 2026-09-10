@@ -28,7 +28,12 @@ pub const EMPTY_USAGE: Usage = Usage {
 /// Configuration for the QueryEngine.
 pub struct QueryEngineConfig {
     pub cwd: PathBuf,
+    /// Static tool list used when `tool_registry` is None (tests, headless
+    /// engines that snapshot at construction).
     pub tools: Vec<Arc<dyn Tool>>,
+    /// Live catalog: when set, each query snapshots the registry instead of
+    /// using `tools`, so mid-session catalog refreshes are observed.
+    pub tool_registry: Option<crate::tools::registry::ToolRegistryHandle>,
     pub api_client: Arc<UnifiedClient>,
     pub model: String,
     pub thinking_config: ThinkingConfig,
@@ -1124,7 +1129,11 @@ impl QueryEngine {
         // Build the config for the spawned loop
         let loop_config = QueryLoopConfig {
             api_client: Arc::clone(&self.config.api_client),
-            tools: self.config.tools.clone(),
+            tools: match &self.config.tool_registry {
+                Some(registry) => registry.snapshot(),
+                None => self.config.tools.clone(),
+            },
+            expanded_tools: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
             model: self.config.model.clone(),
             max_turns: self.config.max_turns,
             cwd: self.config.cwd.clone(),
@@ -1223,6 +1232,11 @@ impl ProgressSender for NoopProgressSender {
 pub struct QueryLoopConfig {
     pub api_client: Arc<UnifiedClient>,
     pub tools: Vec<Arc<dyn Tool>>,
+    /// Deferred tools activated for THIS query (registry names): invoked
+    /// tools and tool-search matches carry full schemas for the rest of the
+    /// query. Shared by handle so per-call config clones see mutations.
+    /// Resets per query — the next query starts from stubs again.
+    pub expanded_tools: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
     pub model: String,
     pub max_turns: Option<u32>,
     pub cwd: PathBuf,
@@ -1431,6 +1445,7 @@ mod tests {
         }));
         QueryEngineConfig {
             cwd: PathBuf::from("/tmp"),
+            tool_registry: None,
             tools: vec![],
             api_client,
             model: "claude-sonnet-4-20250514".to_string(),
@@ -2253,6 +2268,7 @@ mod tests {
     fn make_loop_config(model: &str) -> QueryLoopConfig {
         let (_abort_tx, abort_rx) = watch::channel(false);
         QueryLoopConfig {
+            expanded_tools: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
             api_client: Arc::new(UnifiedClient::new_anthropic(ApiClientConfig {
                 api_key: "test".to_string(),
                 base_url: None,
@@ -2515,6 +2531,7 @@ mod cleanup_pass0_tests {
     fn make_engine_with(messages: Vec<Message>) -> QueryEngine {
         let config = crate::engine::query_engine::QueryEngineConfig {
             cwd: PathBuf::from("/tmp"),
+            tool_registry: None,
             tools: vec![],
             api_client: Arc::new(crate::api::unified::UnifiedClient::new_anthropic(
                 crate::api::client::ApiClientConfig {

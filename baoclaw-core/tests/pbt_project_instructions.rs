@@ -44,6 +44,7 @@ proptest! {
 
         let config = QueryLoopConfig {
             api_client: make_api_client(),
+            expanded_tools: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
             tools: vec![],
             model: "test-model".to_string(),
             max_turns: None,

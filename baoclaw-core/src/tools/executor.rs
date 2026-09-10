@@ -152,6 +152,12 @@ async fn call_tool_with_abort(
     context: &ToolContext,
     progress: &dyn ProgressSender,
 ) -> Result<ToolResult, ToolError> {
+    // Tools that manage cancellation themselves (MCP bridges notify the
+    // remote server before returning) must NOT be raced by the outer
+    // select — a dropped future could skip the protocol-level cleanup.
+    if tool.aborts_internally() {
+        return tool.call(request.input.clone(), context, progress).await;
+    }
     let abort_signal = context.abort_signal.clone();
     tokio::select! {
         r = tool.call(request.input.clone(), context, progress) => r,

@@ -52,6 +52,12 @@ pub enum ClientMethod {
     ListTools,
     #[serde(rename = "listMcpServers")]
     ListMcpServers,
+    #[serde(rename = "mcpRefresh")]
+    McpRefresh {
+        /// Refresh one server; None = every configured server.
+        #[serde(default)]
+        server: Option<String>,
+    },
     #[serde(rename = "listSkills")]
     ListSkills,
     #[serde(rename = "listPlugins")]

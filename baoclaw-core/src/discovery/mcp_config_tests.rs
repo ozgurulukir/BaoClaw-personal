@@ -126,6 +126,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_headers_field_parsed_but_never_serialized() {
+        let home = tempdir().unwrap();
+        let project = tempdir().unwrap();
+        fs::create_dir_all(home.path().join(".baoclaw"))
+            .await
+            .unwrap();
+        fs::write(
+            home.path().join(".baoclaw").join("mcp.json"),
+            r#"{"mcpServers": {"with-headers": {"type": "http", "url": "https://mcp.example/mcp", "headers": {"Authorization": "Bearer abc123"}}}}"#,
+        )
+        .await
+        .unwrap();
+
+        let servers = discover_mcp_servers_in(Some(home.path()), project.path()).await;
+        assert_eq!(servers.len(), 1);
+        assert_eq!(
+            servers[0].headers.get("Authorization").map(String::as_str),
+            Some("Bearer abc123")
+        );
+        // Header values are credentials: they must never reach an RPC
+        // response (same discipline as `env`).
+        let wire = serde_json::to_value(&servers[0]).unwrap();
+        assert!(wire.get("headers").is_none());
+    }
+
+    #[tokio::test]
     async fn test_duplicate_name_first_source_wins() {
         let home = tempdir().unwrap();
         let project = tempdir().unwrap();

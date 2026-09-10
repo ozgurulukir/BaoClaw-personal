@@ -1,5 +1,6 @@
 use serde_json::Value;
 use std::path::Path;
+use std::sync::Arc;
 
 use crate::api::client::CreateMessageRequest;
 use crate::engine::query_engine::{CachedRule, QueryLoopConfig, ThinkingConfig};
@@ -402,41 +403,78 @@ pub fn build_api_request(messages: &[Message], config: &QueryLoopConfig) -> Crea
     }
 }
 
-/// Build the tools list deterministically — called once and frozen for the session.
+/// Build the tools list for one API call over the query's tool snapshot.
 ///
 /// Tool order is part of the cached prefix, so non-deterministic iteration
 /// (e.g. HashMap-based) would break caching.
 pub fn build_tools_list(config: &QueryLoopConfig) -> Option<Vec<Value>> {
-    if config.tools.is_empty() {
+    let expanded = config.expanded_tools.lock().unwrap();
+    build_tools_list_with(&config.tools, &expanded)
+}
+
+/// Layout, for prompt-cache stability (the tools array is part of the cached
+/// prefix): group 1 = non-deferred tools (alphabetical, frozen for the
+/// query) carrying the cache breakpoint; group 2 = activated deferred tools
+/// (alphabetical — their entries never move the breakpoint); group 3 = stubs
+/// (alphabetical). A stub expanding to full schema mutates only its own
+/// entry after the breakpoint, so activations never invalidate the prefix.
+pub fn build_tools_list_with(
+    tools: &[Arc<dyn crate::tools::Tool>],
+    expanded: &std::collections::HashSet<String>,
+) -> Option<Vec<Value>> {
+    if tools.is_empty() {
         return None;
     }
-    let mut tool_list: Vec<Value> = config
-        .tools
+    #[derive(PartialEq, PartialOrd, Ord, Eq)]
+    enum Group {
+        Frozen,
+        Activated,
+        Stub,
+    }
+    let mut entries: Vec<(Group, Value)> = tools
         .iter()
         .map(|t| {
-            if t.is_deferred() {
+            let is_deferred = t.is_deferred();
+            let group = if !is_deferred {
+                Group::Frozen
+            } else if expanded.contains(t.name()) {
+                Group::Activated
+            } else {
+                Group::Stub
+            };
+            let entry = if group == Group::Stub {
+                // Minimal VALID schema: real gateways reject tools without
+                // one, and no wire defer field is sent (deferral is purely
+                // this client's serialization choice).
                 serde_json::json!({
                     "name": t.name(),
                     "description": t.short_description(),
-                    "defer_loading": true,
+                    "input_schema": { "type": "object", "properties": {} },
                 })
             } else {
-                let schema = t.input_schema();
                 serde_json::json!({
                     "name": t.name(),
                     "description": t.prompt(),
-                    "input_schema": schema,
+                    "input_schema": t.input_schema(),
                 })
-            }
+            };
+            (group, entry)
         })
         .collect();
-    tool_list.sort_by(|a, b| {
-        let name_a = a.get("name").and_then(|v| v.as_str()).unwrap_or("");
-        let name_b = b.get("name").and_then(|v| v.as_str()).unwrap_or("");
-        name_a.cmp(name_b)
+    entries.sort_by(|a, b| {
+        let name_a = a.1.get("name").and_then(|v| v.as_str()).unwrap_or("");
+        let name_b = b.1.get("name").and_then(|v| v.as_str()).unwrap_or("");
+        a.0.cmp(&b.0).then_with(|| name_a.cmp(name_b))
     });
-    if let Some(last_tool) = tool_list.last_mut() {
-        if let Some(obj) = last_tool.as_object_mut() {
+    // Cache breakpoint after the FROZEN group: activations mutate entries
+    // that sit after it, so the cached prefix survives every activation.
+    let breakpoint = entries
+        .iter()
+        .rposition(|(g, _)| *g == Group::Frozen)
+        .map(|i| i + 1);
+    let mut tool_list: Vec<Value> = entries.into_iter().map(|(_, e)| e).collect();
+    if let Some(idx) = breakpoint {
+        if let Some(obj) = tool_list.get_mut(idx - 1).and_then(|v| v.as_object_mut()) {
             obj.insert(
                 "cache_control".to_string(),
                 serde_json::json!({ "type": "ephemeral" }),

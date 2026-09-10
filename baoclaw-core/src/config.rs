@@ -75,6 +75,13 @@ fn default_mcp_max_restarts() -> u32 {
     10
 }
 
+/// MCP tools register as deferred stubs (placeholder schema) until the model
+/// invokes them or surfaces them via tool search; then the full schema rides
+/// every request for the rest of the query.
+fn default_mcp_deferred_tools() -> bool {
+    true
+}
+
 // ─── ModelProfile ───────────────────────────────────────────────────────────
 
 /// A model configuration profile with its own API credentials and window.
@@ -179,6 +186,12 @@ pub struct BaoclawConfig {
     /// (default 10; backoff is exponential 1s→60s).
     #[serde(default = "default_mcp_max_restarts")]
     pub mcp_max_restarts: u32,
+    /// Register MCP tools as deferred stubs (tiny placeholder schema) that
+    /// expand to the full schema for the rest of a query once the model
+    /// calls the tool or finds it via tool search. Keeps the cached prompt
+    /// prefix small and makes catalog refreshes cheap (default true).
+    #[serde(default = "default_mcp_deferred_tools")]
+    pub mcp_deferred_tools: bool,
 
     // === New: Named model profiles (P1-1) ===
     /// Named model profiles (new format). Each profile has its own api_type,
@@ -283,6 +296,7 @@ impl Default for BaoclawConfig {
             mcp_startup_timeout_secs: default_mcp_startup_timeout_secs(),
             mcp_call_timeout_secs: default_mcp_call_timeout_secs(),
             mcp_max_restarts: default_mcp_max_restarts(),
+            mcp_deferred_tools: default_mcp_deferred_tools(),
             model_profiles: HashMap::new(),
             primary_profile: None,
             fallback_profiles: Vec::new(),
@@ -620,6 +634,7 @@ mod tests {
             mcp_startup_timeout_secs: 5,
             mcp_call_timeout_secs: 60,
             mcp_max_restarts: 3,
+            mcp_deferred_tools: false,
             openai_base_url: None,
             context_window: 200_000,
             auto_compact_threshold_ratio: 0.7,

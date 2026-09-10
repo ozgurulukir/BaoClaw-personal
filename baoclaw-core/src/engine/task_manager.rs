@@ -32,7 +32,7 @@ pub struct TaskManager {
     tasks: Arc<RwLock<HashMap<String, BackgroundTask>>>,
     abort_handles: Arc<RwLock<HashMap<String, watch::Sender<bool>>>>,
     api_client: Arc<UnifiedClient>,
-    tools: Vec<Arc<dyn Tool>>,
+    tools: crate::tools::registry::ToolSource,
     /// Shared engine resources (prompt, fallback chain, telemetry,
     /// evolution, memory, caches, tool health) — same capabilities as the
     /// interactive engine.
@@ -50,7 +50,22 @@ impl TaskManager {
             tasks: Arc::new(RwLock::new(HashMap::new())),
             abort_handles: Arc::new(RwLock::new(HashMap::new())),
             api_client,
-            tools,
+            tools: crate::tools::registry::ToolSource::Static(tools),
+            kit,
+        }
+    }
+
+    /// Live-catalog variant: each spawned task snapshots the registry.
+    pub fn with_registry(
+        api_client: Arc<UnifiedClient>,
+        registry: crate::tools::registry::ToolRegistryHandle,
+        kit: crate::engine::kit::HeadlessEngineKit,
+    ) -> Self {
+        Self {
+            tasks: Arc::new(RwLock::new(HashMap::new())),
+            abort_handles: Arc::new(RwLock::new(HashMap::new())),
+            api_client,
+            tools: crate::tools::registry::ToolSource::Registry(registry),
             kit,
         }
     }
@@ -91,7 +106,7 @@ impl TaskManager {
         let tasks = Arc::clone(&self.tasks);
         let abort_handles = Arc::clone(&self.abort_handles);
         let api_client = Arc::clone(&self.api_client);
-        let tools = self.tools.clone();
+        let tools = self.tools.resolve();
         let tid = task_id.clone();
         let kit = self.kit.clone();
 
@@ -99,6 +114,7 @@ impl TaskManager {
             let config = QueryEngineConfig {
                 tool_health: Some(Arc::clone(&kit.tool_health)),
                 cwd,
+                tool_registry: None,
                 tools,
                 api_client,
                 model,

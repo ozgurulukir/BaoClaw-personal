@@ -20,6 +20,10 @@ pub struct McpServerInfo {
     pub config_path: String,
     #[serde(default, skip_serializing)]
     pub env: HashMap<String, String>,
+    /// Per-server HTTP headers for url-based transports. Values are secrets
+    /// (Authorization tokens): skipped in serialization, never logged.
+    #[serde(default, skip_serializing)]
+    pub headers: HashMap<String, String>,
 }
 
 /// MCP config file format (mcp.json)
@@ -41,6 +45,8 @@ struct McpServerEntry {
     server_type: Option<String>,
     #[serde(default)]
     env: HashMap<String, String>,
+    #[serde(default)]
+    headers: HashMap<String, String>,
 }
 
 /// Discover all MCP server configurations from standard locations.
@@ -167,6 +173,7 @@ async fn load_mcp_config(path: &Path, source: &str) -> Vec<McpServerInfo> {
                 source: source.to_string(),
                 config_path: config_path.clone(),
                 env: entry.env,
+                headers: entry.headers,
             }
         })
         .collect()

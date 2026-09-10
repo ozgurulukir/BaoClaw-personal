@@ -899,6 +899,7 @@ async fn call_api_with_fallback(
     let current_config = QueryLoopConfig {
         api_client: Arc::clone(&config.api_client),
         tools: config.tools.clone(),
+        expanded_tools: Arc::clone(&config.expanded_tools),
         model: fallback_controller.current_model().to_string(),
         max_turns: config.max_turns,
         cwd: config.cwd.clone(),
@@ -1780,6 +1781,39 @@ async fn execute_tool_turn(
             }
         } else {
             config.tool_health.record_success(&res.tool_name);
+        }
+    }
+
+    // Sticky deferred activation: any invoked deferred tool, and any
+    // deferred tool surfaced by tool search, carries its full input schema
+    // on the NEXT request of this query (activation is the point where the
+    // model showed interest — including error results, which are exactly
+    // when the schema is needed to retry).
+    for res in &tool_results {
+        if res.tool_name == "ToolSearchTool" {
+            if let Some(matches) = res.output.get("matches").and_then(Value::as_array) {
+                for m in matches {
+                    if let Some(n) = m.get("name").and_then(Value::as_str) {
+                        if config
+                            .tools
+                            .iter()
+                            .any(|t| t.name() == n && t.is_deferred())
+                        {
+                            config.expanded_tools.lock().unwrap().insert(n.to_string());
+                        }
+                    }
+                }
+            }
+        } else if config
+            .tools
+            .iter()
+            .any(|t| t.name() == res.tool_name && t.is_deferred())
+        {
+            config
+                .expanded_tools
+                .lock()
+                .unwrap()
+                .insert(res.tool_name.clone());
         }
     }
 

@@ -131,13 +131,23 @@ pub trait Tool: Send + Sync {
         self.name().to_string()
     }
 
-    /// Whether this tool should be deferred (lazy-loaded) in the prompt.
-    ///
-    /// Deferred tools emit only a lightweight stub (name + short description)
-    /// in the API request.  The full schema is loaded on-demand when the model
-    /// invokes the tool via Tool Search.  This keeps the cached prefix small
-    /// and stable — adding/removing MCP tools won't invalidate the cache.
+    /// Whether this tool is advertised as a deferred stub: requests carry
+    /// only `{name, short description, minimal placeholder schema}` until the
+    /// model invokes the tool or surfaces it via tool search, after which the
+    /// full schema rides every request for the rest of the query. No wire
+    /// `defer_loading` field is sent (third-party gateways reject unknown
+    /// fields); deferral is purely this client's serialization choice, which
+    /// keeps the cached prefix small and stable across MCP catalog changes.
     fn is_deferred(&self) -> bool {
+        false
+    }
+
+    /// Whether `call` observes the context abort signal itself, cancels its
+    /// remote work (e.g. `notifications/cancelled` for an MCP tool), and
+    /// returns `ToolError::Aborted`. The executor then skips its own select
+    /// so the call future is never dropped with server-side work still
+    /// running. Default: false (the executor cancels by dropping).
+    fn aborts_internally(&self) -> bool {
         false
     }
 

@@ -674,6 +674,7 @@ mod tests {
     ) -> crate::engine::query_engine::QueryEngineConfig {
         crate::engine::query_engine::QueryEngineConfig {
             cwd,
+            tool_registry: None,
             tools: vec![],
             api_client: Arc::new(UnifiedClient::new_anthropic(ApiClientConfig {
                 api_key: "test-key".to_string(),

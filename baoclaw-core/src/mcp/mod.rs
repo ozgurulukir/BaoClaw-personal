@@ -7,14 +7,23 @@
 //! property (and with it the prompt-cache prefix) intact.
 
 mod bridge;
-mod client;
+pub mod client;
+pub(crate) mod demux;
+mod http;
 pub mod manager;
+mod sse;
+mod transport;
 mod types;
 
+pub use client::McpError;
 pub use manager::{
     ConnectionManager, McpCallError, McpLaunchConfig, ServerRuntimeState, ServerStatus,
 };
 pub use types::CallToolOutcome;
+
+/// Protocol version for the Streamable HTTP transport (the revision that
+/// introduced it). stdio and legacy SSE keep [`MCP_PROTOCOL_VERSION`].
+pub const MCP_PROTOCOL_VERSION_HTTP: &str = "2025-03-26";
 
 /// Protocol version advertised in the initialize handshake.
 ///

@@ -181,6 +181,9 @@ pub(super) async fn handle_shared_client(
                         ClientMethod::ListMcpServers => {
                             scm_list_mcp_servers(&shared, &work_cwd, &writer, id).await;
                         }
+                        ClientMethod::McpRefresh { server } => {
+                            scm_mcp_refresh(&shared, server, &writer, id).await;
+                        }
                         ClientMethod::ListSkills => {
                             scm_list_skills(&work_cwd, &writer, id).await;
                         }
@@ -836,7 +839,8 @@ async fn scm_initialize(writer: WriterRef<'_>, id: RequestId) {
 
 async fn scm_list_tools(shared: &SharedState, writer: WriterRef<'_>, id: RequestId) {
     let tl: Vec<serde_json::Value> = shared
-        .engine_tools
+        .tool_registry
+        .snapshot()
         .iter()
         .map(|t| {
             let ty = if t.name().starts_with(baoclaw_core::mcp::MCP_TOOL_PREFIX) {
@@ -844,7 +848,12 @@ async fn scm_list_tools(shared: &SharedState, writer: WriterRef<'_>, id: Request
             } else {
                 "builtin"
             };
-            serde_json::json!({"name": t.name(), "description": t.prompt(), "type": ty})
+            serde_json::json!({
+                "name": t.name(),
+                "description": t.prompt(),
+                "type": ty,
+                "deferred": t.is_deferred(),
+            })
         })
         .collect();
     let mut conn_guard = writer.lock().await;
@@ -877,6 +886,26 @@ async fn scm_list_mcp_servers(
                 obj.insert("runtime".to_string(), runtime);
             }
             v
+        })
+        .collect();
+    let count = servers.len();
+    let mut conn_guard = writer.lock().await;
+    let _ = conn_guard
+        .send_response(id, serde_json::json!({"servers": servers, "count": count}))
+        .await;
+}
+
+async fn scm_mcp_refresh(
+    shared: &SharedState,
+    server: Option<String>,
+    writer: WriterRef<'_>,
+    id: RequestId,
+) {
+    let statuses = shared.mcp_manager.refresh(server.as_deref()).await;
+    let servers: Vec<serde_json::Value> = statuses
+        .iter()
+        .map(|(name, st)| {
+            serde_json::json!({"name": name, "runtime": serde_json::to_value(st).unwrap_or(serde_json::Value::Null)})
         })
         .collect();
     let count = servers.len();
@@ -2135,9 +2164,9 @@ async fn scm_team_spawn(
     };
 
     // Create the executor and team
-    let executor = TeamExecutor::new(
+    let executor = TeamExecutor::with_registry(
         Arc::clone(&shared.api_client),
-        shared.engine_tools.clone(),
+        Arc::clone(&shared.tool_registry),
         work_cwd.clone(),
         shared.state_manager.get().model.clone(),
         shared.headless_kit.clone(),
@@ -2319,9 +2348,9 @@ async fn scm_team_execute(
     match shared.team_executor.get_team(&team_id).await {
         Some(team) => {
             // Spawn execution in background
-            let executor = engine::team::TeamExecutor::new(
+            let executor = engine::team::TeamExecutor::with_registry(
                 Arc::clone(&shared.api_client),
-                shared.engine_tools.clone(),
+                Arc::clone(&shared.tool_registry),
                 work_cwd.clone(),
                 shared.state_manager.get().model.clone(),
                 shared.headless_kit.clone(),

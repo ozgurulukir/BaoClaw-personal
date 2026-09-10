@@ -4,7 +4,7 @@
 use serde_json::{json, Value};
 
 /// One tool advertised by a server via `tools/list`.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct McpToolDef {
     /// ORIGINAL remote name — sent verbatim in `tools/call`.
     pub name: String,

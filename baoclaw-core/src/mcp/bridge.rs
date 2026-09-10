@@ -12,9 +12,9 @@ use super::manager::{ConnectionManager, McpCallError};
 use super::types::McpToolDef;
 
 /// A single remote tool exposed through the engine's `Tool` trait. Bridges
-/// are built ONCE at boot (`ConnectionManager::boot_and_build_tools`) and the
-/// tool set is static afterwards — a reconnect revives the connection but
-/// never adds or removes tools.
+/// are rebuilt and republished per server bucket whenever a slot connects or
+/// its catalog refreshes; engines observe the new set at their next
+/// snapshot.
 pub struct McpToolBridge {
     manager: Arc<ConnectionManager>,
     /// Original server name (slot key in the manager).
@@ -23,6 +23,7 @@ pub struct McpToolBridge {
     tool: McpToolDef,
     /// Registry name: `mcp__<server>__<tool>` (sanitized segments).
     registry_name: String,
+    deferred: bool,
 }
 
 impl McpToolBridge {
@@ -31,13 +32,29 @@ impl McpToolBridge {
         server: String,
         tool: McpToolDef,
         registry_name: String,
+        deferred: bool,
     ) -> Self {
         Self {
             manager,
             server,
             tool,
             registry_name,
+            deferred,
         }
+    }
+
+    /// First line of the remote description, without the prompt() boilerplate
+    /// — this is what a deferred stub advertises.
+    fn short_remote_description(&self) -> String {
+        self.tool
+            .description
+            .as_deref()
+            .unwrap_or("remote tool")
+            .lines()
+            .next()
+            .unwrap_or("")
+            .trim()
+            .to_string()
     }
 }
 
@@ -77,30 +94,40 @@ impl Tool for McpToolBridge {
     // the permission manager is name-generic) and run sequentially.
 
     fn prompt(&self) -> String {
-        let first = self
-            .tool
-            .description
-            .as_deref()
-            .unwrap_or("remote tool")
-            .lines()
-            .next()
-            .unwrap_or("")
-            .trim();
         format!(
             "{}: {} (remote tool provided by the MCP server '{}'; arguments are forwarded to that server process)",
-            self.registry_name, first, self.server
+            self.registry_name,
+            self.short_remote_description(),
+            self.server
         )
+    }
+
+    fn is_deferred(&self) -> bool {
+        self.deferred
+    }
+
+    fn short_description(&self) -> String {
+        self.short_remote_description()
+    }
+
+    fn aborts_internally(&self) -> bool {
+        true
     }
 
     async fn call(
         &self,
         input: Value,
-        _context: &ToolContext,
+        context: &ToolContext,
         _progress: &dyn ProgressSender,
     ) -> Result<ToolResult, ToolError> {
         match self
             .manager
-            .call_tool(&self.server, &self.tool.name, input)
+            .call_tool_cancellable(
+                &self.server,
+                &self.tool.name,
+                input,
+                Some(context.abort_signal.as_ref().clone()),
+            )
             .await
         {
             Ok(outcome) => Ok(ToolResult {
@@ -113,12 +140,13 @@ impl Tool for McpToolBridge {
                 data: serde_json::json!({ "error": message, "code": code }),
                 is_error: true,
             }),
-            // Server down: meaningful error result per the frozen-catalog
-            // design; the model is told the tool set is unchanged.
+            // Server down: a meaningful error result. The registered tools
+            // may come back (or change) via reconnect/refresh; the model
+            // should retry rather than assume the tool vanished.
             Err(McpCallError::Disconnected { state, reason }) => Ok(ToolResult {
                 data: serde_json::json!({
                     "error": format!(
-                        "MCP server '{}' is not connected (state: {}). It may reconnect automatically; no tools were added or removed.",
+                        "MCP server '{}' is not connected (state: {}). It may reconnect automatically — retry shortly.",
                         self.server,
                         serde_json::to_value(&state).unwrap_or(Value::Null)
                     ),
@@ -137,6 +165,9 @@ impl Tool for McpToolBridge {
             }),
             // Same semantics as BashTool's timeout path.
             Err(McpCallError::Timeout(ms)) => Err(ToolError::Timeout(ms)),
+            // Cancellation was requested and forwarded; parity with the
+            // executor's abort path.
+            Err(McpCallError::Cancelled) => Err(ToolError::Aborted),
         }
     }
 }
@@ -164,6 +195,7 @@ mod tests {
                 input_schema: schema,
             },
             super::super::composite_tool_name("srv", "tool one"),
+            false,
         )
     }
 

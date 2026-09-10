@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use crate::api::unified::UnifiedClient;
 use crate::engine::query_engine::{EngineEvent, QueryEngine, QueryEngineConfig, ThinkingConfig};
+use crate::tools::registry::{ToolRegistryHandle, ToolSource};
 use crate::tools::trait_def::*;
 
 /// AgentTool — creates an independent sub-agent QueryEngine to execute a sub-task.
@@ -12,7 +13,7 @@ use crate::tools::trait_def::*;
 /// sharing the parent's API client.
 pub struct AgentTool {
     api_client: Arc<UnifiedClient>,
-    available_tools: Vec<Arc<dyn Tool>>,
+    tools: ToolSource,
     default_max_turns: u32,
     /// Shared engine resources for sub-agent engines (prompt, fallback
     /// chain, telemetry, evolution, memory, caches, tool health) — full
@@ -29,7 +30,22 @@ impl AgentTool {
     ) -> Self {
         Self {
             api_client,
-            available_tools,
+            tools: ToolSource::Static(available_tools),
+            default_max_turns: 10,
+            kit,
+        }
+    }
+
+    /// Live-catalog variant: sub-agents snapshot the registry per spawn, so
+    /// catalog refreshes reach new sub-agents without a restart.
+    pub fn new_with_registry(
+        api_client: Arc<UnifiedClient>,
+        registry: ToolRegistryHandle,
+        kit: crate::engine::kit::HeadlessEngineKit,
+    ) -> Self {
+        Self {
+            api_client,
+            tools: ToolSource::Registry(registry),
             default_max_turns: 10,
             kit,
         }
@@ -112,7 +128,8 @@ impl Tool for AgentTool {
         // Create sub-agent QueryEngine with independent message history
         let sub_engine_config = QueryEngineConfig {
             cwd: context.cwd.clone(),
-            tools: self.available_tools.clone(),
+            tool_registry: None,
+            tools: self.tools.resolve_without(&["AgentTool", "ToolSearchTool"]),
             api_client: Arc::clone(&self.api_client),
             model,
             thinking_config: ThinkingConfig::Disabled,

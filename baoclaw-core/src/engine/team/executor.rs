@@ -116,7 +116,7 @@ pub struct TeamExecutor {
     /// API client for creating sub-agent engines.
     api_client: Arc<UnifiedClient>,
     /// Tools available to sub-agents.
-    tools: Vec<Arc<dyn Tool>>,
+    tools: crate::tools::registry::ToolSource,
     /// Active teams being managed.
     teams: Arc<RwLock<HashMap<String, AgentTeam>>>,
     /// Abort handles for running teams.
@@ -143,7 +143,27 @@ impl TeamExecutor {
     ) -> Self {
         Self {
             api_client,
-            tools,
+            tools: crate::tools::registry::ToolSource::Static(tools),
+            teams: Arc::new(RwLock::new(HashMap::new())),
+            abort_handles: Arc::new(RwLock::new(HashMap::new())),
+            default_cwd,
+            default_model,
+            kit,
+            default_policy: crate::engine::team::policy::TeamPolicy::default(),
+        }
+    }
+
+    /// Live-catalog variant: each spawned agent snapshots the registry.
+    pub fn with_registry(
+        api_client: Arc<UnifiedClient>,
+        registry: crate::tools::registry::ToolRegistryHandle,
+        default_cwd: PathBuf,
+        default_model: String,
+        kit: crate::engine::kit::HeadlessEngineKit,
+    ) -> Self {
+        Self {
+            api_client,
+            tools: crate::tools::registry::ToolSource::Registry(registry),
             teams: Arc::new(RwLock::new(HashMap::new())),
             abort_handles: Arc::new(RwLock::new(HashMap::new())),
             default_cwd,
@@ -164,7 +184,7 @@ impl TeamExecutor {
     ) -> Self {
         Self {
             api_client,
-            tools,
+            tools: crate::tools::registry::ToolSource::Static(tools),
             teams: Arc::new(RwLock::new(HashMap::new())),
             abort_handles: Arc::new(RwLock::new(HashMap::new())),
             default_cwd,
@@ -375,7 +395,7 @@ impl TeamExecutor {
 
         for (agent_id, prompt) in agent_prompts {
             let api_client = Arc::clone(&self.api_client);
-            let tools = self.tools.clone();
+            let tools = self.tools.resolve();
             let cwd_clone = cwd.clone();
             let model = self.default_model.clone();
             let abort_rx_clone = abort_rx.clone();
@@ -517,7 +537,7 @@ impl TeamExecutor {
             // Execute the agent
             let result = Self::execute_single_agent(
                 Arc::clone(&self.api_client),
-                self.tools.clone(),
+                self.tools.resolve(),
                 cwd.clone(),
                 self.default_model.clone(),
                 prompt,
@@ -694,7 +714,7 @@ impl TeamExecutor {
                 }
 
                 let api_client = Arc::clone(&self.api_client);
-                let tools = self.tools.clone();
+                let tools = self.tools.resolve();
                 let cwd_clone = cwd.clone();
                 let model = self.default_model.clone();
                 let shared_state_clone = Arc::clone(&shared_state);
@@ -891,6 +911,7 @@ impl TeamExecutor {
         };
 
         let config = QueryEngineConfig {
+            tool_registry: None,
             tool_health: Some(std::sync::Arc::clone(&kit.tool_health)),
             cwd,
             tools: filtered_tools,

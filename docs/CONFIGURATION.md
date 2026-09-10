@@ -18,7 +18,7 @@
 │   └── my-plugin/
 │       ├── skills/
 │       └── mcp.json
-├── mcp.json                         # User-level MCP servers (executed by the daemon, stdio only)
+├── mcp.json                         # User-level MCP servers (executed by the daemon: stdio, http, sse)
 ├── models/                          # Local model files (whisper etc.)
 │   └── ggml-base.bin
 ├── telemetry.db                    # Local telemetry (SQLite; turns + sessions)
@@ -97,7 +97,8 @@ own API key, base URL, and context window:
 | `mcp_enabled`                                                             | boolean       | `true`   | MCP client master switch; `false` skips MCP discovery entirely and no MCP tools are registered                                                                                                                                                    |
 | `mcp_startup_timeout_secs`                                                | number        | `10`     | Seconds budgeted to EACH MCP handshake step (initialize, tools/list page); a hung server cannot stall daemon boot beyond a bounded multiple of this                                                                                               |
 | `mcp_call_timeout_secs`                                                   | number        | `300`    | Seconds budgeted to a single MCP tool call                                                                                                                                                                                                        |
-| `mcp_max_restarts`                                                        | number        | `10`     | Reconnect attempts for a crashed MCP server process (exponential backoff 1s→60s) before the slot gives up; its tools then return errors until daemon restart                                                                                      |
+| `mcp_max_restarts`                                                        | number        | `10`     | Reconnect attempts for a down MCP server (exponential backoff 1s→60s) before the slot parks; `/mcp refresh` revives it with a fresh budget                                                                                                        |
+| `mcp_deferred_tools`                                                      | boolean       | `true`   | Register MCP tools as deferred stubs (placeholder schema) that expand to the full schema for the rest of a query once the model calls the tool or finds it via tool search                                                                        |
 | `permissions`                                                             | object        | —        | Tool permission rules and knobs — see [PERMISSIONS.md](PERMISSIONS.md)                                                                                                                                                                            |
 | `telegram.token`                                                          | string        | —        | Telegram bot token from @BotFather                                                                                                                                                                                                                |
 | `telegram.allowedChatIds`                                                 | number[]      | `[]`     | Allowed chat IDs (required; empty = reject all and refuse startup)                                                                                                                                                                                |
@@ -132,16 +133,20 @@ tool result unless a tool declares a tighter limit.
 
 `~/.baoclaw/warmup.json` (auto-created) stores context-warmup tuning.
 
-WhatsApp session credentials are stored under `~/.baoclaw/whatsapp-auth/`.
+WhatsApp session credentials are stored under `~/.baoclaw/whatsapp-auth/`
+(the directory restricted to the owner `0700`, credential files `0600`).
 
 ### `mcp.json` — MCP servers
 
 MCP servers are configured in `~/.baoclaw/mcp.json` (user scope),
 `<cwd>/.baoclaw/mcp.json` (project), `<cwd>/.baoclaw/mcp.local.json`
 (gitignored overrides), and `plugins/*/mcp.json` in either scope. The first
-definition of a name wins. At boot the daemon spawns every enabled **stdio**
-server, registers its tools as `mcp__<server>__<tool>`, and keeps the catalog
-frozen until restart; SSE/HTTP entries are listed by `/mcp` but not executed.
+definition of a name wins. At boot the daemon connects every enabled server —
+spawning `stdio` processes and reaching `http` (Streamable HTTP) / `sse`
+(legacy HTTP+SSE) endpoints — and registers their tools as
+`mcp__<server>__<tool>` in a live catalog: `notifications/tools/list_changed`
+and `/mcp refresh [server]` re-fetch catalogs and republish without a
+restart.
 
 ```json
 {
@@ -151,25 +156,30 @@ frozen until restart; SSE/HTTP entries are listed by `/mcp` but not executed.
       "args": ["-y", "some-fs-server", "/home/me/projects"],
       "env": { "SOME_TOKEN": "..." }
     },
-    "remote": { "url": "http://localhost:8080/sse", "disabled": true }
+    "remote": {
+      "type": "http",
+      "url": "https://mcp.example.com/mcp",
+      "headers": { "Authorization": "Bearer ..." }
+    },
+    "legacy": { "url": "http://localhost:8080/sse", "disabled": true }
   }
 }
 ```
 
-| Field      | Type     | Default                              | Description                                                                                       |
-| ---------- | -------- | ------------------------------------ | ------------------------------------------------------------------------------------------------- |
-| `command`  | string   | —                                    | Executable to spawn (required for stdio servers)                                                  |
-| `args`     | string[] | `[]`                                 | Command-line arguments                                                                            |
-| `env`      | object   | `{}`                                 | Extra environment for the server process. Values are secrets: never logged, never sent to clients |
-| `type`     | string   | `stdio` (or `sse` when `url` is set) | Transport; only `stdio` is executed                                                               |
-| `disabled` | boolean  | `false`                              | Skip the server entirely                                                                          |
+| Field      | Type     | Default                              | Description                                                                                                                            |
+| ---------- | -------- | ------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------- |
+| `command`  | string   | —                                    | Executable to spawn (required for stdio servers)                                                                                       |
+| `args`     | string[] | `[]`                                 | Command-line arguments                                                                                                                 |
+| `env`      | object   | `{}`                                 | Extra environment for the server process. Values are secrets: never logged, never sent to clients                                      |
+| `headers`  | object   | `{}`                                 | HTTP headers for url-based transports (e.g. Authorization). Secret-handled like `env`; reserved transport headers cannot be overridden |
+| `type`     | string   | `stdio` (or `sse` when `url` is set) | Transport: `stdio`, `http` (Streamable HTTP), or `sse` (legacy HTTP+SSE)                                                               |
+| `disabled` | boolean  | `false`                              | Skip the server entirely                                                                                                               |
 
 Every MCP tool call goes through the standard permission pipeline (default
-Ask; whole-tool allow rules work by the `mcp__<server>__<tool>` name). See
-also the `mcp_*` knobs in the main table above.
-The directory is restricted to the owner (`0700`) and credential files to the
-owner (`0600`) after each credentials update.
-
+Ask; whole-tool allow rules work by the `mcp__<server>__<tool>` name). Tools
+register as deferred stubs by default (`mcp_deferred_tools`) and expand to
+their full schema for the rest of a query once used or surfaced by tool
+search. See also the `mcp_*` knobs in the main table above.
 Environment variables:
 
 - `ANTHROPIC_API_KEY` — API key, used when the active profile has no `api_key`
