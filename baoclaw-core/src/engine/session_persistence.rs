@@ -820,6 +820,71 @@ pub fn reset_transcript(sessions_dir: &Path, session_id: &str) -> io::Result<()>
     fs::write(&path, "")
 }
 
+// ── Asynchronous persistence APIs for Tokio runtimes ──
+
+/// Asynchronously persist a session's full state by offloading filesystem I/O
+/// to Tokio's blocking thread pool.
+pub async fn persist_session_state_async(
+    sessions_dir: PathBuf,
+    state: PersistedSession,
+) -> io::Result<()> {
+    tokio::task::spawn_blocking(move || persist_session_state(&sessions_dir, &state))
+        .await
+        .map_err(|e| io::Error::other(format!("persist task panicked: {}", e)))?
+}
+
+/// Asynchronously load a session's persisted state by offloading filesystem I/O.
+pub async fn load_session_state_async(
+    sessions_dir: PathBuf,
+    session_id: String,
+) -> Option<PersistedSession> {
+    tokio::task::spawn_blocking(move || load_session_state(&sessions_dir, &session_id))
+        .await
+        .ok()
+        .flatten()
+}
+
+/// Asynchronously load the registry index from disk.
+pub async fn load_registry_async(sessions_dir: PathBuf) -> SessionRegistryIndex {
+    tokio::task::spawn_blocking(move || load_registry(&sessions_dir))
+        .await
+        .unwrap_or_default()
+}
+
+/// Asynchronously save the registry index to disk.
+pub async fn save_registry_async(
+    sessions_dir: PathBuf,
+    index: SessionRegistryIndex,
+) -> io::Result<()> {
+    tokio::task::spawn_blocking(move || save_registry(&sessions_dir, &index))
+        .await
+        .map_err(|e| io::Error::other(format!("save registry task panicked: {}", e)))?
+}
+
+/// Asynchronously archive stale sessions inactive for more than `max_age_days`.
+pub async fn archive_stale_sessions_async(
+    sessions_dir: PathBuf,
+    max_age_days: u64,
+) -> io::Result<Vec<String>> {
+    tokio::task::spawn_blocking(move || archive_stale_sessions(&sessions_dir, max_age_days))
+        .await
+        .map_err(|e| io::Error::other(format!("archive task panicked: {}", e)))?
+}
+
+/// Asynchronously delete a session's state file and artifacts.
+pub async fn delete_session_async(sessions_dir: PathBuf, session_id: String) -> io::Result<()> {
+    tokio::task::spawn_blocking(move || delete_session(&sessions_dir, &session_id))
+        .await
+        .map_err(|e| io::Error::other(format!("delete session task panicked: {}", e)))?
+}
+
+/// Asynchronously reset a session's transcript.
+pub async fn reset_transcript_async(sessions_dir: PathBuf, session_id: String) -> io::Result<()> {
+    tokio::task::spawn_blocking(move || reset_transcript(&sessions_dir, &session_id))
+        .await
+        .map_err(|e| io::Error::other(format!("reset transcript task panicked: {}", e)))?
+}
+
 fn validate_session_id(session_id: &str) -> io::Result<()> {
     if is_valid_session_id(session_id) {
         Ok(())
@@ -1373,5 +1438,52 @@ mod tests {
 
         let idx = load_registry(&sessions_dir);
         assert_eq!(idx.sessions.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_async_session_persistence_roundtrip() {
+        let dir = make_test_dir();
+        let sessions_dir = dir.path().join("sessions");
+
+        let state = PersistedSession {
+            schema_version: CURRENT_SCHEMA_VERSION,
+            session_id: "async-test-1".to_string(),
+            cwd: "/tmp".to_string(),
+            model: "model-async".to_string(),
+            created_at: "2026-09-11T00:00:00Z".to_string(),
+            last_active: "2026-09-11T01:00:00Z".to_string(),
+            messages: Vec::new(),
+            memory_summary: Some("Summary".to_string()),
+        };
+
+        // Async persist
+        persist_session_state_async(sessions_dir.clone(), state.clone())
+            .await
+            .unwrap();
+
+        // Async load registry
+        let reg = load_registry_async(sessions_dir.clone()).await;
+        assert_eq!(reg.sessions.len(), 1);
+        assert_eq!(reg.sessions[0].session_id, "async-test-1");
+
+        // Async load session
+        let loaded = load_session_state_async(sessions_dir.clone(), "async-test-1".to_string())
+            .await
+            .expect("should load async session");
+        assert_eq!(loaded.model, "model-async");
+        assert_eq!(loaded.memory_summary.as_deref(), Some("Summary"));
+
+        // Async reset transcript
+        reset_transcript_async(sessions_dir.clone(), "async-test-1".to_string())
+            .await
+            .unwrap();
+
+        // Async delete session
+        delete_session_async(sessions_dir.clone(), "async-test-1".to_string())
+            .await
+            .unwrap();
+        let loaded_after =
+            load_session_state_async(sessions_dir.clone(), "async-test-1".to_string()).await;
+        assert!(loaded_after.is_none());
     }
 }

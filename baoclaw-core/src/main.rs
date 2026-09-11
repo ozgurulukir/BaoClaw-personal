@@ -700,7 +700,7 @@ async fn lc_restore_session_history(
         if let Some(rid) =
             engine::transcript::find_latest_session_for_cwd(&cwd_str_for_resume, session_id)
         {
-            match engine::transcript::TranscriptWriter::load(&rid) {
+            match engine::transcript::TranscriptWriter::load_async(&rid).await {
                 Ok(entries) => {
                     let entry_count = entries.len();
                     let old_summary_obj = crate::engine::session_memory::SessionMemory::load(&rid);

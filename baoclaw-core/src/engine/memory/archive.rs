@@ -14,7 +14,7 @@
 //! - Memory restoration capability
 //! - Archive cleanup when exceeding 1000 entries
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use tokio::sync::Mutex;
 
 use crate::engine::memory::{DecayConfig, MemoryEntry};
@@ -121,14 +121,32 @@ impl MemoryArchive {
             .collect()
     }
 
-    /// Write all archived memories to file (synchronous).
-    fn write_all_sync(path: &PathBuf, entries: &[MemoryEntry]) {
+    /// Write all archived memories to file asynchronously.
+    async fn write_all_async(path: &Path, entries: &[MemoryEntry]) {
         let lines: Vec<String> = entries
             .iter()
             .filter_map(|e| serde_json::to_string(e).ok())
             .collect();
-        if let Err(e) = std::fs::write(path, lines.join("\n") + "\n") {
-            eprintln!("[memory-archive] WARNING: could not write archive {}: {} — archived memories may be lost", path.display(), e);
+        let body = if lines.is_empty() {
+            String::new()
+        } else {
+            lines.join("\n") + "\n"
+        };
+        let tmp = path.with_extension("tmp");
+        if let Err(e) = tokio::fs::write(&tmp, body.as_bytes()).await {
+            eprintln!(
+                "[memory-archive] WARNING: could not write archive tmp {}: {} — archived memories may be lost",
+                tmp.display(),
+                e
+            );
+            return;
+        }
+        if let Err(e) = tokio::fs::rename(&tmp, path).await {
+            eprintln!(
+                "[memory-archive] WARNING: could not rename archive {}: {} — archived memories may be lost",
+                path.display(),
+                e
+            );
         }
     }
 
@@ -139,27 +157,45 @@ impl MemoryArchive {
     pub async fn archive_memory(&self, mut memory: MemoryEntry) -> MemoryEntry {
         memory.archived = true;
 
+        let line = match serde_json::to_string(&memory) {
+            Ok(l) => l,
+            Err(e) => {
+                eprintln!("[memory-archive] WARNING: serialization failed: {}", e);
+                return memory;
+            }
+        };
+
         // Add to archive
         {
             let mut entries = self.entries.lock().await;
             entries.push(memory.clone());
+        }
 
-            // Append to file
-            if let Ok(line) = serde_json::to_string(&memory) {
-                use std::io::Write;
-                let fp = self.file_path.lock().await;
-                if let Ok(mut f) = std::fs::OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .open(&*fp)
-                {
-                    if let Err(e) = writeln!(f, "{}", line) {
-                        eprintln!(
-                            "[memory-archive] WARNING: append failed: {} — entry may be lost",
-                            e
-                        );
-                    }
+        // Append to file without holding entries lock
+        let fp = self.file_path.lock().await.clone();
+        use tokio::io::AsyncWriteExt;
+        match tokio::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&fp)
+            .await
+        {
+            Ok(mut f) => {
+                if let Err(e) = f.write_all(format!("{}\n", line).as_bytes()).await {
+                    eprintln!(
+                        "[memory-archive] WARNING: append failed: {} — entry may be lost",
+                        e
+                    );
+                } else {
+                    let _ = f.flush().await;
                 }
+            }
+            Err(e) => {
+                eprintln!(
+                    "[memory-archive] WARNING: open failed for append {}: {}",
+                    fp.display(),
+                    e
+                );
             }
         }
 
@@ -181,31 +217,34 @@ impl MemoryArchive {
         }
 
         let mut archived_ids = Vec::with_capacity(memories.len());
-        let mut entries = self.entries.lock().await;
+        let (entries_snapshot, deleted_count) = {
+            let mut entries = self.entries.lock().await;
 
-        for mut memory in memories {
-            memory.archived = true;
-            archived_ids.push(memory.id.clone());
-            entries.push(memory);
-        }
+            for mut memory in memories {
+                memory.archived = true;
+                archived_ids.push(memory.id.clone());
+                entries.push(memory);
+            }
 
-        // Check if cleanup is needed
-        let deleted_count = if entries.len() > self.max_entries {
-            let delete_count = entries.len() - self.max_entries;
-            // Remove oldest entries (at the beginning)
-            entries.drain(0..delete_count);
-            eprintln!(
-                "Archive cleanup: removed {} old entries (limit: {})",
-                delete_count, self.max_entries
-            );
-            delete_count
-        } else {
-            0
+            // Check if cleanup is needed
+            let deleted_count = if entries.len() > self.max_entries {
+                let delete_count = entries.len() - self.max_entries;
+                // Remove oldest entries (at the beginning)
+                entries.drain(0..delete_count);
+                eprintln!(
+                    "Archive cleanup: removed {} old entries (limit: {})",
+                    delete_count, self.max_entries
+                );
+                delete_count
+            } else {
+                0
+            };
+            (entries.clone(), deleted_count)
         };
 
-        // Write entire archive to file
-        let fp = self.file_path.lock().await;
-        Self::write_all_sync(&fp, &entries);
+        // Write entire archive to file without holding entries lock
+        let fp = self.file_path.lock().await.clone();
+        Self::write_all_async(&fp, &entries_snapshot).await;
 
         ArchiveResult {
             archived_ids,
@@ -221,18 +260,21 @@ impl MemoryArchive {
     ///
     /// Returns `None` if no memory matches the ID prefix.
     pub async fn restore_memory(&self, id_prefix: &str) -> Option<MemoryEntry> {
-        let mut entries = self.entries.lock().await;
+        let (mut memory, entries_snapshot) = {
+            let mut entries = self.entries.lock().await;
 
-        // Find and remove the memory
-        let pos = entries.iter().position(|e| e.id.starts_with(id_prefix))?;
-        let mut memory = entries.remove(pos);
+            // Find and remove the memory
+            let pos = entries.iter().position(|e| e.id.starts_with(id_prefix))?;
+            let memory = entries.remove(pos);
+            (memory, entries.clone())
+        };
 
         // Mark as not archived
         memory.archived = false;
 
-        // Update file
-        let fp = self.file_path.lock().await;
-        Self::write_all_sync(&fp, &entries);
+        // Update file without holding entries lock
+        let fp = self.file_path.lock().await.clone();
+        Self::write_all_async(&fp, &entries_snapshot).await;
 
         eprintln!("Restored memory {} from archive", memory.id);
         Some(memory)
@@ -256,29 +298,38 @@ impl MemoryArchive {
     ///
     /// Returns `true` if a memory was deleted.
     pub async fn delete_archived(&self, id_prefix: &str) -> bool {
-        let mut entries = self.entries.lock().await;
-        let before = entries.len();
-        entries.retain(|e| !e.id.starts_with(id_prefix));
+        let (deleted, entries_snapshot) = {
+            let mut entries = self.entries.lock().await;
+            let before = entries.len();
+            entries.retain(|e| !e.id.starts_with(id_prefix));
 
-        if entries.len() < before {
-            let fp = self.file_path.lock().await;
-            Self::write_all_sync(&fp, &entries);
-            true
-        } else {
-            false
+            if entries.len() < before {
+                (true, Some(entries.clone()))
+            } else {
+                (false, None)
+            }
+        };
+
+        if let Some(snapshot) = entries_snapshot {
+            let fp = self.file_path.lock().await.clone();
+            Self::write_all_async(&fp, &snapshot).await;
         }
+        deleted
     }
 
     /// Clear all archived memories.
     ///
     /// Returns the number of memories cleared.
     pub async fn clear(&self) -> usize {
-        let mut entries = self.entries.lock().await;
-        let count = entries.len();
-        entries.clear();
+        let count = {
+            let mut entries = self.entries.lock().await;
+            let count = entries.len();
+            entries.clear();
+            count
+        };
 
-        let fp = self.file_path.lock().await;
-        if let Err(e) = std::fs::write(&*fp, "") {
+        let fp = self.file_path.lock().await.clone();
+        if let Err(e) = tokio::fs::write(&fp, b"").await {
             eprintln!(
                 "[memory-archive] WARNING: could not truncate archive {}: {}",
                 fp.display(),
@@ -304,17 +355,20 @@ impl MemoryArchive {
     /// Removes oldest entries if the archive exceeds the size limit.
     /// Returns the number of entries removed.
     pub async fn cleanup(&self) -> usize {
-        let mut entries = self.entries.lock().await;
+        let (delete_count, entries_snapshot) = {
+            let mut entries = self.entries.lock().await;
 
-        if entries.len() <= self.max_entries {
-            return 0;
-        }
+            if entries.len() <= self.max_entries {
+                return 0;
+            }
 
-        let delete_count = entries.len() - self.max_entries;
-        entries.drain(0..delete_count);
+            let delete_count = entries.len() - self.max_entries;
+            entries.drain(0..delete_count);
+            (delete_count, entries.clone())
+        };
 
-        let fp = self.file_path.lock().await;
-        Self::write_all_sync(&fp, &entries);
+        let fp = self.file_path.lock().await.clone();
+        Self::write_all_async(&fp, &entries_snapshot).await;
 
         eprintln!("Archive cleanup: removed {} old entries", delete_count);
         delete_count

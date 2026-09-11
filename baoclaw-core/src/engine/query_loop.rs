@@ -36,9 +36,9 @@ const MAX_OVERFLOW_COMPACT_RETRIES: u32 = 2;
 
 /// Append a transcript entry; failures are logged, never fatal
 /// (a broken transcript must not take down the query loop).
-fn append_transcript(writer: &mut Option<TranscriptWriter>, entry: &TranscriptEntry) {
+async fn append_transcript(writer: &mut Option<TranscriptWriter>, entry: &TranscriptEntry) {
     if let Some(w) = writer.as_mut() {
-        if let Err(e) = w.append(entry) {
+        if let Err(e) = w.append(entry).await {
             eprintln!(
                 "[transcript] WARNING: append failed: {} (entry type: {:?})",
                 e, entry.entry_type
@@ -101,15 +101,16 @@ pub async fn run_query_loop(
     let mut turn_output_tokens_at_start: u64;
 
     // Open transcript writer if session_id is available
-    let mut transcript_writer = config.session_id.as_ref().and_then(|sid| {
-        match TranscriptWriter::open(sid) {
+    let mut transcript_writer = match config.session_id.as_ref() {
+        Some(sid) => match TranscriptWriter::open(sid).await {
             Ok(w) => Some(w),
             Err(e) => {
                 eprintln!("[transcript] WARNING: could not open transcript for session {}: {} — transcript will be missing", sid, e);
                 None
             }
-        }
-    });
+        },
+        None => None,
+    };
 
     // Open cross-session DB for indexing (errors are non-fatal)
     let cross_db = crate::engine::cross_session_db::CrossSessionDb::new().ok();
@@ -143,7 +144,8 @@ pub async fn run_query_loop(
                 entry_type: TranscriptEntryType::UserMessage,
                 data: serde_json::to_value(last_msg).unwrap_or_default(),
             },
-        );
+        )
+        .await;
         // Index user message for cross-session search
         if let (Some(ref db), Some(ref sid)) = (&cross_db, &config.session_id) {
             if let MessageContent::User { message, .. } = &last_msg.content {
@@ -880,7 +882,8 @@ async fn record_assistant_turn(
             entry_type: TranscriptEntryType::AssistantMessage,
             data: serde_json::to_value(&assistant_msg).unwrap_or_default(),
         },
-    );
+    )
+    .await;
     // Index assistant text for cross-session search
     if let (Some(ref db), Some(ref sid)) = (cross_db, &config.session_id) {
         let text: String = assistant_content_blocks
@@ -959,7 +962,8 @@ async fn execute_tool_turn(
                     "tool_use_id": tu.id,
                 }),
             },
-        );
+        )
+        .await;
     }
 
     // Execute tools using the executor
@@ -1015,7 +1019,8 @@ async fn execute_tool_turn(
                     "is_error": result.is_error,
                 }),
             },
-        );
+        )
+        .await;
     }
 
     // Feed the shared tool-health tracker. Only real tools are recorded —

@@ -1,7 +1,8 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::io::{BufRead, Write};
+use std::io::BufRead;
 use std::path::{Path, PathBuf};
+use tokio::io::AsyncWriteExt;
 
 /// A single transcript record.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -21,39 +22,40 @@ pub enum TranscriptEntryType {
     SystemEvent,
 }
 
-/// Session transcript writer — appends entries to a JSONL file.
+/// Session transcript writer — appends entries to a JSONL file asynchronously.
 pub struct TranscriptWriter {
-    file: std::fs::File,
+    file: tokio::fs::File,
     session_id: String,
 }
 
 impl TranscriptWriter {
-    /// Create or open a transcript file for the given session.
+    /// Create or open a transcript file for the given session asynchronously.
     ///
     /// The file is stored at `~/.baoclaw/sessions/{session_id}.jsonl`.
-    pub fn open(session_id: &str) -> Result<Self, std::io::Error> {
+    pub async fn open(session_id: &str) -> Result<Self, std::io::Error> {
         let dir = Self::sessions_dir()?;
-        Self::open_in_dir(session_id, &dir)
+        Self::open_in_dir(session_id, &dir).await
     }
 
-    /// Create or open a transcript file in a specific directory.
-    pub fn open_in_dir(session_id: &str, dir: &PathBuf) -> Result<Self, std::io::Error> {
+    /// Create or open a transcript file in a specific directory asynchronously.
+    pub async fn open_in_dir(session_id: &str, dir: &Path) -> Result<Self, std::io::Error> {
         let path =
             crate::engine::session_persistence::session_artifact_path(dir, session_id, "jsonl")?;
-        std::fs::create_dir_all(dir)?;
+        tokio::fs::create_dir_all(dir).await?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
+            tokio::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700)).await?;
         }
-        let file = std::fs::OpenOptions::new()
+        let file = tokio::fs::OpenOptions::new()
             .create(true)
             .append(true)
-            .open(&path)?;
+            .open(&path)
+            .await?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+            tokio::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).await?;
         }
         Ok(Self {
             file,
@@ -61,15 +63,17 @@ impl TranscriptWriter {
         })
     }
 
-    /// Append a single entry as a JSON line + flush.
-    pub fn append(&mut self, entry: &TranscriptEntry) -> Result<(), std::io::Error> {
+    /// Append a single entry as a JSON line + flush asynchronously.
+    pub async fn append(&mut self, entry: &TranscriptEntry) -> Result<(), std::io::Error> {
         let line = serde_json::to_string(entry)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-        writeln!(self.file, "{}", line)?;
-        self.file.flush()
+        self.file
+            .write_all(format!("{}\n", line).as_bytes())
+            .await?;
+        self.file.flush().await
     }
 
-    /// Load all valid transcript entries for a session.
+    /// Load all valid transcript entries for a session (synchronous).
     ///
     /// Corrupted JSON lines are silently skipped.
     pub fn load(session_id: &str) -> Result<Vec<TranscriptEntry>, std::io::Error> {
@@ -77,7 +81,7 @@ impl TranscriptWriter {
         Self::load_from_dir(session_id, &dir)
     }
 
-    /// Load all valid transcript entries from a specific directory.
+    /// Load all valid transcript entries from a specific directory (synchronous).
     pub fn load_from_dir(
         session_id: &str,
         dir: &Path,
@@ -97,6 +101,24 @@ impl TranscriptWriter {
             })
             .collect();
         Ok(entries)
+    }
+
+    /// Asynchronously load all valid transcript entries for a session.
+    pub async fn load_async(session_id: &str) -> Result<Vec<TranscriptEntry>, std::io::Error> {
+        let dir = Self::sessions_dir()?;
+        Self::load_from_dir_async(session_id, &dir).await
+    }
+
+    /// Asynchronously load all valid transcript entries from a specific directory.
+    pub async fn load_from_dir_async(
+        session_id: &str,
+        dir: &Path,
+    ) -> Result<Vec<TranscriptEntry>, std::io::Error> {
+        let session_id = session_id.to_string();
+        let dir = dir.to_path_buf();
+        tokio::task::spawn_blocking(move || Self::load_from_dir(&session_id, &dir))
+            .await
+            .map_err(std::io::Error::other)?
     }
 
     /// Get the session ID.
@@ -511,8 +533,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_write_and_load_roundtrip() {
+    #[tokio::test]
+    async fn test_write_and_load_roundtrip() {
         let dir = tempfile::tempdir().unwrap();
         let sessions_dir = dir.path().join("sessions");
 
@@ -538,10 +560,12 @@ mod tests {
 
         // Write entries
         {
-            let mut writer = TranscriptWriter::open_in_dir(session_id, &sessions_dir).unwrap();
+            let mut writer = TranscriptWriter::open_in_dir(session_id, &sessions_dir)
+                .await
+                .unwrap();
             assert_eq!(writer.session_id(), session_id);
             for entry in &entries {
-                writer.append(entry).unwrap();
+                writer.append(entry).await.unwrap();
             }
         }
 
@@ -553,10 +577,16 @@ mod tests {
             assert_eq!(original.data, loaded_entry.data);
             assert_eq!(original.timestamp, loaded_entry.timestamp);
         }
+
+        // Load async and verify
+        let loaded_async = TranscriptWriter::load_from_dir_async(session_id, &sessions_dir)
+            .await
+            .unwrap();
+        assert_eq!(loaded_async.len(), entries.len());
     }
 
-    #[test]
-    fn test_corrupted_lines_skipped() {
+    #[tokio::test]
+    async fn test_corrupted_lines_skipped() {
         let dir = tempfile::tempdir().unwrap();
         let sessions_dir = dir.path().join("sessions");
 
@@ -564,12 +594,14 @@ mod tests {
 
         // Write a valid entry
         {
-            let mut writer = TranscriptWriter::open_in_dir(session_id, &sessions_dir).unwrap();
+            let mut writer = TranscriptWriter::open_in_dir(session_id, &sessions_dir)
+                .await
+                .unwrap();
             let entry = make_entry(
                 TranscriptEntryType::UserMessage,
                 json!({"content": "valid"}),
             );
-            writer.append(&entry).unwrap();
+            writer.append(&entry).await.unwrap();
         }
 
         // Manually append a corrupted line
@@ -584,12 +616,14 @@ mod tests {
 
         // Write another valid entry
         {
-            let mut writer = TranscriptWriter::open_in_dir(session_id, &sessions_dir).unwrap();
+            let mut writer = TranscriptWriter::open_in_dir(session_id, &sessions_dir)
+                .await
+                .unwrap();
             let entry = make_entry(
                 TranscriptEntryType::AssistantMessage,
                 json!({"content": "also valid"}),
             );
-            writer.append(&entry).unwrap();
+            writer.append(&entry).await.unwrap();
         }
 
         // Load should skip corrupted and empty lines
@@ -609,8 +643,8 @@ mod tests {
         assert!(result.is_err());
     }
 
-    #[test]
-    fn test_empty_file_loads_empty_vec() {
+    #[tokio::test]
+    async fn test_empty_file_loads_empty_vec() {
         let dir = tempfile::tempdir().unwrap();
         let sessions_dir = dir.path().join("sessions");
 
@@ -618,7 +652,9 @@ mod tests {
 
         // Create an empty file by opening and immediately closing
         {
-            let _writer = TranscriptWriter::open_in_dir(session_id, &sessions_dir).unwrap();
+            let _writer = TranscriptWriter::open_in_dir(session_id, &sessions_dir)
+                .await
+                .unwrap();
         }
 
         let loaded = TranscriptWriter::load_from_dir(session_id, &sessions_dir).unwrap();

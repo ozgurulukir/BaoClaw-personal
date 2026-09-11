@@ -193,7 +193,7 @@ impl MemoryStore {
             let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
             PathBuf::from(&home).join(".baoclaw").join(MEMORY_FILE)
         };
-        let new_entries = Self::read_file(&new_path);
+        let new_entries = Self::read_file_async(&new_path).await;
         eprintln!(
             "Switched memory to {} ({} entries)",
             new_path.display(),
@@ -203,11 +203,7 @@ impl MemoryStore {
         *self.file_path.lock().await = new_path;
     }
 
-    fn read_file(path: &PathBuf) -> Vec<MemoryEntry> {
-        let content = match std::fs::read_to_string(path) {
-            Ok(c) => c,
-            Err(_) => return Vec::new(), // File doesn't exist yet → empty Vec (not an error)
-        };
+    fn parse_entries(content: &str, path: &std::path::Path) -> Vec<MemoryEntry> {
         let mut entries = Vec::new();
         let mut seen = std::collections::HashSet::new();
         for (line_no, line) in content.lines().enumerate() {
@@ -243,7 +239,26 @@ impl MemoryStore {
         entries
     }
 
-    fn write_all_sync(path: &PathBuf, entries: &[MemoryEntry]) -> Result<(), MemoryError> {
+    fn read_file(path: &std::path::Path) -> Vec<MemoryEntry> {
+        let content = match std::fs::read_to_string(path) {
+            Ok(c) => c,
+            Err(_) => return Vec::new(), // File doesn't exist yet → empty Vec (not an error)
+        };
+        Self::parse_entries(&content, path)
+    }
+
+    async fn read_file_async(path: &std::path::Path) -> Vec<MemoryEntry> {
+        let content = match tokio::fs::read_to_string(path).await {
+            Ok(c) => c,
+            Err(_) => return Vec::new(),
+        };
+        Self::parse_entries(&content, path)
+    }
+
+    async fn write_all_async(
+        path: &std::path::Path,
+        entries: &[MemoryEntry],
+    ) -> Result<(), MemoryError> {
         let lines: Vec<String> = entries
             .iter()
             .map(serde_json::to_string)
@@ -257,9 +272,9 @@ impl MemoryStore {
         // never leave a truncated active file (the reader would degrade to
         // "empty memory" on the surviving partial line).
         let tmp = path.with_extension("jsonl.tmp");
-        std::fs::write(&tmp, body)?;
-        std::fs::rename(&tmp, path)?;
-        ensure_private_perms(path);
+        tokio::fs::write(&tmp, body.as_bytes()).await?;
+        tokio::fs::rename(&tmp, path).await?;
+        ensure_private_perms_async(path).await;
         Ok(())
     }
 
@@ -341,37 +356,30 @@ impl MemoryStore {
             fp_guard.clone()
         };
 
-        // Phase 3: offload filesystem I/O to blocking thread pool
-        let join_result = tokio::task::spawn_blocking(move || {
-            let mut f = std::fs::OpenOptions::new()
+        // Phase 3: asynchronous append using tokio::fs
+        let write_res = async {
+            use tokio::io::AsyncWriteExt;
+            let mut f = tokio::fs::OpenOptions::new()
                 .create(true)
                 .append(true)
-                .open(&fp)?;
-            use std::io::Write;
-            writeln!(f, "{}", serialized_line)?;
-            ensure_private_perms(&fp);
+                .open(&fp)
+                .await?;
+            f.write_all(format!("{}\n", serialized_line).as_bytes())
+                .await?;
+            f.flush().await?;
+            ensure_private_perms_async(&fp).await;
             Ok::<(), MemoryError>(())
-        })
+        }
         .await;
 
-        match join_result {
-            Ok(Ok(())) => Ok(AddOutcome {
+        match write_res {
+            Ok(()) => Ok(AddOutcome {
                 entry,
                 created: true,
             }),
-            Ok(Err(e)) => {
+            Err(e) => {
                 eprintln!("ERROR: memory write failed for entry {}: {}", entry.id, e);
                 Err(e)
-            }
-            Err(e) => {
-                eprintln!(
-                    "ERROR: memory write task panicked for entry {}: {}",
-                    entry.id, e
-                );
-                Err(MemoryError::Io(std::io::Error::other(format!(
-                    "spawn_blocking failed: {}",
-                    e
-                ))))
             }
         }
     }
@@ -397,21 +405,12 @@ impl MemoryStore {
             entries_snapshot = entries.clone();
             drop(entries);
             let fp = self.file_path.lock().await.clone();
-            // Offload filesystem I/O — lock already released
-            let join_result =
-                tokio::task::spawn_blocking(move || Self::write_all_sync(&fp, &entries_snapshot))
-                    .await;
-            match join_result {
-                Ok(Ok(())) => Ok(true),
-                Ok(Err(e)) => {
-                    eprintln!("ERROR: memory delete write failed: {}", e);
-                    Err(e)
-                }
-                Err(e) => Err(MemoryError::Io(std::io::Error::other(format!(
-                    "spawn_blocking failed: {}",
-                    e
-                )))),
+            // Asynchronous whole-file atomic rewrite — entries lock already released
+            if let Err(e) = Self::write_all_async(&fp, &entries_snapshot).await {
+                eprintln!("ERROR: memory delete write failed: {}", e);
+                return Err(e);
             }
+            Ok(true)
         } else {
             Ok(false)
         }
@@ -431,22 +430,9 @@ impl MemoryStore {
         };
         // Drop entries lock, then do file I/O
         let fp = self.file_path.lock().await.clone();
-        let join_result = tokio::task::spawn_blocking(move || {
-            std::fs::write(&fp, "")?;
-            Ok::<(), MemoryError>(())
-        })
-        .await;
-        match join_result {
-            Ok(Ok(())) => Ok(count),
-            Ok(Err(e)) => {
-                eprintln!("ERROR: memory clear write failed: {}", e);
-                Err(e)
-            }
-            Err(e) => Err(MemoryError::Io(std::io::Error::other(format!(
-                "spawn_blocking failed: {}",
-                e
-            )))),
-        }
+        tokio::fs::write(&fp, b"").await?;
+        ensure_private_perms_async(&fp).await;
+        Ok(count)
     }
 
     /// Build the long-term memory system prompt fragment.
@@ -562,9 +548,7 @@ impl MemoryStore {
             entries.clone()
         };
         let fp = self.file_path.lock().await.clone();
-        let join_result =
-            tokio::task::spawn_blocking(move || Self::write_all_sync(&fp, &snapshot)).await;
-        if let Ok(Err(e)) = join_result {
+        if let Err(e) = Self::write_all_async(&fp, &snapshot).await {
             eprintln!("ERROR: memory recall persist failed: {}", e);
         }
     }
@@ -587,31 +571,34 @@ impl MemoryStore {
         config: &DecayConfig,
     ) -> ArchiveResult {
         let _persist = self.persist.lock().await;
-        let mut entries = self.entries.lock().await;
+        let (to_archive, entries_snapshot) = {
+            let mut entries = self.entries.lock().await;
 
-        // Apply decay and find memories to archive
-        let to_archive_ids = apply_decay(&mut entries, config);
+            // Apply decay and find memories to archive
+            let to_archive_ids = apply_decay(&mut entries, config);
 
-        if to_archive_ids.is_empty() {
-            return ArchiveResult {
-                archived_ids: Vec::new(),
-                deleted_count: 0,
-            };
-        }
+            if to_archive_ids.is_empty() {
+                return ArchiveResult {
+                    archived_ids: Vec::new(),
+                    deleted_count: 0,
+                };
+            }
 
-        // Collect memories to archive
-        let to_archive: Vec<MemoryEntry> = entries
-            .iter()
-            .filter(|e| to_archive_ids.contains(&e.id))
-            .cloned()
-            .collect();
+            // Collect memories to archive
+            let to_archive: Vec<MemoryEntry> = entries
+                .iter()
+                .filter(|e| to_archive_ids.contains(&e.id))
+                .cloned()
+                .collect();
 
-        // Remove from active memory
-        entries.retain(|e| !to_archive_ids.contains(&e.id));
+            // Remove from active memory
+            entries.retain(|e| !to_archive_ids.contains(&e.id));
+            (to_archive, entries.clone())
+        };
 
         // Write updated memory file
-        let fp = self.file_path.lock().await;
-        if let Err(e) = Self::write_all_sync(&fp, &entries) {
+        let fp = self.file_path.lock().await.clone();
+        if let Err(e) = Self::write_all_async(&fp, &entries_snapshot).await {
             eprintln!(
                 "ERROR: memory file rewrite during archive_low_importance failed: {}",
                 e
@@ -646,15 +633,18 @@ impl MemoryStore {
         archive: &MemoryArchive,
     ) -> Option<MemoryEntry> {
         let _persist = self.persist.lock().await;
-        let mut entries = self.entries.lock().await;
+        let (memory, entries_snapshot) = {
+            let mut entries = self.entries.lock().await;
 
-        // Find and remove the memory
-        let pos = entries.iter().position(|e| e.id.starts_with(id_prefix))?;
-        let memory = entries.remove(pos);
+            // Find and remove the memory
+            let pos = entries.iter().position(|e| e.id.starts_with(id_prefix))?;
+            let memory = entries.remove(pos);
+            (memory, entries.clone())
+        };
 
         // Write updated memory file
-        let fp = self.file_path.lock().await;
-        if let Err(e) = Self::write_all_sync(&fp, &entries) {
+        let fp = self.file_path.lock().await.clone();
+        if let Err(e) = Self::write_all_async(&fp, &entries_snapshot).await {
             eprintln!(
                 "ERROR: memory file rewrite during archive_by_id failed: {}",
                 e
@@ -692,37 +682,43 @@ impl MemoryStore {
         memory.importance = DEFAULT_IMPORTANCE;
         memory.archived = false;
 
+        let line = match serde_json::to_string(&memory) {
+            Ok(l) => l,
+            Err(e) => {
+                eprintln!(
+                    "ERROR: failed to serialize restored memory {}: {}",
+                    id_prefix, e
+                );
+                return Some(memory);
+            }
+        };
+
         let _persist = self.persist.lock().await;
         // Add back to active memory
-        let mut entries = self.entries.lock().await;
-        entries.push(memory.clone());
+        {
+            let mut entries = self.entries.lock().await;
+            entries.push(memory.clone());
+        }
 
-        // Write to memory file
-        match serde_json::to_string(&memory) {
-            Ok(line) => {
-                use std::io::Write;
-                let fp = self.file_path.lock().await;
-                match std::fs::OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .open(&*fp)
-                {
-                    Ok(mut f) => {
-                        if let Err(e) = writeln!(f, "{}", line) {
-                            eprintln!("ERROR: memory restore write failed: {}", e);
-                        }
-                    }
-                    Err(e) => {
-                        eprintln!(
-                            "ERROR: failed to open memory file for restore of {}: {}",
-                            id_prefix, e
-                        );
-                    }
+        let fp = self.file_path.lock().await.clone();
+        use tokio::io::AsyncWriteExt;
+        match tokio::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&fp)
+            .await
+        {
+            Ok(mut f) => {
+                if let Err(e) = f.write_all(format!("{}\n", line).as_bytes()).await {
+                    eprintln!("ERROR: memory restore write failed: {}", e);
+                } else {
+                    let _ = f.flush().await;
+                    ensure_private_perms_async(&fp).await;
                 }
             }
             Err(e) => {
                 eprintln!(
-                    "ERROR: failed to serialize restored memory {}: {}",
+                    "ERROR: failed to open memory file for restore of {}: {}",
                     id_prefix, e
                 );
             }
@@ -853,15 +849,15 @@ impl MemoryStore {
 /// Restrict a memory file to owner-only permissions (best-effort, unix only).
 /// The store holds everything the model has been told across sessions, so a
 /// world-readable file would leak it to every local account.
-fn ensure_private_perms(path: &std::path::Path) {
+async fn ensure_private_perms_async(path: &std::path::Path) {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        if let Ok(meta) = std::fs::metadata(path) {
+        if let Ok(meta) = tokio::fs::metadata(path).await {
             let mut perms = meta.permissions();
             if perms.mode() & 0o777 != 0o600 {
                 perms.set_mode(0o600);
-                let _ = std::fs::set_permissions(path, perms);
+                let _ = tokio::fs::set_permissions(path, perms).await;
             }
         }
     }
@@ -1147,5 +1143,45 @@ mod tests {
             let meta = std::fs::metadata(_dir.path().join("memory.jsonl")).unwrap();
             assert_eq!(meta.permissions().mode() & 0o777, 0o600);
         }
+    }
+
+    #[tokio::test]
+    async fn high_concurrency_stress_test_100_concurrent_operations() {
+        let (_dir, store) = temp_store("memory.jsonl");
+        let store = std::sync::Arc::new(store);
+
+        let mut handles = Vec::new();
+        // 50 concurrent writers and 50 concurrent readers
+        for i in 0..50 {
+            let s = std::sync::Arc::clone(&store);
+            handles.push(tokio::spawn(async move {
+                s.add(
+                    format!("concurrent memory entry {}", i),
+                    MemoryCategory::Fact,
+                    "stress_test".to_string(),
+                )
+                .await
+                .unwrap();
+            }));
+        }
+        for _ in 0..50 {
+            let s = std::sync::Arc::clone(&store);
+            handles.push(tokio::spawn(async move {
+                let _ = s.list().await;
+            }));
+        }
+
+        for h in handles {
+            h.await.unwrap();
+        }
+
+        let all = store.list().await;
+        assert_eq!(all.len(), 50);
+
+        // Verify reloaded store matches
+        let path = _dir.path().join("memory.jsonl");
+        let reloaded = MemoryStore::load_with_path(path);
+        let reloaded_entries = reloaded.list().await;
+        assert_eq!(reloaded_entries.len(), 50);
     }
 }

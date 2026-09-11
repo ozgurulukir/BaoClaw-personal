@@ -78,13 +78,14 @@ proptest! {
         let sessions_dir = dir.path().join("sessions");
         let session_id = "pbt-roundtrip";
 
+        let rt = tokio::runtime::Runtime::new().unwrap();
         // Write all entries
-        {
-            let mut writer = TranscriptWriter::open_in_dir(session_id, &sessions_dir).unwrap();
+        rt.block_on(async {
+            let mut writer = TranscriptWriter::open_in_dir(session_id, &sessions_dir).await.unwrap();
             for entry in &entries {
-                writer.append(entry).unwrap();
+                writer.append(entry).await.unwrap();
             }
-        }
+        });
 
         // Load entries back
         let loaded = TranscriptWriter::load_from_dir(session_id, &sessions_dir).unwrap();

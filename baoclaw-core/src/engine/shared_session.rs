@@ -476,7 +476,7 @@ impl SessionRegistry {
 
         let now = Utc::now().to_rfc3339();
         // Use created_at from existing registry entry, or now for new sessions
-        let registry = session_persistence::load_registry(&self.persistence_dir);
+        let registry = session_persistence::load_registry_async(self.persistence_dir.clone()).await;
         let created_at = registry
             .sessions
             .iter()
@@ -497,7 +497,7 @@ impl SessionRegistry {
 
         // Keep the read lock through the disk write so a concurrent turn cannot
         // publish a newer in-memory state before this snapshot is persisted.
-        session_persistence::persist_session_state(&self.persistence_dir, &state).map_err(|e| {
+        session_persistence::persist_session_state_async(self.persistence_dir.clone(), state).await.map_err(|e| {
             let msg = format!(
                 "Cannot persist session {} because {}. To fix, retry persistence and inspect the sessions directory permissions and available space.",
                 session_id, e
@@ -516,13 +516,22 @@ impl SessionRegistry {
         session_persistence::load_session_state(&self.persistence_dir, session_id)
     }
 
+    /// Asynchronously load persisted session data for a given session ID from disk.
+    pub async fn load_persisted_session_async(&self, session_id: &str) -> Option<PersistedSession> {
+        session_persistence::load_session_state_async(
+            self.persistence_dir.clone(),
+            session_id.to_string(),
+        )
+        .await
+    }
+
     /// Restore messages and memory into a session from persisted state (if available).
     ///
     /// This remains available for callers that explicitly manage restore timing;
     /// `get_or_create` restores new sessions before exposing them by default.
     /// Returns `true` if any persisted state was restored, `false` otherwise.
     pub async fn restore_session_messages(&self, session_id: &str) -> bool {
-        let persisted = match self.load_persisted_session(session_id) {
+        let persisted = match self.load_persisted_session_async(session_id).await {
             Some(p) => p,
             None => return false,
         };
@@ -610,8 +619,12 @@ impl SessionRegistry {
             removed
         };
 
-        session_persistence::reset_transcript(&self.persistence_dir, session_id)
-            .map_err(|e| format!("could not reset transcript for {}: {}", session_id, e))?;
+        session_persistence::reset_transcript_async(
+            self.persistence_dir.clone(),
+            session_id.to_string(),
+        )
+        .await
+        .map_err(|e| format!("could not reset transcript for {}: {}", session_id, e))?;
         self.persist_session(session_id).await?;
 
         Ok(removed)
