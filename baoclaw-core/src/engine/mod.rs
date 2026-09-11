@@ -5,8 +5,11 @@ pub mod tool_loop;
 
 pub mod abort_helpers;
 pub use abort_helpers::{cleanup_orphan_tool_uses, wait_for_abort};
+pub mod compact;
 pub mod cost_tracker;
 pub mod cron;
+pub mod failover;
+pub mod stream_ingest;
 
 pub mod evolution;
 pub mod git_info;
@@ -38,5 +41,6 @@ pub mod team;
 pub mod telemetry;
 pub mod template;
 pub mod tool_health;
+pub mod tool_repair;
 pub mod user_profile;
 pub mod warmup;
