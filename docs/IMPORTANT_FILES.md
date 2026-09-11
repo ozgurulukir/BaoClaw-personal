@@ -8,17 +8,19 @@ A quick annotated tour of the repository, grouped by area. Verify paths locally 
 
 ### Rust core (`baoclaw-core/`)
 
-- **baoclaw-core/src/main.rs** — daemon entry point: a short startup sequence plus the legacy connection handshake and session-close cleanup.
+- **baoclaw-core/src/main.rs** — daemon entry point: a short startup sequence plus connection handshake and session lifecycle cleanup.
 - **baoclaw-core/src/startup.rs** — startup phases: CLI options, socket bind + announce (Linux `$XDG_RUNTIME_DIR/baoclaw.sock`, flat; macOS/Windows `baoclaw-sockets/baoclaw.sock`), config/API client, engine tools, prompts/memory/user profile, shared state assembly, cron scheduler, accept loop.
-- **baoclaw-core/src/shared_client.rs** — the shared-session RPC loop: one named `scm_*` handler per `ClientMethod` (90+ RPC handlers).
+- **baoclaw-core/src/shared_client/** — the shared-session RPC loop decomposed into domain submodules (`types.rs`, `router.rs`, `system.rs`, `turn.rs`, `sessions.rs`, `tools.rs`, `cron.rs`, `skills.rs`, `team.rs`, `mcp.rs`, `config.rs`, `memory.rs`) with one named `scm_*` handler per `ClientMethod`.
 - **baoclaw-core/src/ipc/router.rs** — JSON-RPC method parsing and dispatch of incoming IPC requests.
 - **baoclaw-core/src/tools/executor.rs** — the `execute_tool_with_permission` pipeline: validate → permission check → allow/deny/ask.
 - **baoclaw-core/src/permissions/manager.rs** — `ToolPermissionContext`, permission rules, and knobs (`auto_allow_channels`, `ask_timeout_secs`, `persist_grants`).
-- **baoclaw-core/src/engine/** — the query engine: `query_engine.rs`/`query_loop.rs` (agent loop), `memory/store.rs` (global long-term memory at `~/.baoclaw/memory.jsonl`), `cron.rs` (scheduled jobs persisted to `~/.baoclaw/cron.json`).
+- **baoclaw-core/src/engine/** — the query engine: `query_engine.rs`/`query_loop/` (agent loop, split into `context.rs`, `model.rs`, `overflow.rs`, `tool_execution.rs`, `turn_records.rs`), `memory/store.rs` (async global long-term memory at `~/.baoclaw/memory.jsonl`), `transcript.rs` (async session transcripts), `session_persistence.rs` (async state snapshots), and `cron.rs` (scheduled jobs persisted to `~/.baoclaw/cron.json`).
 
 ### TypeScript IPC SDK (`ts-ipc/`, package `baoclaw-ipc`)
 
-- **ts-ipc/cli.ts** — interactive CLI client for the daemon (slash commands dispatch through an exact-match registry).
+- **ts-ipc/cli.ts** & **ts-ipc/cli/** — interactive CLI client for the daemon with modular command registry (`cli/commands/`, `cli/registry.ts`).
+- **ts-ipc/protocol/** — strongly-typed JSON-RPC 2.0 contract (`methods.ts`, `payloads.ts`, `base.ts`).
+- **ts-ipc/gateway/** — unified Gateway SDK (`commandBridge.ts`, `permissionBridge.ts`, `sessionManager.ts`, `formatters/`) shared by all surfaces.
 - **ts-ipc/client.ts** — `IpcClient`: NDJSON JSON-RPC over the Unix domain socket.
 - **ts-ipc/controlChannel.ts** — second connection used for abort and permission decisions.
 - **ts-ipc/daemon.ts** — socket discovery conventions across Linux/macOS/Windows.
@@ -27,9 +29,9 @@ A quick annotated tour of the repository, grouped by area. Verify paths locally 
 
 ### Gateways
 
-- **baoclaw-telegram/** — Telegram gateway; `src/gateway.ts` is the entry.
-- **baoclaw-feishu/** — Feishu/Lark gateway; `src/gateway.ts` is the entry. Depends on `lark-cli`; see its own README.
-- **baoclaw-whatsapp/** — WhatsApp gateway; `src/gateway.ts` is the entry. Uses patch-package for crypto patches (see `patches/`).
+- **baoclaw-telegram/** — Telegram gateway backed by Gateway SDK; `src/gateway.ts` is the entry.
+- **baoclaw-feishu/** — Feishu/Lark gateway backed by Gateway SDK; `src/gateway.ts` is the entry. Depends on `lark-cli`; see its own README.
+- **baoclaw-whatsapp/** — WhatsApp gateway backed by Gateway SDK; `src/gateway.ts` is the entry. Uses patch-package for crypto patches (see `patches/`).
 - **baoclaw-web/** — web gateway; `src/server.ts` is the entry.
 
 ### Repo root

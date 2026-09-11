@@ -34,12 +34,14 @@ rendered within a character budget (`memory.prompt_char_budget`, default
 and when entries don't fit, a trailing note points the model at the
 `MemorySearch` tool. Exact-content duplicates are dropped at load time.
 
-**Single writer:** `MemoryTool` and `MemorySearchTool` share the daemon's
+**Single writer & non-blocking I/O:** `MemoryTool` and `MemorySearchTool` share the daemon's
 in-memory `MemoryStore` instance — saves are validated (`validate_memory_content`,
 so credentials/injection text never enter the store), deduplicated (an exact
 re-save is idempotent), and visible to the prompt fragment without a restart.
-Hand-editing `memory.jsonl` while the daemon runs requires a restart to be
-seen.
+All disk writes and rewrites use asynchronous `tokio::fs` with atomic temporary-file
+rename (`.tmp` sibling rename) and owner-only (0600) permissions. In-memory locks
+are released before disk I/O, preventing thread pool stalls and lock contention.
+Hand-editing `memory.jsonl` while the daemon runs requires a restart to be seen.
 
 **Live recall:** `MemorySearch` gives the model keyword search over everything
 that didn't fit (or wasn't worth always-on injection). Matches are scored by
@@ -176,7 +178,7 @@ This split ensures the cached system prompt prefix stays stable across turns —
      → FNV-1a hash of cwd → scan ~/.baoclaw/sessions/ for matching .jsonl,
        restricted to the caller's own surface (exact id first, then the
        same `{cwd_hash}-{surface}` suffix) — cross-surface resumes never happen
-2. TranscriptWriter::load(session_id) → read all entries
+2. TranscriptWriter::load_async(session_id) → read all entries asynchronously
 3. SessionMemory::load(session_id) → check .memory.md for existing summary
 4. Three-tier loading (10 min → < 5 sec):
    Tier 1 (best):   summary exists → load summary + last 200 entries only

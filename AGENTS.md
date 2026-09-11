@@ -15,7 +15,7 @@ and `ATTRIBUTION.md`).
   `cargo clippy --all-targets --all-features -- -D warnings`,
   `cargo check`, `prettier` for md/json — all from the repo root.
 - Rust tests: `cargo test` (run inside `baoclaw-core/`). Lib tests:
-  `cargo test --lib`; `startup.rs`/`shared_client.rs` tests live in the bin
+  `cargo test --lib`; `startup.rs`/`shared_client/` tests live in the bin
   crate: `cargo test --bin baoclaw-core`.
 - TS: `npm run typecheck` / `npm run test` (workspaces), from the root.
 - Deploy to the live daemon: `cargo build --release`, then
@@ -27,6 +27,12 @@ and `ATTRIBUTION.md`).
 - The daemon owns the session: one socket at `$XDG_RUNTIME_DIR/baoclaw.sock`
   (flat path on Linux; subdirs only on macOS/Windows). CLI/TUI/gateways are
   IPC clients; `ts-ipc` is the shared client library.
+- `ts-ipc` exports a unified Gateway SDK (`baoclaw-ipc/gateway`) for
+  cross-surface slash commands, card formatting, and permission handling.
+- Concurrency & Async I/O: All disk persistence (`MemoryStore`, `MemoryArchive`,
+  `SessionPersistence`, `TranscriptWriter`) uses non-blocking async operations
+  (`tokio::fs`, `tokio::task::spawn_blocking`, atomic rename); mutex locks are
+  scoped tightly and never held across await points or file I/O.
 - Engine internals are documented in `docs/INTERNALS.md` (English docs are
   canonical; `docs/README.zh-CN.md` mirrors them). New user-facing docs go to
   `docs/` as UPPERCASE-NAME.md with a "See also" footer and an index line in
@@ -48,7 +54,7 @@ and `ATTRIBUTION.md`).
 - Tests must be hermetic: use the `_in` / `with_`-injected path seams
   (tempdirs), never touch the real `~/.baoclaw`. Test modules go at the END
   of the file. Regression tests accompany every bug fix.
-- `startup.rs` and `shared_client.rs` are part of the **bin** crate: lib
+- `startup.rs` and `shared_client/` are part of the **bin** crate: lib
   items they need must be `pub` (not `pub(crate)`).
 
 ## Gotchas

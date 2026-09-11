@@ -61,28 +61,19 @@ copy_gateway() {
   local src="$SCRIPT_DIR/$name"
   local dst="$INSTALL_DIR/$name"
   [ ! -d "$src" ] && return 0
-  mkdir -p "$dst/src"
-  # Root level TS files (cli.ts, client.ts, colors.ts, images.ts, etc.) —
-  # tests stay in the repo.
-  for f in "$src"/*.ts "$src"/*.tsx; do
-    [ -f "$f" ] || continue
-    case "$f" in *.test.ts) continue ;; esac
-    cp "$f" "$dst/"
-  done
-  # TS/TSX sources in src/
-  for f in "$src"/src/*.ts "$src"/src/*.tsx; do
-    [ -f "$f" ] && cp "$f" "$dst/src/"
-  done
-  # TUI subfolder (ts-ipc)
-  if [ "$name" = "ts-ipc" ] && [ -d "$src/tui" ]; then
-    mkdir -p "$dst/tui/components"
-    for f in "$src"/tui/*.ts "$src"/tui/*.tsx; do
-      [ -f "$f" ] && cp "$f" "$dst/tui/"
-    done
-    for f in "$src"/tui/components/*.tsx; do
-      [ -f "$f" ] && cp "$f" "$dst/tui/components/"
-    done
-  fi
+  mkdir -p "$dst"
+
+  # Copy all TS/TSX sources while preserving subdirectories (cli, gateway,
+  # protocol, tui, src, etc.), excluding test files and build artifacts.
+  (
+    cd "$src"
+    find . -type f \( -name "*.ts" -o -name "*.tsx" -o -name "*.d.ts" \) \
+      ! -name "*.test.ts" ! -name "*.test.tsx" \
+      ! -path "*/node_modules/*" ! -path "*/dist/*" | while IFS= read -r rel; do
+        mkdir -p "$dst/$(dirname "$rel")"
+        cp "$rel" "$dst/$rel"
+      done
+  )
   # public static assets (web)
   if [ -d "$src/public" ]; then
     mkdir -p "$dst/public" && cp -r "$src/public/." "$dst/public/"
