@@ -8,12 +8,13 @@
     "./client": "./client.ts",
     "./daemon": "./daemon.ts",
     "./logger": "./logger.ts",
-    "./security": "./security.ts"
+    "./security": "./security.ts",
+    "./gateway": "./gateway/index.ts"
   },
   "scripts": {
     "start": "tsx cli.ts",
     "typecheck": "tsc --noEmit",
-    "test": "tsx --test '*.test.ts'",
+    "test": "tsx --test '*.test.ts' 'gateway/*.test.ts'",
     "build": "esbuild cli.ts --bundle --platform=node --target=node20 --format=esm --outfile=dist/baoclaw.mjs --external:mammoth --external:pdf-parse",
     "tui": "tsx tui/index.tsx",
     "build:rust": "cd ../baoclaw-core && cargo build --release"

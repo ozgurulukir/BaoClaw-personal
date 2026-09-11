@@ -1,8 +1,7 @@
 /**
  * PermissionManager — state machine for Feishu tool-use permission requests.
  *
- * Mirrors the WhatsApp gateway's flow (baoclaw-whatsapp/src/permission.ts),
- * card-first with a plain-text keyword fallback for older lark-clis:
+ * Card-first with a plain-text keyword fallback for older lark-clis:
  *   1. Formats a human-readable permission prompt (tool + input preview).
  *   2. Registers the request per chat with an auto-expiry window taken from
  *      the daemon's `ask_timeout_secs` (carried by each permission_request
@@ -14,86 +13,29 @@
  *      a permission gate is open.
  */
 
-import { logger } from "./log.js";
+import {
+  BasePermissionManager,
+  parsePermissionReply,
+  formatPermissionRequest,
+  PERMISSION_TIMEOUT_MS,
+  LATE_REPLY_GRACE_MS,
+  LATE_PERMISSION_ACK,
+  type PermissionDecision,
+  type PendingPermissionRequest,
+} from "baoclaw-ipc/gateway";
 
-export type PermissionDecision = "allow" | "allow_always" | "deny";
+export {
+  parsePermissionReply,
+  formatPermissionRequest,
+  PERMISSION_TIMEOUT_MS,
+  LATE_REPLY_GRACE_MS,
+  LATE_PERMISSION_ACK,
+  type PermissionDecision,
+};
 
-export interface PermissionRequest {
+export interface PermissionRequest extends PendingPermissionRequest {
   tool_use_id: string;
   tool_name: string;
-}
-
-/**
- * Last-resort auto-expiry window (ms), matching the daemon's default
- * `ask_timeout_secs`. Fresh prompts always carry the daemon's live value in
- * the `permission_request` event; this constant only covers a malformed or
- * pre-2.2 daemon event missing that field.
- */
-const PERMISSION_TIMEOUT_MS = 300_000; // 300 seconds
-
-/**
- * How long after a chat's permission request leaves the pending state
- * (timeout, supersede, or decision) a reply keyword is still treated as a
- * late answer to THAT request rather than as a normal chat message — so a
- * user replying "yes" to an already-resolved prompt doesn't accidentally
- * submit "yes" to the model as a chat prompt.
- */
-const LATE_REPLY_GRACE_MS = 60_000; // 60 seconds
-
-/** Acknowledgement sent for a decision keyword arriving after resolution. */
-export const LATE_PERMISSION_ACK =
-  "⏳ That permission request was already resolved — it timed out or was handled elsewhere. Nothing to approve.";
-
-/**
- * Parse a plain-text reply as a permission decision.
- * Returns null when the text is not a decision keyword — the caller should
- * treat it as a normal chat message.
- */
-export function parsePermissionReply(text: string): PermissionDecision | null {
-  const normalized = text.trim().toLowerCase();
-  switch (normalized) {
-    case "y":
-    case "yes":
-    case "allow":
-      return "allow";
-    case "a":
-    case "always":
-      return "allow_always";
-    case "n":
-    case "no":
-    case "deny":
-      return "deny";
-    default:
-      return null;
-  }
-}
-
-/**
- * Build the plain-text permission prompt (sent via lark-cli --text).
- *
- * @param timeoutSecs The daemon's auto-deny window for this ask, rendered in
- *                    the hint so the user sees the real schedule.
- * @param targetPath  Resolved absolute path when the prompt exists because
- *                    the target falls outside the project dirs (the daemon's
- *                    `target_path` event field).
- */
-export function formatPermissionRequest(
-  toolName: string,
-  inputPreview: string,
-  timeoutSecs: number,
-  targetPath?: string,
-): string {
-  const preview = inputPreview || "—";
-  const lines = ["🔐 Permission Request", `Tool: ${toolName}`];
-  if (targetPath) {
-    lines.push(`Target: ${targetPath} (outside project dirs)`);
-  }
-  lines.push(
-    `Input: ${preview}`,
-    "",
-    `Reply yes to allow / always to always allow this tool / no to deny (auto-denied after ${timeoutSecs}s)`,
-  );
-  return lines.join("\n");
 }
 
 /**
@@ -154,7 +96,7 @@ export function buildPermissionCard(
         elements: [
           {
             tag: "plain_text",
-            content: `Auto-denied if no decision within ${timeoutSecs}s`,
+            content: `Auto-denies within ${timeoutSecs}s if unhandled`,
           },
         ],
       },
@@ -162,16 +104,31 @@ export function buildPermissionCard(
   };
 }
 
-/** Map a button `value` payload to a decision; null when unrecognized. */
-export function parseCardActionValue(
-  value: unknown,
-): PermissionDecision | null {
-  if (value === null || value === undefined) return null;
-  if (typeof value === "string") return parsePermissionReply(value);
-  if (typeof value === "object") {
-    const action = (value as Record<string, unknown>).perm_action;
-    if (typeof action === "string") return parsePermissionReply(action);
+/**
+ * Unpack the button value payload from an interactive card action event.
+ * Feishu wraps the button's `value` in various envelopes depending on whether
+ * the card was sent via webhook or bot API:
+ *   { action: { value: { perm_action: "allow" } } }
+ *   { action: { value: '{"perm_action":"allow"}' } }
+ *   { perm_action: "allow" }
+ */
+export function parseCardActionValue(raw: unknown): PermissionDecision | null {
+  if (!raw) return null;
+  let val: unknown = raw;
+  if (typeof raw === "string") {
+    try {
+      val = JSON.parse(raw);
+    } catch {
+      val = raw;
+    }
   }
+  const action =
+    typeof val === "object" && val !== null
+      ? (val as { perm_action?: unknown }).perm_action
+      : val;
+  if (action === "allow") return "allow";
+  if (action === "always") return "allow_always";
+  if (action === "deny") return "deny";
   return null;
 }
 
@@ -201,23 +158,12 @@ export function parseCardAction(
 
 /**
  * Manages pending permission requests on behalf of the Feishu Gateway.
- * One pending request per chat — a new request supersedes the previous one.
+ * Extends BasePermissionManager with Feishu-specific convenience methods.
  */
-export class PermissionManager {
-  /** chatId → pending request. */
-  private pending = new Map<string, PermissionRequest>();
-  /** chatId → expiry timer handle. */
-  private timers = new Map<string, ReturnType<typeof setTimeout>>();
-  /** chatId → when the pending request last left the pending state. */
-  private lastResolved = new Map<string, number>();
-
-  /**
-   * Register a prompt for `chatId`, superseding any pending one.
-   *
-   * @param onExpire Invoked with `"timeout"` when the window lapses or
-   *                 `"superseded"` when a newer request replaces this one.
-   *                 The caller must deny the request with the daemon.
-   */
+export class PermissionManager extends BasePermissionManager<
+  string,
+  PermissionRequest
+> {
   registerRequest(
     chatId: string,
     toolUseId: string,
@@ -229,124 +175,19 @@ export class PermissionManager {
     ) => void,
     timeoutMs: number = PERMISSION_TIMEOUT_MS,
   ): void {
-    // Supersede: cancel the old timer, hand the OLD id to the caller.
-    const existing = this.pending.get(chatId);
-    if (existing) {
-      const oldTimer = this.timers.get(chatId);
-      if (oldTimer !== undefined) {
-        clearTimeout(oldTimer);
-        this.timers.delete(chatId);
-      }
-      this.lastResolved.set(chatId, Date.now());
-      onExpire(chatId, existing.tool_use_id, "superseded");
-    }
-
-    this.pending.set(chatId, {
-      tool_use_id: toolUseId,
-      tool_name: toolName,
-    });
-    const timer = setTimeout(() => {
-      this.pending.delete(chatId);
-      this.timers.delete(chatId);
-      this.lastResolved.set(chatId, Date.now());
-      onExpire(chatId, toolUseId, "timeout");
-    }, timeoutMs);
-    // Never keep the Node.js event loop alive just for an expiry timer.
-    timer.unref();
-    this.timers.set(chatId, timer);
+    this.registerPending(
+      chatId,
+      { tool_use_id: toolUseId, tool_name: toolName },
+      onExpire,
+      timeoutMs,
+    );
   }
 
-  /** Pending request for the chat, if any. */
-  getPending(chatId: string): PermissionRequest | null {
-    return this.pending.get(chatId) ?? null;
-  }
-
-  /**
-   * Process an inbound chat message as a potential permission reply.
-   *
-   * Returns, in order of precedence:
-   * - `"late"` — the text is a decision keyword and this chat's request left
-   *   the pending state within the grace window: the caller should ack the
-   *   stale reply instead of treating it as chat.
-   * - `{decision, delivered}` — a live pending request was resolved.
-   * - `null` — not a permission reply; the caller treats the text as normal
-   *   chat (an unrecognized keyword while a request is pending also returns
-   *   null and keeps the request open).
-   */
-  async handleResponse(
-    chatId: string,
-    text: string,
-    client: { request: (method: string, params?: unknown) => Promise<unknown> },
-  ): Promise<
-    { decision: PermissionDecision; delivered: boolean } | "late" | null
-  > {
-    const decision = parsePermissionReply(text);
-    if (!decision) return null;
-    if (!this.pending.has(chatId)) {
-      return this.isRecentlyResolved(chatId) ? "late" : null;
-    }
-    return this.resolvePending(chatId, decision, client);
-  }
-
-  /**
-   * Resolve the chat's pending request with an explicit decision — the
-   * single resolution path shared by text replies and card button clicks.
-   * Returns null when nothing is pending; forwards the decision to the
-   * daemon (swallowing IPC errors so the user is never stuck) and clears
-   * the pending entry + timer. `"always"` records a whole-tool allow rule.
-   */
-  async resolvePending(
-    chatId: string,
-    decision: PermissionDecision,
-    client: { request: (method: string, params?: unknown) => Promise<unknown> },
-  ): Promise<{ decision: PermissionDecision; delivered: boolean } | null> {
-    const pending = this.pending.get(chatId);
-    if (!pending) return null;
-
-    let delivered = false;
-    try {
-      const res = await client.request("permissionResponse", {
-        tool_use_id: pending.tool_use_id,
-        decision,
-        ...(decision === "allow_always" ? { rule: pending.tool_name } : {}),
-      });
-      delivered = (res as { delivered?: boolean })?.delivered === true;
-    } catch (err) {
-      // Swallow IPC errors — the daemon may be gone. Local state is still
-      // cleaned up so the user is not stuck.
-      logger.error(
-        `Failed to send permissionResponse for ${pending.tool_use_id}: ${err}`,
-      );
-    }
-
-    this.pending.delete(chatId);
-    this.lastResolved.set(chatId, Date.now());
-    const timer = this.timers.get(chatId);
-    if (timer !== undefined) {
-      clearTimeout(timer);
-      this.timers.delete(chatId);
-    }
-    return { decision, delivered };
-  }
-
-  /**
-   * Whether the chat's last permission request left the pending state within
-   * `graceMs` — i.e. a decision keyword arriving now is a late reply to that
-   * request, not a normal chat message.
-   */
   isRecentlyResolved(
     chatId: string,
     graceMs: number = LATE_REPLY_GRACE_MS,
   ): boolean {
     const at = this.lastResolved.get(chatId);
     return at !== undefined && Date.now() - at < graceMs;
-  }
-
-  /** Clear every pending request and timer (gateway shutdown). */
-  cleanup(): void {
-    for (const timer of this.timers.values()) clearTimeout(timer);
-    this.timers.clear();
-    this.pending.clear();
-    this.lastResolved.clear();
   }
 }

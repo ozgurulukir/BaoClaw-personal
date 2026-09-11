@@ -1,29 +1,22 @@
 /**
  * Command system for BaoClaw Feishu Gateway.
- * Adapts WhatsApp's commands.ts — same registry, same handlers,
- * but uses chatId/sendReply instead of jid/sock.
+ * Delegates core RPC command handlers to the shared Gateway SDK (`GatewayCommandBridge`)
+ * while providing Feishu-specific CommandContext and gateway telemetry (/gateway, /status).
  */
+import * as fs from "node:fs";
+import * as os from "node:os";
 import {
-  IpcClient,
-  formatMcpServers,
-  formatSearchResults as formatSearchResultsShared,
-  formatToolHealth,
-  type ControlChannel,
-  type McpServerList,
-  type SearchResult,
-  type ToolHealthData,
-} from "baoclaw-ipc";
+  GatewayCommandBridge,
+  markdownFormatter,
+  parseCommand as sharedParseCommand,
+  isRegisteredCommand as sharedIsRegisteredCommand,
+} from "baoclaw-ipc/gateway";
+import { type IpcClient, type ControlChannel } from "baoclaw-ipc";
 import { logger } from "./log.js";
-import * as fs from "fs";
-import * as os from "os";
 
-const MAX_OUTPUT = 4000;
-/** Characters of log output shown by /logs. */
 const LOG_TAIL_CHARS = 3000;
-/** Characters of each tool call's content shown in history listings. */
-const TOOL_CONTENT_PREVIEW_CHARS = 100;
 
-// ── Adapted CommandContext for Feishu ──
+// ── Feishu CommandContext & Types ──────────────────────────────────────────
 
 export interface CommandContext {
   ipcClient: IpcClient;
@@ -35,323 +28,30 @@ export interface CommandContext {
   sendReply: (text: string) => Promise<void>;
 }
 
-interface ParsedCommand {
+export interface ParsedCommand {
   name: string;
   args: string;
 }
 
-// ── RPC Response Types ──
-
-interface ToolInfo {
+export interface CommandDef {
   name: string;
   description: string;
-  type: string;
+  usage?: string;
+  handler: (ctx: CommandContext) => Promise<string>;
 }
-interface SkillInfo {
+
+export interface GatewayInfo {
+  pid: number;
+  startTime: number;
+  logFile: string;
   name: string;
-  path: string;
-  source: string;
-  description?: string;
-}
-interface PluginInfo {
-  name: string;
-  version?: string;
-  description?: string;
-  path: string;
-  source: string;
-  has_tools: boolean;
-  has_skills: boolean;
-  has_mcp: boolean;
-}
-interface CompactResult {
-  tokens_saved: number;
-  summary_tokens: number;
-  tokens_before: number;
-  tokens_after: number;
-}
-interface GitStatusResult {
-  branch: string | null;
-  has_changes: boolean;
-  staged_files: string[];
-  modified_files: string[];
-  untracked_files: string[];
-}
-interface GitCommitResult {
-  hash: string;
-  message: string;
-}
-interface GitDiffResult {
-  diff: string;
 }
 
-interface HistoryEntry {
-  role: string;
-  text: string;
-  timestamp?: string;
-}
-interface ExportResult {
-  file_path: string;
-  message_count: number;
-  size_bytes: number;
-}
-interface TaskInfo {
-  id: string;
-  description: string;
-  /** Daemon serializes failures as { Failed: "..." }, the rest as plain strings. */
-  status: string | { Failed: string };
-  created_at?: string;
-}
-interface CronEntry {
-  id: string;
-  schedule: string;
-  command: string;
-  enabled: boolean;
-}
-interface ProjectInfo {
-  id: string;
-  name: string;
-  path: string;
-  description?: string;
-}
-interface SpecSummary {
-  feature_name: string;
-  workflow: string;
-  phase: string;
-  spec_type: string;
-  task_progress: {
-    total: number;
-    completed: number;
-    in_progress: number;
-  } | null;
-}
-
-// ── Formatting Helpers ──
-
-function truncate(text: string, limit: number = MAX_OUTPUT): string {
-  if (text.length <= limit) return text;
-  return text.slice(0, limit) + "\n…(output truncated)";
-}
-
-function formatTools(tools: ToolInfo[]): string {
-  const count = tools.length;
-  if (count === 0) return "📋 Registered Tools (0)\nNo registered tools.";
-  const groups: Record<string, ToolInfo[]> = {};
-  for (const t of tools) {
-    const type = t.type || "other";
-    if (!groups[type]) groups[type] = [];
-    groups[type].push(t);
-  }
-  let out = `📋 Registered Tools (${count})\n`;
-  for (const [type, items] of Object.entries(groups)) {
-    out += `\n── ${type} (${items.length}) ──\n`;
-    for (const t of items) {
-      const desc = t.description
-        ? t.description.length > 60
-          ? t.description.slice(0, 60) + "…"
-          : t.description
-        : "";
-      out += `• ${t.name}  ${desc}\n`;
-    }
-  }
-  return truncate(out);
-}
-
-function formatSkills(skills: SkillInfo[]): string {
-  if (skills.length === 0) return "📋 Loaded Skills (0)";
-  let out = `📋 Loaded Skills (${skills.length})\n`;
-  for (const s of skills) {
-    out += `• ${s.name} [${s.source}]\n`;
-    if (s.description) out += `  ${s.description}\n`;
-  }
-  return truncate(out);
-}
-
-function formatPlugins(plugins: PluginInfo[]): string {
-  if (plugins.length === 0) return "📋 Installed Plugins (0)";
-  let out = `📋 Installed Plugins (${plugins.length})\n`;
-  for (const p of plugins) {
-    const ver = p.version ? ` v${p.version}` : "";
-    out += `• ${p.name}${ver} [${p.source}]\n`;
-  }
-  return truncate(out);
-}
-
-function formatCompact(result: CompactResult): string {
-  const pct =
-    result.tokens_before > 0
-      ? ((result.tokens_saved / result.tokens_before) * 100).toFixed(0)
-      : "0";
-  return `✅ Context compacted\n\nBefore: ${result.tokens_before.toLocaleString()} tokens\nAfter: ${result.tokens_after.toLocaleString()} tokens\nSaved: ${result.tokens_saved.toLocaleString()} tokens (${pct}%)\nSummary: ${result.summary_tokens.toLocaleString()} tokens`;
-}
-
-function formatGitStatus(result: GitStatusResult): string {
-  let out = `📂 Git Status\n\nBranch: ${result.branch ?? "(detached)"}\n`;
-  if (result.staged_files.length) {
-    out += `\nStaged (${result.staged_files.length}):\n`;
-    for (const f of result.staged_files) out += `  ✅ ${f}\n`;
-  }
-  if (result.modified_files.length) {
-    out += `\nModified (${result.modified_files.length}):\n`;
-    for (const f of result.modified_files) out += `  ✏️ ${f}\n`;
-  }
-  if (result.untracked_files.length) {
-    out += `\nUntracked (${result.untracked_files.length}):\n`;
-    for (const f of result.untracked_files) out += `  ❓ ${f}\n`;
-  }
-  if (!result.has_changes) out += "\nWorking tree clean, no changes.";
-  return out;
-}
-
-function formatGitDiff(result: GitDiffResult): string {
-  return result.diff
-    ? truncate(`📝 Git Diff\n\n${result.diff}`)
-    : "No changes.";
-}
-
-function formatGitCommit(result: GitCommitResult): string {
-  return `✅ Committed\n\nHash: ${result.hash}\nMessage: ${result.message}`;
-}
-
-function formatHistory(entries: HistoryEntry[]): string {
-  if (!entries?.length) return "No conversation history.";
-  let out = `📜 Recent Conversation (${entries.length})\n\n`;
-  for (const e of entries) {
-    const role = e.role === "user" ? "👤" : "🤖";
-    const text =
-      e.text.length > TOOL_CONTENT_PREVIEW_CHARS
-        ? e.text.slice(0, TOOL_CONTENT_PREVIEW_CHARS) + "…"
-        : e.text;
-    out += `${role} ${text}\n\n`;
-    if (out.length > MAX_OUTPUT) {
-      out += "…";
-      break;
-    }
-  }
-  return out;
-}
-
-function formatSearchResults(results: SearchResult[], query: string): string {
-  return formatSearchResultsShared(results, query, {
-    maxChars: MAX_OUTPUT,
-    emptyMessage: (q) => `No matches found for "${q}"`,
-    header: (q, n) => `🔍 Search Results: "${q}" (${n})\n\n`,
-    userLabel: "👤",
-    assistantLabel: "🤖",
-  });
-}
-
-function formatExport(result: ExportResult): string {
-  const size = result.size_bytes
-    ? `\nSize: ${(result.size_bytes / 1024).toFixed(1)} KB`
-    : "";
-  const count = result.message_count
-    ? `\nMessages: ${result.message_count}`
-    : "";
-  return `📤 Exported\n\nPath: ${result.file_path}${size}${count}`;
-}
-
-function formatProjects(projects: ProjectInfo[]): string {
-  if (!projects?.length) return "📋 Projects (0)";
-  let out = `📋 Projects (${projects.length})\n\n`;
-  for (const p of projects) {
-    out += `• ${p.name} [${p.id}]\n  ${p.path}\n\n`;
-  }
-  return truncate(out);
-}
-
-/** Render a TaskInfo status regardless of its serialized shape. */
-function taskStatusLabel(status: TaskInfo["status"]): string {
-  if (typeof status === "string") return status;
-  if (status && typeof status === "object" && "Failed" in status) {
-    return `Failed: ${status.Failed}`;
-  }
-  return JSON.stringify(status);
-}
-
-function formatTasks(tasks: TaskInfo[]): string {
-  if (!tasks?.length) return "📋 Background Tasks (0)";
-  let out = `📋 Background Tasks (${tasks.length})\n\n`;
-  for (const t of tasks) {
-    const label = taskStatusLabel(t.status);
-    const lower = label.toLowerCase();
-    const emoji = lower.startsWith("running")
-      ? "🟢"
-      : lower.startsWith("completed")
-        ? "✅"
-        : lower.startsWith("failed")
-          ? "🔴"
-          : "⚪";
-    out += `${emoji} [${t.id}] ${t.description}\n  Status: ${label}\n\n`;
-  }
-  return truncate(out);
-}
-
-function formatCronList(crons: CronEntry[]): string {
-  if (!crons?.length) return "📋 Cron Jobs (0)";
-  let out = `📋 Cron Jobs (${crons.length})\n\n`;
-  for (const c of crons) {
-    const s = c.enabled ? "🟢" : "🔴";
-    out += `${s} [${c.id}] ${c.schedule} ${c.command}\n`;
-  }
-  return truncate(out);
-}
-
-function formatSpecList(specs: SpecSummary[]): string {
-  if (!specs?.length) return "📋 Specs (0)";
-  let out = `📋 Specs (${specs.length})\n\n`;
-  for (const s of specs) {
-    const progress = s.task_progress
-      ? ` (${s.task_progress.completed}/${s.task_progress.total} tasks)`
-      : "";
-    out += `• ${s.feature_name} [${s.phase}]${progress}\n`;
-  }
-  return out;
-}
-
-function formatSpecShow(spec: SpecSummary): string {
-  let out = `📋 Spec: ${spec.feature_name}\n`;
-  out += `Workflow: ${spec.workflow}\nPhase: ${spec.phase}\nType: ${spec.spec_type}\n`;
-  if (spec.task_progress) {
-    out += `Tasks: ${spec.task_progress.completed}/${spec.task_progress.total} (${spec.task_progress.in_progress} in progress)\n`;
-  }
-  return truncate(out);
-}
-
-function formatSpecStatus(
-  name: string,
-  progress: { total: number; completed: number; in_progress: number },
-): string {
-  return (
-    `📊 Spec Status: ${name}\n\n` +
-    `Total: ${progress.total}\n` +
-    `✅ Completed: ${progress.completed}\n` +
-    `🔄 In progress: ${progress.in_progress}`
-  );
-}
-
-function formatSpecRun(result: {
-  task_id?: string;
-  task_description?: string;
-  status: string;
-  message?: string;
-}): string {
-  if (result.message) {
-    return `🚀 Spec Execution\n\n${result.message}`;
-  }
-  const description = result.task_description
-    ? `\n\n${result.task_description}`
-    : "";
-  return `🚀 Next Task\n\nTask ID: ${result.task_id || "N/A"}${description}`;
-}
-
-function formatError(title: string, detail: string): string {
-  return `❌ ${title}\n${detail}`;
-}
-
-// ── Daemon info (set by gateway) ──
+// ── Gateway & Daemon Runtime State ─────────────────────────────────────────
 
 let _daemonInfo: { pid: number; session_id: string; cwd: string } | null = null;
 let _daemonMetrics = { reconnectCount: 0, lastConnectAt: null as Date | null };
+let _gatewayInfo: GatewayInfo | null = null;
 
 export function setDaemonInfo(info: typeof _daemonInfo): void {
   _daemonInfo = info;
@@ -361,197 +61,26 @@ export function setDaemonMetrics(metrics: typeof _daemonMetrics): void {
   _daemonMetrics = metrics;
 }
 
-// ── Gateway Info Store ──
-
-export interface GatewayInfo {
-  pid: number;
-  startTime: number;
-  logFile: string;
-  name: string;
-}
-
-let _gatewayInfo: GatewayInfo | null = null;
-
 export function setGatewayInfo(info: GatewayInfo): void {
   _gatewayInfo = info;
 }
 
-// ── Command Handlers ──
+// ── Parsing & Registration ────────────────────────────────────────────────
 
-async function handleCompact(ctx: CommandContext): Promise<string> {
-  const result = await ctx.ipcClient.request<CompactResult>("compact");
-  return formatCompact(result);
+export function parseCommand(text: string): ParsedCommand | null {
+  const parsed = sharedParseCommand(text);
+  if (!parsed) return null;
+  return { name: parsed.command, args: parsed.args };
 }
 
-async function handleModel(ctx: CommandContext): Promise<string> {
-  if (!ctx.args.trim())
-    return "Ask the AI directly for current model info.\nUsage: /model <model-name>";
-  const result = await ctx.ipcClient.request<{ model: string }>("switchModel", {
-    model: ctx.args.trim(),
-  });
-  return `✅ Switched to model: ${result.model ?? ctx.args.trim()}`;
+export function isRegisteredCommand(nameOrText: string): boolean {
+  return sharedIsRegisteredCommand(nameOrText, COMMAND_REGISTRY);
 }
 
-async function handleHistory(ctx: CommandContext): Promise<string> {
-  const count = parseInt(ctx.args.trim(), 10) || 10;
-  const result = await ctx.ipcClient.request<{ messages: HistoryEntry[] }>(
-    "talkTail",
-    { count },
-  );
-  return formatHistory(result.messages ?? []);
-}
+// ── Local Handlers (/gateway, /status, /abort, /start, /help) ──────────────
 
-async function handleSearch(ctx: CommandContext): Promise<string> {
-  if (!ctx.args.trim())
-    return formatError("Missing argument", "Usage: /search <query>");
-  const result = await ctx.ipcClient.request<{
-    results: SearchResult[];
-    count: number;
-  }>("searchHistory", { query: ctx.args.trim() });
-  return formatSearchResults(result.results ?? [], ctx.args.trim());
-}
-
-async function handleExport(ctx: CommandContext): Promise<string> {
-  const result = await ctx.ipcClient.request<ExportResult>("export");
-  return formatExport(result);
-}
-
-async function handleAbort(ctx: CommandContext): Promise<string> {
-  await ctx.control.request("abort");
-  return "⛔ Current task aborted.";
-}
-
-async function handleGit(ctx: CommandContext): Promise<string> {
-  const result = await ctx.ipcClient.request<GitStatusResult>("gitStatus");
-  return formatGitStatus(result);
-}
-
-async function handleDiff(ctx: CommandContext): Promise<string> {
-  const result = await ctx.ipcClient.request<GitDiffResult>("gitDiff");
-  return formatGitDiff(result);
-}
-
-async function handleCommit(ctx: CommandContext): Promise<string> {
-  if (!ctx.args.trim())
-    return formatError("Missing argument", "Usage: /commit <message>");
-  const result = await ctx.ipcClient.request<GitCommitResult>("gitCommit", {
-    message: ctx.args.trim(),
-  });
-  return formatGitCommit(result);
-}
-
-async function handleTools(ctx: CommandContext): Promise<string> {
-  const result = await ctx.ipcClient.request<
-    { tools: ToolInfo[] } | ToolInfo[]
-  >("listTools");
-  const tools = Array.isArray(result) ? result : ((result as any).tools ?? []);
-  return formatTools(tools);
-}
-
-async function handleHealth(ctx: CommandContext): Promise<string> {
-  const data = await ctx.ipcClient.request<ToolHealthData>("toolHealth", {});
-  return formatToolHealth(data, { verbose: ctx.args.trim() === "all" });
-}
-
-async function handleMcp(ctx: CommandContext): Promise<string> {
-  const result = await ctx.ipcClient.request<McpServerList>("listMcpServers");
-  return formatMcpServers(result);
-}
-
-async function handleSkills(ctx: CommandContext): Promise<string> {
-  const result = await ctx.ipcClient.request<
-    { skills: SkillInfo[] } | SkillInfo[]
-  >("listSkills");
-  const skills = Array.isArray(result)
-    ? result
-    : ((result as any).skills ?? []);
-  return formatSkills(skills);
-}
-
-async function handlePlugins(ctx: CommandContext): Promise<string> {
-  const result = await ctx.ipcClient.request<
-    { plugins: PluginInfo[] } | PluginInfo[]
-  >("listPlugins");
-  const plugins = Array.isArray(result)
-    ? result
-    : ((result as any).plugins ?? []);
-  return formatPlugins(plugins);
-}
-
-async function handleProjects(ctx: CommandContext): Promise<string> {
-  const result = await ctx.ipcClient.request<
-    { projects: ProjectInfo[] } | ProjectInfo[]
-  >("projectsList");
-  const projects = Array.isArray(result)
-    ? result
-    : ((result as any).projects ?? []);
-  return formatProjects(projects);
-}
-
-async function handleTask(ctx: CommandContext): Promise<string> {
-  if (!ctx.args.trim())
-    return formatError("Missing argument", "Usage: /task <description>");
-  const description = ctx.args.trim();
-  const result = await ctx.ipcClient.request<{ task_id: string }>(
-    "taskCreate",
-    // Both fields are required by the daemon; the prompt is the same text.
-    { description, prompt: description },
-  );
-  return `🚀 Task created\n\nID: ${result.task_id}`;
-}
-
-async function handleTasks(ctx: CommandContext): Promise<string> {
-  const result = await ctx.ipcClient.request<
-    { tasks: TaskInfo[] } | TaskInfo[]
-  >("taskList");
-  const tasks = Array.isArray(result) ? result : ((result as any).tasks ?? []);
-  return formatTasks(tasks);
-}
-
-async function handleTaskStop(ctx: CommandContext): Promise<string> {
-  const taskId = ctx.args.trim();
-  if (!taskId)
-    return formatError("Missing argument", "Usage: /task_stop <task-id>");
-  const result = await ctx.ipcClient.request<{ stopped: boolean }>("taskStop", {
-    task_id: taskId,
-  });
-  return result?.stopped
-    ? `⏹️ Task stopped\n\nID: ${taskId}`
-    : `⚠️ Task ${taskId} was not running or not found.`;
-}
-
-async function handleCron(ctx: CommandContext): Promise<string> {
-  const result = await ctx.ipcClient.request<
-    { crons: CronEntry[] } | CronEntry[]
-  >("cronList");
-  const crons = Array.isArray(result) ? result : ((result as any).crons ?? []);
-  return formatCronList(crons);
-}
-
-async function handleHelp(_ctx: CommandContext): Promise<string> {
-  return formatHelp();
-}
-
-async function handleStatus(ctx: CommandContext): Promise<string> {
-  const connected = ctx.ipcClient.connected
-    ? "🟢 Connected"
-    : "🔴 Disconnected";
-  let out = `🐾 BaoClaw Feishu Gateway\n\nDaemon: ${connected}\n`;
-  if (_daemonInfo) {
-    out += `Daemon PID: ${_daemonInfo.pid}\nSession: ${_daemonInfo.session_id}\nCWD: ${_daemonInfo.cwd}\n`;
-  }
-  out += `Reconnects: ${_daemonMetrics.reconnectCount}\n`;
-  out += `Last connect: ${_daemonMetrics.lastConnectAt?.toISOString() ?? "never"}\n`;
-  return out;
-}
-
-async function handleStart(_ctx: CommandContext): Promise<string> {
-  return "🐾 BaoClaw Feishu Gateway\n\nWelcome to BaoClaw!\n\nSend a message to chat with the AI, or use / commands.\nType /help to see all available commands.";
-}
-
-async function handleGateway(_ctx: CommandContext): Promise<string> {
-  const args = _ctx.args.trim();
-  const parts = args.split(/\s+/);
+async function handleGateway(ctx: CommandContext): Promise<string> {
+  const parts = ctx.args.trim().split(/\s+/);
   const sub = parts[0] || "status";
 
   switch (sub) {
@@ -593,251 +122,18 @@ async function handleGateway(_ctx: CommandContext): Promise<string> {
   }
 }
 
-async function handleThink(_ctx: CommandContext): Promise<string> {
-  return "🧠 Extended Thinking\n\nJust send a message describing what needs deep thought.";
-}
-
-async function handleSpec(ctx: CommandContext): Promise<string> {
-  const parts = ctx.args.trim().split(/\s+/);
-  const sub = parts[0] || "";
-
-  switch (sub) {
-    case "list": {
-      const result = await ctx.ipcClient.request<
-        { specs: SpecSummary[] } | SpecSummary[]
-      >("specList");
-      const specs = Array.isArray(result)
-        ? result
-        : ((result as any).specs ?? []);
-      return formatSpecList(specs);
-    }
-    case "new": {
-      const name = parts[1];
-      if (!name)
-        return formatError(
-          "Missing argument",
-          "Usage: /spec new <name> [design] [bugfix]",
-        );
-      // Optional flag tokens, mirroring the CLI: [design] [bugfix].
-      const params: Record<string, string> = { feature_name: name };
-      if (parts.slice(1).includes("design")) params.workflow = "design";
-      if (parts.slice(1).includes("bugfix")) params.spec_type = "bugfix";
-      const result = await ctx.ipcClient.request<{
-        feature_name: string;
-        config: { workflow: string; phase: string };
-      }>("specNew", params);
-      return `✅ Spec created\n\nName: ${result.feature_name}\nWorkflow: ${result.config?.workflow}\nPhase: ${result.config?.phase}`;
-    }
-    case "show": {
-      const name = parts[1];
-      if (!name)
-        return formatError("Missing argument", "Usage: /spec show <name>");
-      const result = await ctx.ipcClient.request<SpecSummary>("specShow", {
-        feature_name: name,
-      });
-      return formatSpecShow(result);
-    }
-    case "status": {
-      const name = parts[1];
-      if (!name)
-        return formatError("Missing argument", "Usage: /spec status <name>");
-      const result = await ctx.ipcClient.request<{
-        total: number;
-        completed: number;
-        in_progress: number;
-      }>("specStatus", { feature_name: name });
-      return formatSpecStatus(name, result);
-    }
-    case "run": {
-      const name = parts[1];
-      const taskId = parts[2];
-      if (!name)
-        return formatError(
-          "Missing argument",
-          "Usage: /spec run <name> [task_id]",
-        );
-      const params: Record<string, string> = { feature_name: name };
-      if (taskId) params.task_id = taskId;
-      const result = await ctx.ipcClient.request<{
-        task_id?: string;
-        task_description?: string;
-        status: string;
-        message?: string;
-      }>("specRun", params);
-      return formatSpecRun(result);
-    }
-    default:
-      return "📋 Spec Commands\n\n• /spec list — list all\n• /spec new <name> [design] [bugfix] — create\n• /spec show <name> — summary\n• /spec status <name> — task progress counts\n• /spec run <name> [task_id] — show next pending task";
+async function handleStatus(ctx: CommandContext): Promise<string> {
+  const connected = ctx.ipcClient.connected
+    ? "🟢 Connected"
+    : "🔴 Disconnected";
+  let out = `🐾 BaoClaw Feishu Gateway\n\nDaemon: ${connected}\n`;
+  if (_daemonInfo) {
+    out += `Daemon PID: ${_daemonInfo.pid}\nSession: ${_daemonInfo.session_id}\nCWD: ${_daemonInfo.cwd}\n`;
   }
+  out += `Reconnects: ${_daemonMetrics.reconnectCount}\n`;
+  out += `Last connect: ${_daemonMetrics.lastConnectAt?.toISOString() ?? "never"}\n`;
+  return out;
 }
-
-// ── Command Registry ──
-
-interface CommandDef {
-  name: string;
-  description: string;
-  usage?: string;
-  handler: (ctx: CommandContext) => Promise<string>;
-}
-
-export const COMMAND_REGISTRY: Record<string, CommandDef> = {
-  "/compact": {
-    name: "/compact",
-    description: "Compact conversation context",
-    handler: handleCompact,
-  },
-  "/think": {
-    name: "/think",
-    description: "Extended thinking mode prompt",
-    handler: handleThink,
-  },
-  "/model": {
-    name: "/model",
-    description: "View or switch model",
-    usage: "/model [name]",
-    handler: handleModel,
-  },
-  "/history": {
-    name: "/history",
-    description: "View recent conversation",
-    usage: "/history [n]",
-    handler: handleHistory,
-  },
-  "/search": {
-    name: "/search",
-    description: "Search conversation history",
-    usage: "/search <query>",
-    handler: handleSearch,
-  },
-  "/export": {
-    name: "/export",
-    description: "Export conversation history",
-    handler: handleExport,
-  },
-  "/abort": {
-    name: "/abort",
-    description: "Abort current task",
-    handler: handleAbort,
-  },
-  "/git": { name: "/git", description: "Show git status", handler: handleGit },
-  "/diff": { name: "/diff", description: "Show git diff", handler: handleDiff },
-  "/commit": {
-    name: "/commit",
-    description: "Commit git changes",
-    usage: "/commit <message>",
-    handler: handleCommit,
-  },
-  "/tools": {
-    name: "/tools",
-    description: "List registered tools",
-    handler: handleTools,
-  },
-  "/health": {
-    name: "/health",
-    description: "Tool health overview",
-    usage: "/health [all]",
-    handler: handleHealth,
-  },
-  "/mcp": { name: "/mcp", description: "List MCP servers", handler: handleMcp },
-  "/skills": {
-    name: "/skills",
-    description: "List loaded skills",
-    handler: handleSkills,
-  },
-  "/plugins": {
-    name: "/plugins",
-    description: "List installed plugins",
-    handler: handlePlugins,
-  },
-  "/projects": {
-    name: "/projects",
-    description: "List projects",
-    handler: handleProjects,
-  },
-  "/task": {
-    name: "/task",
-    description: "Create background task",
-    usage: "/task <description>",
-    handler: handleTask,
-  },
-  "/tasks": {
-    name: "/tasks",
-    description: "List background tasks",
-    handler: handleTasks,
-  },
-  "/task_stop": {
-    name: "/task_stop",
-    description: "Stop background task",
-    usage: "/task_stop <id>",
-    handler: handleTaskStop,
-  },
-  "/cron": {
-    name: "/cron",
-    description: "List cron jobs",
-    handler: handleCron,
-  },
-  "/help": { name: "/help", description: "Show help", handler: handleHelp },
-  "/status": {
-    name: "/status",
-    description: "Show gateway status",
-    handler: handleStatus,
-  },
-  "/start": {
-    name: "/start",
-    description: "Show welcome message",
-    handler: handleStart,
-  },
-  "/gateway": {
-    name: "/gateway",
-    description: "Gateway management (informational)",
-    usage: "/gateway status|ping|logs",
-    handler: handleGateway,
-  },
-  "/spec": {
-    name: "/spec",
-    description: "Spec management",
-    usage: "/spec list|new|show|status|run",
-    handler: handleSpec,
-  },
-};
-
-// ── Command Parsing & Dispatch ──
-
-export function parseCommand(text: string): ParsedCommand | null {
-  if (!text.startsWith("/")) return null;
-  const trimmed = text.trim();
-  const spaceIdx = trimmed.indexOf(" ");
-  if (spaceIdx === -1) return { name: trimmed.toLowerCase(), args: "" };
-  return {
-    name: trimmed.slice(0, spaceIdx).toLowerCase(),
-    args: trimmed.slice(spaceIdx + 1).trim(),
-  };
-}
-
-export function isRegisteredCommand(name: string): boolean {
-  return name in COMMAND_REGISTRY;
-}
-
-export async function dispatchCommand(
-  cmd: ParsedCommand,
-  ctx: CommandContext,
-): Promise<string | null> {
-  const command = COMMAND_REGISTRY[cmd.name];
-  if (!command) return null;
-
-  const fullCtx: CommandContext = { ...ctx, args: cmd.args };
-
-  try {
-    const result = await command.handler(fullCtx);
-    return result;
-  } catch (err: any) {
-    const message = err instanceof Error ? err.message : String(err);
-    logger.error(`Command ${cmd.name} failed: ${message}`);
-    return formatError("Command failed", message);
-  }
-}
-
-// ── Help Text ──
 
 export function formatHelp(): string {
   const groups: [string, string[]][] = [
@@ -876,4 +172,174 @@ export function formatHelp(): string {
   }
   out += "Send any non-command message to chat with the AI";
   return out;
+}
+
+// ── Command Registry ───────────────────────────────────────────────────────
+
+function makeSharedHandler(cmdName: string) {
+  return async (ctx: CommandContext): Promise<string> => {
+    const bridge = new GatewayCommandBridge(ctx.ipcClient, markdownFormatter);
+    const res = await bridge.dispatch(cmdName, ctx.args, ctx.control);
+    return res ?? `Unknown command: ${cmdName}`;
+  };
+}
+
+export const COMMAND_REGISTRY: Record<string, CommandDef> = {
+  "/compact": {
+    name: "/compact",
+    description: "Compact session context",
+    handler: makeSharedHandler("/compact"),
+  },
+  "/think": {
+    name: "/think",
+    description: "Extended thinking mode",
+    handler: makeSharedHandler("/think"),
+  },
+  "/model": {
+    name: "/model",
+    description: "View or switch model",
+    usage: "/model [name]",
+    handler: makeSharedHandler("/model"),
+  },
+  "/history": {
+    name: "/history",
+    description: "Show recent messages",
+    usage: "/history [n]",
+    handler: makeSharedHandler("/history"),
+  },
+  "/search": {
+    name: "/search",
+    description: "Search conversation history",
+    usage: "/search <query>",
+    handler: makeSharedHandler("/search"),
+  },
+  "/export": {
+    name: "/export",
+    description: "Export session as Markdown",
+    handler: makeSharedHandler("/export"),
+  },
+  "/abort": {
+    name: "/abort",
+    description: "Abort current task",
+    handler: makeSharedHandler("/abort"),
+  },
+  "/git": {
+    name: "/git",
+    description: "Show git status",
+    handler: makeSharedHandler("/git"),
+  },
+  "/diff": {
+    name: "/diff",
+    description: "Show git diff",
+    handler: makeSharedHandler("/diff"),
+  },
+  "/commit": {
+    name: "/commit",
+    description: "Commit git changes",
+    usage: "/commit <message>",
+    handler: makeSharedHandler("/commit"),
+  },
+  "/tools": {
+    name: "/tools",
+    description: "List available tools",
+    handler: makeSharedHandler("/tools"),
+  },
+  "/health": {
+    name: "/health",
+    description: "Tool health status",
+    usage: "/health [all]",
+    handler: makeSharedHandler("/health"),
+  },
+  "/mcp": {
+    name: "/mcp",
+    description: "List MCP servers",
+    handler: makeSharedHandler("/mcp"),
+  },
+  "/skills": {
+    name: "/skills",
+    description: "List available skills",
+    handler: makeSharedHandler("/skills"),
+  },
+  "/plugins": {
+    name: "/plugins",
+    description: "List installed plugins",
+    handler: makeSharedHandler("/plugins"),
+  },
+  "/projects": {
+    name: "/projects",
+    description: "Manage projects",
+    usage: "/projects [list|switch|add]",
+    handler: makeSharedHandler("/projects"),
+  },
+  "/task": {
+    name: "/task",
+    description: "Create background task",
+    usage: "/task <description>",
+    handler: makeSharedHandler("/task"),
+  },
+  "/tasks": {
+    name: "/tasks",
+    description: "List background tasks",
+    handler: makeSharedHandler("/tasks"),
+  },
+  "/task_stop": {
+    name: "/task_stop",
+    description: "Stop background task",
+    usage: "/task_stop <id>",
+    handler: makeSharedHandler("/task_stop"),
+  },
+  "/cron": {
+    name: "/cron",
+    description: "Manage cron jobs",
+    usage: "/cron [list|remove|toggle]",
+    handler: makeSharedHandler("/cron"),
+  },
+  "/help": {
+    name: "/help",
+    description: "Show help",
+    handler: async () => formatHelp(),
+  },
+  "/status": {
+    name: "/status",
+    description: "Gateway status",
+    handler: handleStatus,
+  },
+  "/start": {
+    name: "/start",
+    description: "Welcome message",
+    handler: async () =>
+      "🐾 BaoClaw Feishu Gateway\n\nWelcome to BaoClaw!\n\nSend a message to chat with the AI, or use / commands.\nType /help to see all available commands.",
+  },
+  "/gateway": {
+    name: "/gateway",
+    description: "Gateway management",
+    usage: "/gateway [status|ping|logs]",
+    handler: handleGateway,
+  },
+  "/spec": {
+    name: "/spec",
+    description: "Specification-driven development",
+    usage: "/spec [list|new|show|status|run]",
+    handler: makeSharedHandler("/spec"),
+  },
+};
+
+// ── Dispatch ───────────────────────────────────────────────────────────────
+
+export async function dispatchCommand(
+  cmd: ParsedCommand,
+  ctx: CommandContext,
+): Promise<string | null> {
+  const command = COMMAND_REGISTRY[cmd.name];
+  if (!command) return null;
+
+  const fullCtx: CommandContext = { ...ctx, args: cmd.args };
+
+  try {
+    return await command.handler(fullCtx);
+  } catch (err: any) {
+    const message = err instanceof Error ? err.message : String(err);
+    logger.error(`Command ${cmd.name} failed: ${message}`);
+    return `❌ Command failed\n${message}`;
+  }
 }

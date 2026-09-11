@@ -1,8 +1,7 @@
 /**
  * PermissionManager — state machine for Telegram tool-use permission requests.
  *
- * Mirrors the WhatsApp gateway's flow (baoclaw-whatsapp/src/permission.ts),
- * adapted for Telegram's interactive surface:
+ * Adapted for Telegram's interactive surface:
  *   1. Formats an HTML prompt with inline buttons (Allow / Always / Deny).
  *   2. Registers the request per chat with an auto-expiry window taken from
  *      the daemon's `ask_timeout_secs` (carried by each permission_request
@@ -21,66 +20,28 @@
  * looked up per chat — at most one can be open at a time per chat.
  */
 
-export type PermissionDecision = "allow" | "allow_always" | "deny";
+import {
+  parsePermissionReply,
+  escapeHtml,
+  PERMISSION_TIMEOUT_MS,
+  LATE_REPLY_GRACE_MS,
+  LATE_PERMISSION_ACK,
+  type PermissionDecision,
+} from "baoclaw-ipc/gateway";
+
+export {
+  parsePermissionReply,
+  PERMISSION_TIMEOUT_MS,
+  LATE_REPLY_GRACE_MS,
+  LATE_PERMISSION_ACK,
+  type PermissionDecision,
+};
 
 export interface PendingPermission {
   tool_use_id: string;
   tool_name: string;
   /** Message id of the prompt, so the decision can replace it. */
   message_id?: number;
-}
-
-/**
- * Last-resort auto-expiry window (ms), matching the daemon's default
- * `ask_timeout_secs`. Fresh prompts always carry the daemon's live value in
- * the `permission_request` event; this constant only covers a malformed or
- * pre-2.2 daemon event missing that field.
- */
-const PERMISSION_TIMEOUT_MS = 300_000; // 300 seconds
-
-/**
- * How long after a chat's permission request leaves the pending state
- * (timeout, supersede, or decision) a reply keyword is still treated as a
- * late answer to THAT request rather than as a normal chat message — so a
- * user replying "yes" to an already-resolved prompt doesn't accidentally
- * submit "yes" to the model as a chat prompt.
- */
-const LATE_REPLY_GRACE_MS = 60_000; // 60 seconds
-
-/** Acknowledgement sent for a decision keyword arriving after resolution. */
-export const LATE_PERMISSION_ACK =
-  "⏳ That permission request was already resolved — it timed out or was handled elsewhere. Nothing to approve.";
-
-/**
- * Parse a plain-text reply as a permission decision.
- * Returns null when the text is not a decision keyword — the caller should
- * treat it as a normal chat message.
- */
-export function parsePermissionReply(text: string): PermissionDecision | null {
-  const normalized = text.trim().toLowerCase();
-  switch (normalized) {
-    case "y":
-    case "yes":
-    case "allow":
-      return "allow";
-    case "a":
-    case "always":
-      return "allow_always";
-    case "n":
-    case "no":
-    case "deny":
-      return "deny";
-    default:
-      return null;
-  }
-}
-
-/** Escape a string for safe interpolation into Telegram HTML. */
-function escapeHtml(text: string): string {
-  return text
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;");
 }
 
 /**
