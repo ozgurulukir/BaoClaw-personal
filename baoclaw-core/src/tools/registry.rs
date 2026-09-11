@@ -70,7 +70,7 @@ impl ToolRegistry {
     /// Install the pinned tail (AgentTool, ToolSearchTool). Called ONCE,
     /// before any snapshot is taken (boot is single-threaded).
     pub fn install_tail(&self, tail: Vec<Arc<dyn Tool>>) {
-        let mut slot = self.tail.lock().unwrap();
+        let mut slot = self.tail.lock().unwrap_or_else(|e| e.into_inner());
         assert!(
             slot.is_none(),
             "ToolRegistry tail installed twice (boot-order contract)"
@@ -82,17 +82,22 @@ impl ToolRegistry {
     pub fn replace_server_tools(&self, server: &str, tools: Vec<Arc<dyn Tool>>) {
         self.buckets
             .lock()
-            .unwrap()
+            .unwrap_or_else(|e| e.into_inner())
             .insert(server.to_string(), tools);
     }
 
     /// Full catalog: head + buckets + tail.
     pub fn snapshot(&self) -> Vec<Arc<dyn Tool>> {
         let mut out = self.head.clone();
-        for bucket in self.buckets.lock().unwrap().values() {
+        for bucket in self
+            .buckets
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .values()
+        {
             out.extend(bucket.iter().cloned());
         }
-        if let Some(tail) = self.tail.lock().unwrap().as_ref() {
+        if let Some(tail) = self.tail.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
             out.extend(tail.iter().cloned());
         }
         out

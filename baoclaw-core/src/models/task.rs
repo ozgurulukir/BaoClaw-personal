@@ -93,7 +93,9 @@ pub fn is_valid_task_id(id: &str) -> bool {
     if id.len() != 9 {
         return false;
     }
-    let prefix = id.chars().next().unwrap();
+    let Some(prefix) = id.chars().next() else {
+        return false;
+    };
     if !matches!(prefix, 'b' | 'a' | 'r' | 't' | 'w' | 'd') {
         return false;
     }
@@ -120,7 +122,12 @@ impl TaskState {
         }
 
         // Validate ID prefix matches task type
-        let prefix = self.id.chars().next().unwrap();
+        let Some(prefix) = self.id.chars().next() else {
+            return Err(ValidationError {
+                field: "id".to_string(),
+                message: "task ID cannot be empty".to_string(),
+            });
+        };
         if prefix != expected_prefix(&self.task_type) {
             return Err(ValidationError {
                 field: "id".to_string(),

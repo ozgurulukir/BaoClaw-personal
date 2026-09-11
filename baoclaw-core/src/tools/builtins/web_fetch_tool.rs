@@ -2,6 +2,13 @@ use async_trait::async_trait;
 use regex::Regex;
 use serde::Serialize;
 use serde_json::{json, Value};
+use std::sync::OnceLock;
+
+static SCRIPT_RE: OnceLock<Regex> = OnceLock::new();
+static STYLE_RE: OnceLock<Regex> = OnceLock::new();
+static BLOCK_RE: OnceLock<Regex> = OnceLock::new();
+static TAG_RE: OnceLock<Regex> = OnceLock::new();
+static MULTI_NEWLINE_RE: OnceLock<Regex> = OnceLock::new();
 
 use crate::tools::trait_def::*;
 
@@ -240,17 +247,21 @@ fn html_to_text(html: &str) -> String {
     let mut text = html.to_string();
 
     // Remove script and style tags and their content
-    let script_re = Regex::new(r"(?is)<script[^>]*>.*?</script>").unwrap();
-    let style_re = Regex::new(r"(?is)<style[^>]*>.*?</style>").unwrap();
+    let script_re = SCRIPT_RE
+        .get_or_init(|| Regex::new(r"(?is)<script[^>]*>.*?</script>").expect("valid script regex"));
+    let style_re = STYLE_RE
+        .get_or_init(|| Regex::new(r"(?is)<style[^>]*>.*?</style>").expect("valid style regex"));
     text = script_re.replace_all(&text, "").to_string();
     text = style_re.replace_all(&text, "").to_string();
 
     // Replace block-level tags with newlines
-    let block_re = Regex::new(r"(?i)<(?:br|p|div|h[1-6]|li|tr)[^>]*>").unwrap();
+    let block_re = BLOCK_RE.get_or_init(|| {
+        Regex::new(r"(?i)<(?:br|p|div|h[1-6]|li|tr)[^>]*>").expect("valid block regex")
+    });
     text = block_re.replace_all(&text, "\n").to_string();
 
     // Remove all remaining HTML tags
-    let tag_re = Regex::new(r"<[^>]+>").unwrap();
+    let tag_re = TAG_RE.get_or_init(|| Regex::new(r"<[^>]+>").expect("valid tag regex"));
     text = tag_re.replace_all(&text, "").to_string();
 
     // Decode common HTML entities
@@ -263,7 +274,8 @@ fn html_to_text(html: &str) -> String {
         .replace("&nbsp;", " ");
 
     // Compress consecutive blank lines to max 2
-    let multi_newline = Regex::new(r"\n{3,}").unwrap();
+    let multi_newline =
+        MULTI_NEWLINE_RE.get_or_init(|| Regex::new(r"\n{3,}").expect("valid newline regex"));
     text = multi_newline.replace_all(&text, "\n\n").to_string();
 
     text.trim().to_string()

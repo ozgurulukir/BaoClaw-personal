@@ -32,18 +32,18 @@ impl StateManager {
 
     /// Returns a clone of the current state.
     pub fn get(&self) -> CoreState {
-        self.state.read().unwrap().clone()
+        self.state.read().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
     /// Applies the updater function under the write lock.
     pub fn update(&self, updater: impl FnOnce(&mut CoreState)) {
-        let mut state = self.state.write().unwrap();
+        let mut state = self.state.write().unwrap_or_else(|e| e.into_inner());
         updater(&mut state);
     }
 
     /// Returns the full state as a JSON Value (for full sync).
     pub fn snapshot(&self) -> Value {
-        let state = self.state.read().unwrap();
+        let state = self.state.read().unwrap_or_else(|e| e.into_inner());
         serde_json::to_value(&*state).unwrap_or(Value::Null)
     }
 

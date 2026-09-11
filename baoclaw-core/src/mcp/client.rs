@@ -64,6 +64,14 @@ struct ClientInner {
     done_rx: watch::Receiver<bool>,
 }
 
+impl ClientInner {
+    fn lock_pending(
+        &self,
+    ) -> std::sync::MutexGuard<'_, HashMap<RequestId, oneshot::Sender<JsonRpcMessage>>> {
+        self.pending.lock().unwrap_or_else(|e| e.into_inner())
+    }
+}
+
 impl McpClient {
     /// Open a connection for a discovered server entry, perform the
     /// initialize handshake, and fetch the tool catalog.
@@ -143,7 +151,7 @@ impl McpClient {
                 }
             }
             // Channel ended: the connection is gone — fail everything.
-            reader_inner.pending.lock().unwrap().clear();
+            reader_inner.lock_pending().clear();
             let _ = done_tx.send(true);
         });
 
@@ -211,7 +219,7 @@ impl McpClient {
     ) -> Result<Value, McpError> {
         let id = RequestId::Number(self.inner.next_id.fetch_add(1, Ordering::Relaxed));
         let (tx, rx) = oneshot::channel();
-        self.inner.pending.lock().unwrap().insert(id.clone(), tx);
+        self.inner.lock_pending().insert(id.clone(), tx);
 
         // Clone the sender under the lock and drop the guard BEFORE sending:
         // an HTTP send spans the whole POST round trip, and holding the mutex
@@ -222,7 +230,7 @@ impl McpClient {
             g.as_ref().map(Arc::clone)
         };
         let Some(sender) = sender else {
-            self.inner.pending.lock().unwrap().remove(&id);
+            self.inner.lock_pending().remove(&id);
             return Err(McpError::Closed);
         };
         {
@@ -233,7 +241,7 @@ impl McpClient {
                 id: id.clone(),
             };
             if let Err(e) = sender.send(&JsonRpcMessage::Request(msg), timeout).await {
-                self.inner.pending.lock().unwrap().remove(&id);
+                self.inner.lock_pending().remove(&id);
                 return Err(e);
             }
         }

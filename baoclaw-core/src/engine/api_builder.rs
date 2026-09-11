@@ -408,7 +408,10 @@ pub fn build_api_request(messages: &[Message], config: &QueryLoopConfig) -> Crea
 /// Tool order is part of the cached prefix, so non-deterministic iteration
 /// (e.g. HashMap-based) would break caching.
 pub fn build_tools_list(config: &QueryLoopConfig) -> Option<Vec<Value>> {
-    let expanded = config.expanded_tools.lock().unwrap();
+    let expanded = config
+        .expanded_tools
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     build_tools_list_with(&config.tools, &expanded)
 }
 

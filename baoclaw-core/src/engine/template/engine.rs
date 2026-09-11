@@ -285,11 +285,11 @@ impl TemplateEngine {
 
     /// Update an existing template and save to disk.
     pub fn update_template(&mut self, name: &str, template: &Template) -> Result<(), String> {
-        if !self.templates.contains_key(name) {
-            return Err(format!("Template '{}' not found", name));
-        }
+        let existing = self
+            .templates
+            .get(name)
+            .ok_or_else(|| format!("Template '{}' not found", name))?;
 
-        let existing = self.templates.get(name).unwrap();
         if existing.builtin {
             return Err(format!(
                 "Cannot modify built-in template '{}'. Save as a new template with /template create",

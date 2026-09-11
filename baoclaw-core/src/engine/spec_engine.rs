@@ -1,6 +1,27 @@
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
+
+static CHECKBOX_RE: OnceLock<Regex> = OnceLock::new();
+static ID_RE: OnceLock<Regex> = OnceLock::new();
+static REQ_RE: OnceLock<Regex> = OnceLock::new();
+
+fn get_checkbox_re() -> &'static Regex {
+    CHECKBOX_RE.get_or_init(|| {
+        Regex::new(r"^(\s*)- \[([ x\-])\]\*?\s+(.+)$").expect("valid checkbox regex")
+    })
+}
+
+fn get_id_re() -> &'static Regex {
+    ID_RE.get_or_init(|| Regex::new(r"^(\d+(?:\.\d+)*)\s+(.+)$").expect("valid id regex"))
+}
+
+fn get_req_re() -> &'static Regex {
+    REQ_RE.get_or_init(|| {
+        Regex::new(r"_(?:需求|Requirements?):\s*([^_]+)_").expect("valid requirement ref regex")
+    })
+}
 
 /// Spec 工作流类型
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -133,7 +154,7 @@ impl TaskTracker {
         // Stack for tracking nesting: (indent_level, parent_index_path)
         let mut task_stack: Vec<(usize, Vec<usize>)> = Vec::new();
 
-        let checkbox_re = Regex::new(r"^(\s*)- \[([ x\-])\]\*?\s+(.+)$").unwrap();
+        let checkbox_re = get_checkbox_re();
 
         for line in &lines {
             if post_tasks {
@@ -144,10 +165,10 @@ impl TaskTracker {
 
             if let Some(caps) = checkbox_re.captures(line) {
                 in_tasks = true;
-                let indent_str = caps.get(1).unwrap().as_str();
+                let indent_str = caps.get(1).map(|m| m.as_str()).unwrap_or("");
                 let indent = indent_str.len();
-                let status_char = caps.get(2).unwrap().as_str();
-                let desc_raw = caps.get(3).unwrap().as_str().to_string();
+                let status_char = caps.get(2).map(|m| m.as_str()).unwrap_or(" ");
+                let desc_raw = caps.get(3).map(|m| m.as_str()).unwrap_or("").to_string();
 
                 let status = match status_char {
                     "x" => TaskStatus::Completed,
@@ -284,9 +305,10 @@ impl TaskTracker {
     // ── Private helpers ──
 
     fn extract_id_and_desc(raw: &str) -> (String, String) {
-        let id_re = Regex::new(r"^(\d+(?:\.\d+)*)\s+(.+)$").unwrap();
-        if let Some(caps) = id_re.captures(raw) {
-            (caps[1].to_string(), caps[2].to_string())
+        if let Some(caps) = get_id_re().captures(raw) {
+            let id = caps.get(1).map(|m| m.as_str()).unwrap_or("").to_string();
+            let desc = caps.get(2).map(|m| m.as_str()).unwrap_or("").to_string();
+            (id, desc)
         } else {
             // No numeric ID found, use the full text as description and generate a placeholder ID
             (String::new(), raw.to_string())
@@ -295,8 +317,10 @@ impl TaskTracker {
 
     fn extract_requirement_ref(desc: &str) -> Option<String> {
         // Match patterns like "_需求: 1.6, 5.2_" or "_Requirements: 1.2, 3.4_"
-        let req_re = Regex::new(r"_(?:需求|Requirements?):\s*([^_]+)_").unwrap();
-        req_re.captures(desc).map(|caps| caps[1].trim().to_string())
+        get_req_re()
+            .captures(desc)
+            .and_then(|caps| caps.get(1))
+            .map(|m| m.as_str().trim().to_string())
     }
 
     fn add_child_at_path(tasks: &mut Vec<TaskItem>, path: &[usize], item: TaskItem) -> usize {

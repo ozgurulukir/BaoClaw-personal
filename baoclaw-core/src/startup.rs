@@ -620,7 +620,7 @@ pub(super) async fn assemble_shared_state(
     let granted_dirs = Arc::clone(&granted_search_dirs);
     {
         let home_dir = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
-        let mut dirs = granted_dirs.write().unwrap();
+        let mut dirs = granted_dirs.write().unwrap_or_else(|e| e.into_inner());
         dirs.push(std::path::PathBuf::from(home_dir).join(".baoclaw"));
         if let Ok(ctx) = permission_manager.try_read() {
             for d in &ctx.get_context().additional_search_dirs {
@@ -634,7 +634,9 @@ pub(super) async fn assemble_shared_state(
     // "Always allow" grants in the executor.
     {
         let home_dir = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
-        let mut dirs = granted_write_dirs.write().unwrap();
+        let mut dirs = granted_write_dirs
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
         dirs.push(std::path::PathBuf::from(home_dir).join(".baoclaw"));
         if let Ok(ctx) = permission_manager.try_read() {
             for d in &ctx.get_context().additional_write_dirs {

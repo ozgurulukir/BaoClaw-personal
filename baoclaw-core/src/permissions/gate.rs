@@ -32,19 +32,28 @@ impl PermissionGate {
         }
     }
 
+    fn write_pending(
+        &self,
+    ) -> std::sync::RwLockWriteGuard<'_, HashMap<String, oneshot::Sender<PermissionDecision>>> {
+        self.pending.write().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn read_pending(
+        &self,
+    ) -> std::sync::RwLockReadGuard<'_, HashMap<String, oneshot::Sender<PermissionDecision>>> {
+        self.pending.read().unwrap_or_else(|e| e.into_inner())
+    }
+
     /// Register a pending permission request, returns a receiver to await the decision.
     pub fn request(&self, tool_use_id: &str) -> oneshot::Receiver<PermissionDecision> {
         let (tx, rx) = oneshot::channel();
-        self.pending
-            .write()
-            .unwrap()
-            .insert(tool_use_id.to_string(), tx);
+        self.write_pending().insert(tool_use_id.to_string(), tx);
         rx
     }
 
     /// Submit a user's permission decision. Returns true if the decision was delivered.
     pub fn respond(&self, tool_use_id: &str, decision: PermissionDecision) -> bool {
-        if let Some(tx) = self.pending.write().unwrap().remove(tool_use_id) {
+        if let Some(tx) = self.write_pending().remove(tool_use_id) {
             tx.send(decision).is_ok()
         } else {
             false
@@ -53,7 +62,7 @@ impl PermissionGate {
 
     /// Returns the number of pending permission requests.
     pub fn pending_count(&self) -> usize {
-        self.pending.read().unwrap().len()
+        self.read_pending().len()
     }
 }
 

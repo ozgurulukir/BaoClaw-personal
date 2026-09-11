@@ -176,7 +176,10 @@ impl TrendAnalyzer {
             "stable"
         };
 
-        let last_value = Self::extract_metric(daily_stats.last().unwrap(), metric);
+        let last_value = daily_stats
+            .last()
+            .map(|last| Self::extract_metric(last, metric))
+            .unwrap_or(0.0);
 
         Ok(format!(
             "`{}`: {} → predicted next value ~{:.1} ({} trend, slope={:.3})",

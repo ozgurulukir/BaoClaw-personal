@@ -420,28 +420,32 @@ impl UserProfileManager {
         }
     }
 
+    fn lock_profile(&self) -> std::sync::MutexGuard<'_, UserProfile> {
+        self.profile.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     /// Get current profile (clone)
     pub fn get(&self) -> UserProfile {
-        self.profile.lock().unwrap().clone()
+        self.lock_profile().clone()
     }
 
     /// Update user's name
     pub fn update_name(&self, name: String) {
-        let mut p = self.profile.lock().unwrap();
+        let mut p = self.lock_profile();
         p.name = Some(name);
         p.updated_at = chrono::Utc::now().to_rfc3339();
     }
 
     /// Update preferred language
     pub fn update_language(&self, lang: String) {
-        let mut p = self.profile.lock().unwrap();
+        let mut p = self.lock_profile();
         p.preferred_language = Some(lang);
         p.updated_at = chrono::Utc::now().to_rfc3339();
     }
 
     /// Add a coding style preference (no duplicates)
     pub fn add_coding_style(&self, style: String) {
-        let mut p = self.profile.lock().unwrap();
+        let mut p = self.lock_profile();
         if !p.coding_style.contains(&style) {
             p.coding_style.push(style);
         }
@@ -450,7 +454,7 @@ impl UserProfileManager {
 
     /// Add a workflow (no duplicates)
     pub fn add_workflow(&self, workflow: String) {
-        let mut p = self.profile.lock().unwrap();
+        let mut p = self.lock_profile();
         if !p.workflows.contains(&workflow) {
             p.workflows.push(workflow);
         }
@@ -459,7 +463,7 @@ impl UserProfileManager {
 
     /// Add or update a tool preference
     pub fn add_tool_preference(&self, tool: String, pref: String) {
-        let mut p = self.profile.lock().unwrap();
+        let mut p = self.lock_profile();
         if let Some(entry) = p.tool_preferences.iter_mut().find(|(t, _)| t == &tool) {
             entry.1 = pref;
         } else {
@@ -470,7 +474,7 @@ impl UserProfileManager {
 
     /// Add a note to a project (creates project entry if needed)
     pub fn add_project_note(&self, project_path: String, note: String) {
-        let mut p = self.profile.lock().unwrap();
+        let mut p = self.lock_profile();
         if let Some(proj) = p
             .project_preferences
             .iter_mut()
@@ -491,14 +495,14 @@ impl UserProfileManager {
 
     /// Update custom instructions (replaces entirely)
     pub fn update_custom_instructions(&self, instructions: String) {
-        let mut p = self.profile.lock().unwrap();
+        let mut p = self.lock_profile();
         p.custom_instructions = instructions;
         p.updated_at = chrono::Utc::now().to_rfc3339();
     }
 
     /// Merge session stats into profile stats
     pub fn merge_session_stats(&self, session: &SessionStats) {
-        let mut p = self.profile.lock().unwrap();
+        let mut p = self.lock_profile();
 
         // Running average for session duration
         let prev_total = p.stats.total_sessions as f64;
@@ -541,7 +545,7 @@ impl UserProfileManager {
 
     /// Persist to disk (markdown format)
     pub fn save(&self) {
-        let p = self.profile.lock().unwrap();
+        let p = self.lock_profile();
         let md = profile_to_markdown(&p);
 
         // Ensure parent directory exists
@@ -558,7 +562,7 @@ impl UserProfileManager {
     /// Returns `None` if the profile is essentially empty (no name, no styles,
     /// no workflows, no custom instructions).
     pub fn build_prompt_fragment(&self) -> Option<String> {
-        let p = self.profile.lock().unwrap();
+        let p = self.lock_profile();
 
         let is_empty = p.name.is_none()
             && p.preferred_language.is_none()

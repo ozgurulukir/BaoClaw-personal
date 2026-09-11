@@ -1799,7 +1799,11 @@ async fn execute_tool_turn(
                             .iter()
                             .any(|t| t.name() == n && t.is_deferred())
                         {
-                            config.expanded_tools.lock().unwrap().insert(n.to_string());
+                            config
+                                .expanded_tools
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner())
+                                .insert(n.to_string());
                         }
                     }
                 }
@@ -1812,7 +1816,7 @@ async fn execute_tool_turn(
             config
                 .expanded_tools
                 .lock()
-                .unwrap()
+                .unwrap_or_else(|e| e.into_inner())
                 .insert(res.tool_name.clone());
         }
     }

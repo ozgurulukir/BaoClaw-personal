@@ -172,7 +172,12 @@ impl McpSender for StreamableSender {
             .header("Accept", "application/json, text/event-stream")
             .timeout(deadline)
             .body(body);
-        if let Some(sid) = self.session.lock().unwrap().as_ref() {
+        if let Some(sid) = self
+            .session
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+        {
             req = req.header("Mcp-Session-Id", sid);
         }
         for (k, v) in &self.headers {
@@ -195,7 +200,7 @@ impl McpSender for StreamableSender {
             .get("mcp-session-id")
             .and_then(|v| v.to_str().ok())
         {
-            *self.session.lock().unwrap() = Some(sid.to_string());
+            *self.session.lock().unwrap_or_else(|e| e.into_inner()) = Some(sid.to_string());
         }
         let status = response.status().as_u16();
         if !(200..300).contains(&status) {
@@ -233,7 +238,11 @@ impl McpSender for StreamableSender {
     /// Best-effort session termination.
     async fn close(&self) {
         *self.tx.lock().await = None;
-        let sid = self.session.lock().unwrap().clone();
+        let sid = self
+            .session
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
         let mut req = self
             .http
             .delete(&self.endpoint)

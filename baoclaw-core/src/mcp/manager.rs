@@ -111,6 +111,12 @@ struct ServerSlot {
     reconnect_kick_rx: watch::Receiver<u64>,
 }
 
+impl ServerSlot {
+    fn lock_inner(&self) -> std::sync::MutexGuard<'_, SlotInner> {
+        self.inner.lock().unwrap_or_else(|e| e.into_inner())
+    }
+}
+
 pub struct ConnectionManager {
     slots: RwLock<HashMap<String, Arc<ServerSlot>>>,
     /// Reset on every Ready transition so transport-failure records
@@ -143,6 +149,12 @@ pub enum McpCallError {
 }
 
 impl ConnectionManager {
+    fn lock_registry(
+        &self,
+    ) -> std::sync::MutexGuard<'_, Option<crate::tools::registry::ToolRegistryHandle>> {
+        self.registry.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     /// Empty manager: for tests of components that only need the handle
     /// (their lookups miss and surface as "unknown server").
     #[cfg(test)]
@@ -157,7 +169,7 @@ impl ConnectionManager {
     /// Attach the engine's live tool registry. Slot catalogs publish into it
     /// from this point (boot registration and every later refresh).
     pub fn attach_registry(&self, registry: crate::tools::registry::ToolRegistryHandle) {
-        *self.registry.lock().unwrap() = Some(registry);
+        *self.lock_registry() = Some(registry);
     }
 
     /// Validate + register slots and spawn one supervisor task per active
@@ -222,7 +234,7 @@ impl ConnectionManager {
                     reconnect_kick_tx,
                     reconnect_kick_rx,
                 });
-                if slot.inner.lock().unwrap().state == ServerRuntimeState::Connecting {
+                if slot.lock_inner().state == ServerRuntimeState::Connecting {
                     let tracker = manager.tool_health.clone();
                     tokio::spawn(supervise(
                         Arc::clone(&manager),
@@ -252,7 +264,7 @@ impl ConnectionManager {
             let _ = slot.boot_settled.clone().wait_for(|v| *v).await;
         }
 
-        let registry = self.registry.lock().unwrap().clone();
+        let registry = self.lock_registry().clone();
         let Some(registry) = registry else {
             eprintln!("[mcp] WARNING: no registry attached at boot; MCP tools not registered");
             return 0;
@@ -262,7 +274,7 @@ impl ConnectionManager {
         // Dispatch is case-insensitive, so collision detection must be too.
         let mut seen = std::collections::HashSet::new();
         for slot in &slots {
-            let g = slot.inner.lock().unwrap();
+            let g = slot.lock_inner();
             // A slot that reached Ready and crashed in the microseconds
             // before this read still fetched its catalog — the live-catalog
             // contract says its tools must be registered.
@@ -293,9 +305,9 @@ impl ConnectionManager {
     /// Republish one server's current catalog as bridges into the registry.
     /// Called on Ready transitions and `tools/list_changed` refreshes.
     fn republish_server(self: &Arc<Self>, slot: &ServerSlot) {
-        let registry = self.registry.lock().unwrap().clone();
+        let registry = self.lock_registry().clone();
         let Some(registry) = registry else { return };
-        let g = slot.inner.lock().unwrap();
+        let g = slot.lock_inner();
         let mut bridges: Vec<Arc<dyn Tool>> = Vec::new();
         let mut seen = std::collections::HashSet::new();
         for def in &g.tool_defs {
@@ -349,7 +361,7 @@ impl ConnectionManager {
             })?;
 
         let (client, call_timeout) = {
-            let g = slot.inner.lock().unwrap();
+            let g = slot.lock_inner();
             if g.state != ServerRuntimeState::Ready {
                 return Err(McpCallError::Disconnected {
                     state: g.state.clone(),
@@ -381,7 +393,7 @@ impl ConnectionManager {
             .await
             .iter()
             .map(|(name, slot)| {
-                let g = slot.inner.lock().unwrap();
+                let g = slot.lock_inner();
                 (
                     name.clone(),
                     ServerStatus {
@@ -410,7 +422,7 @@ impl ConnectionManager {
             .map(|(_, slot)| Arc::clone(slot))
             .collect();
         for slot in slots {
-            let state = slot.inner.lock().unwrap().state.clone();
+            let state = slot.lock_inner().state.clone();
             match state {
                 ServerRuntimeState::Ready => {
                     slot.refresh_kick_tx.send_modify(|v| *v += 1);
@@ -429,7 +441,7 @@ impl ConnectionManager {
     pub async fn shutdown_all(&self) {
         let slots: Vec<Arc<ServerSlot>> = self.slots.read().await.values().cloned().collect();
         for slot in slots {
-            let client = slot.inner.lock().unwrap().client.clone();
+            let client = slot.lock_inner().client.clone();
             if let Some(client) = client {
                 client.shutdown().await;
             }
@@ -465,7 +477,7 @@ async fn supervise(
             Ok((client, tool_defs)) => {
                 let client = Arc::new(client);
                 {
-                    let mut g = slot.inner.lock().unwrap();
+                    let mut g = slot.lock_inner();
                     g.state = ServerRuntimeState::Ready;
                     g.reason = None;
                     g.restarts = 0;
@@ -478,7 +490,7 @@ async fn supervise(
                 // hard-blocked by tool-health long after recovery.
                 backoff = cfg.backoff_initial;
                 if let Some(th) = &tool_health {
-                    let g = slot.inner.lock().unwrap();
+                    let g = slot.lock_inner();
                     for def in &g.tool_defs {
                         th.reset_tool(&composite_tool_name(&slot.spec.name, &def.name));
                     }
@@ -492,7 +504,7 @@ async fn supervise(
                 loop {
                     tokio::select! {
                         _ = client.wait_closed() => {
-                            let mut g = slot.inner.lock().unwrap();
+                            let mut g = slot.lock_inner();
                             g.client = None;
                             if !manual_reconnect {
                                 g.restarts += 1;
@@ -533,7 +545,7 @@ async fn supervise(
             }
             Err(e) => {
                 let park = {
-                    let mut g = slot.inner.lock().unwrap();
+                    let mut g = slot.lock_inner();
                     g.reason = Some(e.to_string());
                     g.client = None;
                     g.restarts += 1;
@@ -556,7 +568,7 @@ async fn supervise(
                     let _ = reconnect_rx.wait_for(|v| *v != last_reconnect_kick).await;
                     last_reconnect_kick = *reconnect_rx.borrow();
                     {
-                        let mut g = slot.inner.lock().unwrap();
+                        let mut g = slot.lock_inner();
                         g.restarts = 0;
                         g.state = ServerRuntimeState::Connecting;
                         g.reason = Some("manual refresh".to_string());
@@ -614,7 +626,7 @@ async fn refresh_catalog(
         }
     };
     {
-        let mut g = slot.inner.lock().unwrap();
+        let mut g = slot.lock_inner();
         if g.tool_defs == defs {
             return; // no-op refresh: nothing to publish
         }

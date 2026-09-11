@@ -154,7 +154,9 @@ pub fn is_valid_uuid_v4(s: &str) -> bool {
         return false;
     }
     // Variant bits (first char of 4th group) must be 8, 9, a, or b
-    let variant_char = parts[3].chars().next().unwrap();
+    let Some(variant_char) = parts[3].chars().next() else {
+        return false;
+    };
     matches!(variant_char, '8' | '9' | 'a' | 'b' | 'A' | 'B')
 }
 

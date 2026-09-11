@@ -49,7 +49,10 @@ pub(crate) fn route_inbound(
 ) -> Option<JsonRpcMessage> {
     match msg {
         JsonRpcMessage::Response(resp) => {
-            let tx = pending.lock().unwrap().remove(&resp.id);
+            let tx = pending
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .remove(&resp.id);
             if let Some(tx) = tx {
                 let _ = tx.send(JsonRpcMessage::Response(resp));
             }
@@ -57,7 +60,7 @@ pub(crate) fn route_inbound(
         }
         JsonRpcMessage::ErrorResponse(err) => {
             if let Some(id) = &err.id {
-                let tx = pending.lock().unwrap().remove(id);
+                let tx = pending.lock().unwrap_or_else(|e| e.into_inner()).remove(id);
                 if let Some(tx) = tx {
                     let _ = tx.send(JsonRpcMessage::ErrorResponse(err));
                 }

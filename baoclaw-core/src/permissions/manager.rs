@@ -183,6 +183,14 @@ impl PermissionManager {
         }
     }
 
+    fn read_context(&self) -> std::sync::RwLockReadGuard<'_, ToolPermissionContext> {
+        self.context.read().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn write_context(&self) -> std::sync::RwLockWriteGuard<'_, ToolPermissionContext> {
+        self.context.write().unwrap_or_else(|e| e.into_inner())
+    }
+
     /// Check permission for a tool invocation.
     ///
     /// Evaluation order:
@@ -196,7 +204,7 @@ impl PermissionManager {
         tool_name: &str,
         input_description: Option<&str>,
     ) -> PermissionResult {
-        let ctx = self.context.read().unwrap();
+        let ctx = self.read_context();
 
         // Step 1: Check deny rules first (highest priority)
         if find_matching_rule_in_map(&ctx.always_deny_rules, tool_name, input_description) {
@@ -243,13 +251,13 @@ impl PermissionManager {
 
     /// Update the permission context using a closure.
     pub fn update_context(&self, updater: impl FnOnce(&mut ToolPermissionContext)) {
-        let mut ctx = self.context.write().unwrap();
+        let mut ctx = self.write_context();
         updater(&mut ctx);
     }
 
     /// Get a clone of the current permission context.
     pub fn get_context(&self) -> ToolPermissionContext {
-        self.context.read().unwrap().clone()
+        self.read_context().clone()
     }
 
     /// Add an "always allow" rule for a specific tool from a given source.
@@ -259,7 +267,7 @@ impl PermissionManager {
         tool_name: &str,
         rule_content: Option<String>,
     ) {
-        let mut ctx = self.context.write().unwrap();
+        let mut ctx = self.write_context();
         let rules = ctx
             .always_allow_rules
             .entry(source.to_string())
@@ -284,7 +292,7 @@ impl PermissionManager {
         tool_name: &str,
         rule_content: Option<String>,
     ) {
-        let mut ctx = self.context.write().unwrap();
+        let mut ctx = self.write_context();
         let rule = PermissionRule {
             tool_name: tool_name.to_string(),
             rule_content,
@@ -324,7 +332,7 @@ impl PermissionManager {
         tool_name: &str,
         rule_content: Option<&str>,
     ) -> usize {
-        let mut ctx = self.context.write().unwrap();
+        let mut ctx = self.write_context();
         let mut removed = 0;
 
         let filter_rules = |map: &mut ToolPermissionRulesBySource| -> usize {
@@ -368,7 +376,7 @@ impl PermissionManager {
 
     /// Set the permission mode.
     pub fn set_mode(&self, mode: PermissionMode) {
-        let mut ctx = self.context.write().unwrap();
+        let mut ctx = self.write_context();
         ctx.mode = mode;
     }
 }

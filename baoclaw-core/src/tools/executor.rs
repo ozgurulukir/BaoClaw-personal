@@ -744,8 +744,24 @@ pub async fn execute_tools(
         });
     }
 
-    // Unwrap all results (every slot should be filled)
-    results.into_iter().map(|r| r.unwrap()).collect()
+    // Collect all results, guaranteeing 1:1 match with requests so LLM API protocol is never violated
+    results
+        .into_iter()
+        .enumerate()
+        .map(|(idx, res)| {
+            res.unwrap_or_else(|| {
+                let req = &requests[idx];
+                ToolExecutionResult {
+                    tool_use_id: req.id.clone(),
+                    tool_name: req.name.clone(),
+                    output: Value::String(
+                        "Internal error: tool execution slot not filled".to_string(),
+                    ),
+                    is_error: true,
+                }
+            })
+        })
+        .collect()
 }
 
 /// Find a tool by name (case-insensitive, also checks aliases)
