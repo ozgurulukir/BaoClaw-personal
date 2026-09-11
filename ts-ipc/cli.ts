@@ -19,6 +19,11 @@ import {
 import { formatToolHealth, type ToolHealthData } from "./toolHealth.js";
 import type { SearchResult } from "./search.js";
 import type { McpRefreshResult, McpServerList } from "./mcp.js";
+import {
+  CommandRegistry,
+  allModularCommands,
+  type CliContext,
+} from "./cli/index.js";
 import * as fs from "fs";
 import * as os from "os";
 // @ts-ignore — pdf-parse and mammoth loaded dynamically for CJS compat
@@ -2375,18 +2380,66 @@ async function main() {
     }, 50);
   });
 
-  async function handleLine(input: string) {
-    // ── Slash command registry ──────────────────────────────────────────
-    // Single-pass dispatch: the trimmed input is split into a command word
-    // and an args string, then the word is looked up in the ordered
-    // registry below. This replaces the old sequential
-    // if (input.startsWith(...)) chain, which let prefix commands (e.g.
-    // /permission) shadow longer commands (e.g. /permissions).
+  const modularRegistry = new CommandRegistry();
+  for (const cmd of allModularCommands) {
+    modularRegistry.registerCommand(cmd);
+  }
 
+  async function handleLine(input: string) {
     const trimmed = input.trim();
     const spaceIdx = trimmed.indexOf(" ");
     const cmd = spaceIdx === -1 ? trimmed : trimmed.slice(0, spaceIdx);
     const cmdArgs = spaceIdx === -1 ? "" : trimmed.slice(spaceIdx + 1);
+
+    const cliCtx: CliContext = {
+      client,
+      control,
+      socketPath,
+      rl,
+      get thinkingEnabled() {
+        return thinkingEnabled;
+      },
+      set thinkingEnabled(v: boolean | undefined) {
+        thinkingEnabled = !!v;
+      },
+      get debugMode() {
+        return debugMode;
+      },
+      set debugMode(v: boolean | undefined) {
+        debugMode = !!v;
+      },
+      get isStreaming() {
+        return isStreaming;
+      },
+      set isStreaming(v: boolean) {
+        isStreaming = v;
+      },
+      get currentText() {
+        return currentText;
+      },
+      set currentText(v: string) {
+        currentText = v;
+      },
+      get toolCount() {
+        return toolCount;
+      },
+      set toolCount(v: number) {
+        toolCount = v;
+      },
+      get queryStartTime() {
+        return queryStartTime;
+      },
+      set queryStartTime(v: number) {
+        queryStartTime = v;
+      },
+      startSpinner,
+      stopSpinner,
+      printPrompt: () => rl.prompt(),
+    };
+
+    if (await modularRegistry.execute(input, cliCtx)) {
+      return;
+    }
 
     const cmd_quit = async (): Promise<void> => {
       console.log(`\n${DIM}Disconnecting (daemon stays running)...${RESET}`);
