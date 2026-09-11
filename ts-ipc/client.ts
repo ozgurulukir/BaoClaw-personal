@@ -1,28 +1,14 @@
 import * as net from "net";
+import type {
+  DisconnectHandler,
+  IpcClientOptions,
+  JsonRpcNotification,
+  JsonRpcRequest,
+  NotificationHandler,
+} from "./protocol/types.js";
+import type { IpcMethodMap, IpcMethodName } from "./protocol/methods.js";
 
-interface JsonRpcRequest {
-  jsonrpc: "2.0";
-  method: string;
-  params?: unknown;
-  id: number | string;
-}
-
-interface JsonRpcNotification {
-  jsonrpc: "2.0";
-  method: string;
-  params?: unknown;
-}
-
-type NotificationHandler = (params: unknown) => void;
-type DisconnectHandler = (error: Error) => void;
-
-export interface IpcClientOptions {
-  /**
-   * Default request timeout in milliseconds. `0` disables timeouts.
-   * Can be overridden per-request via `request(method, params, timeoutMs)`.
-   */
-  requestTimeoutMs?: number;
-}
+export type { IpcClientOptions };
 
 export class IpcClient {
   private socket: net.Socket | null = null;
@@ -121,6 +107,28 @@ export class IpcClient {
       const line = JSON.stringify(request) + "\n";
       this.socket!.write(line);
     });
+  }
+
+  /**
+   * Send a strongly-typed JSON-RPC 2.0 request.
+   * Parameter and result types are automatically inferred from `IpcMethodMap`.
+   *
+   * @param method - Strongly-typed RPC method name
+   * @param args - Method parameters (omitted for void params) and optional timeout
+   * @returns Typed response payload
+   */
+  async call<M extends IpcMethodName>(
+    method: M,
+    ...args: IpcMethodMap[M]["params"] extends void
+      ? [params?: undefined, timeoutMs?: number]
+      : [params: IpcMethodMap[M]["params"], timeoutMs?: number]
+  ): Promise<IpcMethodMap[M]["result"]> {
+    const [params, timeoutMs] = args;
+    return this.request<IpcMethodMap[M]["result"]>(
+      method as string,
+      params,
+      timeoutMs ?? this.defaultTimeoutMs,
+    );
   }
 
   /**

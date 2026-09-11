@@ -16,7 +16,7 @@ export const diffCommand: CliCommand = {
   execute: async (_args: string, ctx: CliContext): Promise<void> => {
     ctx.startSpinner("Running git diff...");
     try {
-      const result = await ctx.client.request<{ diff: string }>("gitDiff");
+      const result = await ctx.client.call("gitDiff");
       ctx.stopSpinner();
       console.log(`\n${FG_ORANGE}${BOLD}Git Diff${RESET}\n`);
       console.log(result.diff);
@@ -42,10 +42,7 @@ export const commitCommand: CliCommand = {
     }
     ctx.startSpinner("Committing...");
     try {
-      const result = await ctx.client.request<{
-        hash: string;
-        message: string;
-      }>("gitCommit", { message });
+      const result = await ctx.client.call("gitCommit", { message });
       ctx.stopSpinner();
       console.log(
         `\n${FG_GREEN}${BOLD}Committed${RESET} ${DIM}${result.hash}${RESET} ${result.message}\n`,

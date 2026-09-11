@@ -18,10 +18,7 @@ export const toolsCommand: CliCommand = {
   description: "List registered tools",
   execute: async (_args: string, ctx: CliContext): Promise<void> => {
     try {
-      const result = await ctx.client.request<{
-        tools: Array<{ name: string; description: string; type: string }>;
-        count: number;
-      }>("listTools");
+      const result = await ctx.client.call("listTools");
       console.log(
         `\n${FG_ORANGE}${BOLD}Registered Tools${RESET} ${DIM}(${result.count})${RESET}\n`,
       );
@@ -80,12 +77,9 @@ export const mcpCommand: CliCommand = {
           return;
         }
         const target = rest.join(" ");
-        const result = await ctx.client.request<McpRefreshResult>(
-          "mcpRefresh",
-          {
-            server: target || null,
-          },
-        );
+        const result = await ctx.client.call("mcpRefresh", {
+          server: target || undefined,
+        });
         console.log(
           `\n${FG_ORANGE}${BOLD}MCP refresh requested${RESET} ${DIM}(${result.count})${RESET}\n`,
         );
@@ -98,7 +92,7 @@ export const mcpCommand: CliCommand = {
         ctx.rl.prompt();
         return;
       }
-      const result = await ctx.client.request<McpServerList>("listMcpServers");
+      const result = await ctx.client.call("listMcpServers");
       if (result.count === 0) {
         console.log(`\n${DIM}No MCP servers configured.${RESET}`);
         console.log(
@@ -166,15 +160,7 @@ export const skillsCommand: CliCommand = {
   description: "List discovered skills",
   execute: async (_args: string, ctx: CliContext): Promise<void> => {
     try {
-      const result = await ctx.client.request<{
-        skills: Array<{
-          name: string;
-          path: string;
-          source: string;
-          description?: string;
-        }>;
-        count: number;
-      }>("listSkills");
+      const result = await ctx.client.call("listSkills");
       if (result.count === 0) {
         console.log(`\n${DIM}No skills found.${RESET}`);
         console.log(
@@ -207,19 +193,7 @@ export const pluginsCommand: CliCommand = {
   description: "List discovered plugins",
   execute: async (_args: string, ctx: CliContext): Promise<void> => {
     try {
-      const result = await ctx.client.request<{
-        plugins: Array<{
-          name: string;
-          version?: string;
-          description?: string;
-          path: string;
-          source: string;
-          has_tools: boolean;
-          has_skills: boolean;
-          has_mcp: boolean;
-        }>;
-        count: number;
-      }>("listPlugins");
+      const result = await ctx.client.call("listPlugins");
       if (result.count === 0) {
         console.log(`\n${DIM}No plugins found.${RESET}`);
         console.log(

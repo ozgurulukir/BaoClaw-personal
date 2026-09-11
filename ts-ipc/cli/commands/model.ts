@@ -23,7 +23,7 @@ export const thinkCommand: CliCommand = {
       ? { thinking: { mode: "enabled", budget_tokens: thinkingBudget } }
       : { thinking: { mode: "disabled" } };
     try {
-      await ctx.client.request("updateSettings", { settings });
+      await ctx.client.call("updateSettings", { settings });
       if (ctx.thinkingEnabled) {
         console.log(
           `\n${FG_GREEN}${BOLD}Extended thinking enabled${RESET} ${DIM}(budget: ${thinkingBudget} tokens)${RESET}\n`,
@@ -47,7 +47,7 @@ export const abortCommand: CliCommand = {
   execute: async (_args: string, ctx: CliContext): Promise<void> => {
     ctx.stopSpinner();
     try {
-      await ctx.control.request("abort");
+      await ctx.control.call("abort");
     } catch {}
     ctx.currentText = "";
     ctx.isStreaming = false;
@@ -78,7 +78,7 @@ export const tokensCommand: CliCommand = {
   description: "Show token usage stats",
   execute: async (_args: string, ctx: CliContext): Promise<void> => {
     try {
-      const result = await ctx.client.request<any>("session.tokens", {});
+      const result = await ctx.client.call("session.tokens");
       if (result && result.current_tokens !== undefined) {
         const ctxWin = result.context_window ?? 0;
         const pct =
@@ -136,7 +136,7 @@ export const rateCommand: CliCommand = {
       return;
     }
     try {
-      await ctx.client.request("evolution.rateTrajectory", { rating });
+      await ctx.client.call("evolution.rateTrajectory", { rating });
       console.log(`\n${FG_GREEN}✓ Rated last interaction: ${rating}${RESET}\n`);
     } catch (err: any) {
       console.error(

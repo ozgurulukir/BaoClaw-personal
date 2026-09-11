@@ -1,5 +1,6 @@
 import { IpcClient } from "./client.js";
 import { createLogger } from "./logger.js";
+import type { IpcMethodMap, IpcMethodName } from "./protocol/methods.js";
 
 const logger = createLogger("ts-ipc");
 
@@ -28,6 +29,15 @@ export interface ControlChannel {
    * (abort, permissionResponse).
    */
   request<T = unknown>(method: string, params?: unknown): Promise<T>;
+  /**
+   * Send a strongly-typed RPC that must not be deferred by an in-flight turn.
+   */
+  call<M extends IpcMethodName>(
+    method: M,
+    ...args: IpcMethodMap[M]["params"] extends void
+      ? [params?: undefined, timeoutMs?: number]
+      : [params: IpcMethodMap[M]["params"], timeoutMs?: number]
+  ): Promise<IpcMethodMap[M]["result"]>;
   /** Close the control connection (no-op if it was never established). */
   close(): Promise<void>;
 }
@@ -69,6 +79,17 @@ export async function attachControlChannel(
       control
         ? control.request<T>(method, params)
         : opts.fallbackClient.request<T>(method, params, 0),
+    call: <M extends IpcMethodName>(
+      method: M,
+      ...args: IpcMethodMap[M]["params"] extends void
+        ? [params?: undefined, timeoutMs?: number]
+        : [params: IpcMethodMap[M]["params"], timeoutMs?: number]
+    ): Promise<IpcMethodMap[M]["result"]> => {
+      const [params, timeoutMs] = args;
+      return control
+        ? control.call(method, params as never, timeoutMs)
+        : opts.fallbackClient.call(method, params as never, 0);
+    },
     close: async () => {
       await control?.disconnect();
     },

@@ -49,7 +49,7 @@ export const shutdownCommand: CliCommand = {
       }
     } catch {}
     try {
-      await ctx.client.request("shutdown");
+      await ctx.client.call("shutdown");
     } catch {}
     await ctx.control.close().catch(() => {});
     await ctx.client.disconnect();

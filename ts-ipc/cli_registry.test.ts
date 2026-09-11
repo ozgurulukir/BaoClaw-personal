@@ -13,14 +13,17 @@ import {
 import type { CliContext, CommandEntry } from "./cli/types.js";
 
 function createMockContext(overrides: Partial<CliContext> = {}): CliContext {
+  const defaultReq = async () => ({});
   return {
     client: {
       connected: true,
-      request: async () => ({}),
+      request: defaultReq,
+      call: async (method: string, ...args: any[]) => defaultReq(),
       disconnect: async () => {},
     } as any,
     control: {
       request: async () => ({}),
+      call: async () => ({}),
       close: async () => {},
     } as any,
     socketPath: "/tmp/mock.sock",
@@ -199,6 +202,10 @@ describe("CommandRegistry", () => {
           if (method === "abort") abortRequested = true;
           return {};
         },
+        call: async (method: string) => {
+          if (method === "abort") abortRequested = true;
+          return { aborted: true };
+        },
       } as any,
       rl: { prompt: () => (prompted = true) } as any,
       isStreaming: true,
@@ -217,13 +224,17 @@ describe("CommandRegistry", () => {
     let requestedSettings: any = null;
     let prompted = false;
 
+    const handleUpdateSettings = async (method: string, params: any) => {
+      if (method === "updateSettings") requestedSettings = params.settings;
+      return {};
+    };
+
     const ctx = createMockContext({
       thinkingEnabled: false,
       client: {
-        request: async (method: string, params: any) => {
-          if (method === "updateSettings") requestedSettings = params.settings;
-          return {};
-        },
+        request: handleUpdateSettings,
+        call: async (method: string, params: any) =>
+          handleUpdateSettings(method, params),
       } as any,
       rl: { prompt: () => (prompted = true) } as any,
     });
@@ -240,24 +251,27 @@ describe("CommandRegistry", () => {
     let queried = false;
     let prompted = false;
 
+    const handleListTools = async (method: string) => {
+      if (method === "listTools") {
+        queried = true;
+        return {
+          tools: [
+            {
+              name: "bash",
+              description: "Execute bash",
+              type: "builtin",
+            },
+          ],
+          count: 1,
+        };
+      }
+      return {};
+    };
+
     const ctx = createMockContext({
       client: {
-        request: async (method: string) => {
-          if (method === "listTools") {
-            queried = true;
-            return {
-              tools: [
-                {
-                  name: "bash",
-                  description: "Execute bash",
-                  type: "builtin",
-                },
-              ],
-              count: 1,
-            };
-          }
-          return {};
-        },
+        request: handleListTools,
+        call: async (method: string) => handleListTools(method),
       } as any,
       rl: { prompt: () => (prompted = true) } as any,
     });

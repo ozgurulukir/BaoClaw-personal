@@ -30,12 +30,7 @@ export const compactCommand: CliCommand = {
   execute: async (_args: string, ctx: CliContext): Promise<void> => {
     ctx.startSpinner("Compacting conversation...");
     try {
-      const result = await ctx.client.request<{
-        tokens_saved: number;
-        summary_tokens: number;
-        tokens_before: number;
-        tokens_after: number;
-      }>("compact");
+      const result = await ctx.client.call("compact");
       ctx.stopSpinner();
       if (result.tokens_saved === 0) {
         console.log(`\n${DIM}Not enough messages to compact.${RESET}\n`);
@@ -72,7 +67,7 @@ export const sessionCommand: CliCommand = {
   description: "Show current session info",
   execute: async (_args: string, ctx: CliContext): Promise<void> => {
     try {
-      const result = await ctx.client.request<any>("session.info", {});
+      const result = await ctx.client.call("session.info");
       const formatDate = (iso?: string) => {
         if (!iso) return "Just now";
         try {
@@ -128,7 +123,7 @@ export const statusCommand: CliCommand = {
     console.log(`\n${FG_ORANGE}${BOLD}Status${RESET}`);
     console.log(`  ${FG_WHITE}Daemon:${RESET}  ${connected}`);
     try {
-      const info = await ctx.client.request<any>("session.info", {});
+      const info = await ctx.client.call("session.info");
       console.log(
         `  ${FG_WHITE}Session:${RESET} ${FG_CYAN}${String(info.session_id ?? "?").slice(0, 8)}${RESET}`,
       );
@@ -154,11 +149,10 @@ export const exportCommand: CliCommand = {
     const outputPath = args.trim();
     ctx.startSpinner("Exporting conversation...");
     try {
-      const result = await ctx.client.request<{
-        file_path: string;
-        message_count: number;
-        size_bytes: number;
-      }>("export", outputPath ? { output_path: outputPath } : {});
+      const result = await ctx.client.call(
+        "export",
+        outputPath ? { output_path: outputPath } : {},
+      );
       ctx.stopSpinner();
       console.log(`\n${FG_GREEN}${BOLD}Exported${RESET}`);
       console.log(`  ${FG_WHITE}File:${RESET}     ${result.file_path}`);
@@ -194,10 +188,10 @@ export const searchCommand: CliCommand = {
     const query = tokens.join(" ");
     ctx.startSpinner("Searching history...");
     try {
-      const result = await ctx.client.request<{
-        results: SearchResult[];
-        count: number;
-      }>("searchHistory", { query, max_results: limit });
+      const result = await ctx.client.call("searchHistory", {
+        query,
+        max_results: limit,
+      });
       ctx.stopSpinner();
       if (!result.results || result.results.length === 0) {
         console.log(`\n${DIM}No results for "${query}"${RESET}\n`);
